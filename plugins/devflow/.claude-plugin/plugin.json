@@ -1,0 +1,11 @@
+{
+  "name": "devflow",
+  "version": "0.1.0",
+  "description": "Developer workflow automation for code review, pull requests, and daily engineering tasks",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["code-review", "pull-request", "git", "workflow", "engineering", "productivity"]
+}
