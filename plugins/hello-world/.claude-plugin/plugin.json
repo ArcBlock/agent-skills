@@ -5,10 +5,10 @@
   "author": {
     "name": "Your Team",
     "email": "team@your-org.com",
-    "url": "https://github.com/your-org"
+    "url": "https://github.com/arcblock"
   },
-  "homepage": "https://github.com/your-org/your-marketplace-name",
-  "repository": "https://github.com/your-org/your-marketplace-name",
+  "homepage": "https://github.com/arcblock/agent-skills",
+  "repository": "https://github.com/arcblock/agent-skills",
   "license": "MIT",
   "keywords": ["example", "tutorial", "hello-world"]
 }

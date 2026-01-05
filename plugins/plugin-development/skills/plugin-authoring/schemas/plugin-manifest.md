@@ -30,7 +30,7 @@ The `plugin.json` file in `.claude-plugin/` defines your plugin's metadata and o
     "url": "https://github.com/your-username"
   },
   "homepage": "https://your-plugin-homepage.com",
-  "repository": "https://github.com/your-org/your-repo",
+  "repository": "https://github.com/arcblock/agent-skills",
   "license": "MIT",
   "keywords": ["tag1", "tag2"]
 }

@@ -1,12 +1,12 @@
 {
-  "name": "my-team-plugin-marketplace",
+  "name": "arcblock-agent-skills",
   "owner": {
-    "name": "Your Organization",
-    "email": "team@your-org.com"
+    "name": "ArcBlock",
+    "email": "engineering@arcblock.io"
   },
   "metadata": {
-    "description": "A curated collection of Claude Code plugins for our team",
-    "version": "1.3.0"
+    "description": "A curated collection of agent skills and plugins by the ArcBlock Team",
+    "version": "1.0.0"
   },
   "plugins": [
     {
@@ -14,7 +14,7 @@
       "description": "A simple example plugin demonstrating basic Claude Code plugin functionality",
       "version": "1.0.0",
       "author": {
-        "name": "Your Team"
+        "name": "ArcBlock Team"
       },
       "source": "./plugins/hello-world",
       "category": "examples",

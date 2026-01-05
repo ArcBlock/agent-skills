@@ -273,7 +273,7 @@ Plugin entries can override default component locations and provide inline confi
 ### Add Marketplace (GitHub)
 
 ```bash
-/plugin marketplace add your-org/your-repo
+/plugin marketplace add your-org/agent-skills
 ```
 
 ### Install Plugin from Marketplace

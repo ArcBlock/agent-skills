@@ -36,7 +36,7 @@ If you're using this template to create your own marketplace:
    ```
 3. **Install the plugin**:
    ```bash
-   /plugin install plugin-development@your-marketplace-name
+   /plugin install plugin-development@agent-skills
    ```
 
 ### Local Development Setup
@@ -190,7 +190,7 @@ Before starting plugin development:
 
 1. **Clone or download this template**:
    ```bash
-   git clone https://github.com/your-org/claude-code-plugin-template.git
+   git clone https://github.com/arcblock/claude-code-plugin-template.git
    cd claude-code-plugin-template
    ```
 
