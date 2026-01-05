@@ -1,0 +1,11 @@
+{
+  "name": "blocklet",
+  "version": "0.1.0",
+  "description": "Agent skills for converting web projects to ArcBlock blocklets and managing releases",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["blocklet", "arcblock", "web3", "decentralized"]
+}
