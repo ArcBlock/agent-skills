@@ -10,16 +10,28 @@
   },
   "plugins": [
     {
-      "name": "hello-world",
-      "description": "A simple example plugin demonstrating basic Claude Code plugin functionality",
-      "version": "1.0.0",
+      "name": "blocklet",
+      "description": "Agent skills for converting web projects to ArcBlock blocklets and managing releases",
+      "version": "0.1.0",
       "author": {
         "name": "ArcBlock Team"
       },
-      "source": "./plugins/hello-world",
-      "category": "examples",
-      "tags": ["example", "tutorial", "getting-started"],
-      "keywords": ["example", "tutorial", "getting-started"]
+      "source": "./plugins/blocklet",
+      "category": "developer-tools",
+      "tags": ["blocklet", "arcblock", "web3", "decentralized"],
+      "keywords": ["blocklet", "arcblock", "web3", "decentralized"]
+    },
+    {
+      "name": "devflow",
+      "description": "Developer workflow automation for code review, pull requests, and daily engineering tasks",
+      "version": "0.1.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/devflow",
+      "category": "developer-tools",
+      "tags": ["code-review", "pull-request", "git", "workflow", "engineering", "productivity"],
+      "keywords": ["code-review", "pull-request", "git", "workflow", "engineering", "productivity"]
     },
     {
       "name": "plugin-development",
