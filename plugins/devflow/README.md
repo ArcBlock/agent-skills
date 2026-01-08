@@ -20,6 +20,7 @@ Developer workflow automation for code review, pull requests, and daily engineer
 
 - **code-review**: Automated code review with team standards and best practices
 - **pull-request**: Create well-structured PRs with proper descriptions and context
+- **diff-review-doc**: Generate comprehensive, reviewer-ready code review documents from git diffs with detailed analysis covering change overview, business flow, key code explanation, risk assessment, and review recommendations
 
 ### Agents
 
