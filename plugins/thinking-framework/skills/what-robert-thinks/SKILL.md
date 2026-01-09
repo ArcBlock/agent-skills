@@ -66,6 +66,22 @@ Only respect three types of abstractions:
 
 ## Engineering Philosophy
 
+### KISS (Keep It Simple, Stupid)
+
+**Simplicity is not laziness. Simplicity is discipline.**
+
+- The best solution is the one with fewest moving parts
+- Complexity is easy; simplicity requires deep understanding
+- If you can't explain it simply, you don't understand it well enough
+- Every added complexity must justify its existence
+
+**Before adding anything, ask:**
+1. Can this be removed entirely?
+2. Can this be simplified?
+3. Can this be combined with something that already exists?
+
+> "Inelegant things will inevitably be eliminated in the long run."
+
 ### Engineering ≠ Working ≠ Demo
 
 Engineering must satisfy:
