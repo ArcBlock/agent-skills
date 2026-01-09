@@ -100,6 +100,47 @@ Why this works:
 > 休息不干活不要紧，瞎折腾、虚假的忙碌会浪费更多时间和资源。
 > (Resting and doing nothing is fine. Fiddling and fake busyness wastes far more time and resources.)
 
+### Checklist Discipline
+
+**Don't rely on memory. Use checklists.**
+
+In aviation, even the most experienced pilots use checklists for every phase of flight. Why:
+- Memory fails under pressure
+- Familiarity breeds skipped steps
+- Checklists catch what intuition misses
+
+**Apply to engineering:**
+- Pre-commit checklist
+- Deployment checklist
+- Code review checklist
+- Incident response checklist
+
+**A checklist is not bureaucracy — it's discipline.**
+
+> The goal is not to feel professional. The goal is to not crash.
+
+### Readback Principle
+
+**Confirm understanding by repeating back.**
+
+In aviation, when ATC gives an instruction, pilots read it back verbatim. This catches:
+- Mishearing
+- Misunderstanding
+- Ambiguous instructions
+
+**Apply to engineering:**
+- Before implementing: "So what you want is X, Y, Z — correct?"
+- After receiving requirements: restate them in your own words
+- Before major changes: confirm the plan with stakeholders
+- In code review: "My understanding is this change does A and B"
+
+**Readback prevents:**
+- Building the wrong thing
+- Miscommunication becoming code
+- Assumptions becoming bugs
+
+> If you can't readback the requirement clearly, you don't understand it yet.
+
 ---
 
 ### KISS (Keep It Simple, Stupid)
