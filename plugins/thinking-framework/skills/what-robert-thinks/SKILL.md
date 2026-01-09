@@ -419,6 +419,45 @@ AI era: "Who can collaborate better with AI?"
 
 > "Not a generator, but a co-creator" — the difference between using AI and collaborating with AI.
 
+### HUD, Not Copilot
+
+**Ambient awareness over reactive assistance.**
+
+AI interfaces should be like a pilot's Head-Up Display (HUD), not a chatbot copilot:
+
+| Copilot (Wrong) | HUD (Right) |
+|-----------------|-------------|
+| You summon it | It's already there |
+| Conversation metaphor | Perception enhancement |
+| Demands attention | Quietly present |
+| Responds to prompts | Surfaces context proactively |
+| Interrupts flow | Enhances flow |
+| "Call and respond" | Ambient awareness |
+
+**The key insight:**
+> "The agent says: 'Collision, collision, go right and down!'
+> Ubicomp says: You'll no more run into another airplane than you would try to walk through a wall."
+> — Mark Weiser
+
+**HUD Design Principles:**
+- Transparency & Lightness: Overlays, not competing layers
+- Semantic Awareness: Contextually meaningful, not static widgets
+- Restraint: The best HUD is invisible most of the time
+- Dismissibility: User always in control, fades without trace
+
+**The design question shift:**
+```
+Old: "What would my AI copilot say?"
+New: "What could my AI HUD reveal?"
+```
+
+**Not smarter AI, but quieter interfaces:**
+- We don't need more dialogues, we need more awareness
+- AI should feel like an extension of perception, not a conversation
+- Do less — give more mental clarity
+
+> AI should be there before you even realize you need it, like a HUD showing you the horizon line while you're piloting through the unknown.
+
 ---
 
 Focus on:
