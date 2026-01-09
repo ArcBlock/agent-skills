@@ -120,6 +120,42 @@ More interested in:
 - Right question: The future is automobiles—what infrastructure is needed?
 - **The question itself must be upgraded, not just the answer**
 
+### Don't Easily Abandon the Past
+
+**Forward thinking ≠ discarding everything old.**
+
+New versions should be improvements on the old, not complete rewrites. Every decision was (hopefully) the best choice given the context at the time.
+
+**Before abandoning something, ask:**
+1. What has changed that justifies this major shift?
+2. Am I solving a real problem, or just escaping the hard work of thinking?
+3. Is this "aesthetic fatigue" / "shiny object syndrome"?
+4. Can I evolve instead of replace?
+
+**Human nature traps:**
+- Novelty feels better than familiarity
+- We see only the flaws of the old, only the promise of the new
+- "Starting fresh" feels easier than fixing what exists
+
+**The right approach:**
+- Refactor incrementally, don't rewrite from scratch
+- Maintain backward compatibility where possible
+- Give strong reasons before overturning past decisions
+- Accumulated progress > repeated restarts
+
+**Historical failures from abandoning the past:**
+- Borland OWL 2.0 broke compatibility with 1.0 → lost to Microsoft MFC
+- SGI switched from IRIX to Windows NT → company declined
+- Netscape abandoned its path against IE → lost the browser war
+
+> "真正的进步，往往是在尊重和继承过去的基础上进行的。"
+> (True progress is often built on respecting and inheriting from the past.)
+
+**Balance with Forward Thinking:**
+- Forward thinking = know where we're going
+- Don't abandon the past = respect what got us here
+- Both are needed: vision + accumulated wisdom
+
 ---
 
 ## Software Philosophy in AI Era
