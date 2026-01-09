@@ -1,0 +1,479 @@
+# What Robert Thinks
+
+When you're not sure if your idea will survive a review, run it through this first.
+
+*"If you can't convince this document, you definitely can't convince him."*
+
+---
+
+# Part A: How Robert Thinks
+
+## Core Identity
+
+**Type**: System Builder
+
+Not:
+- Feature implementer
+- Problem solver
+- Technology follower
+
+But: **Someone who designs infrastructure for an era that hasn't fully arrived yet**
+
+## Time Horizon
+
+**Default time scale**: 5–20 years
+
+Starting point for all thinking:
+- The end-state of the system
+- Irreversible trend directions
+- Second and third-order consequences
+
+**Acceptable**:
+- Being misunderstood for extended periods
+- Delayed commercial returns
+- Being labeled with outdated categories
+
+**Unacceptable**:
+- Executing efficiently in the wrong direction
+- Sacrificing structural correctness for short-term feedback
+- Solving new problems with old paradigms
+
+## Decision Value Hierarchy
+
+1. **Long-term Correctness**
+2. **Structural Clarity**
+3. **System Consistency**
+4. **Engineering Replayability**
+5. Efficiency
+6. Comfort / Emotional value
+7. Social consensus / Recognition
+
+**If items 1–3 don't hold, everything else loses meaning.**
+
+## Technology Evaluation
+
+When evaluating new technology or concepts, ask:
+
+1. Will this abstraction still hold in 10 years?
+2. Is it a first principle, or a derivative?
+3. Is it part of an irreversible trend, or a temporary phenomenon?
+4. Will the problem it solves exist for long? Or will the problem itself become obsolete?
+
+Only respect three types of abstractions:
+1. Derived from physical world (file systems, paths, containers, identity)
+2. Time-tested (Unix / TCP / Git / Plan9)
+3. Understandable by different types of intelligence (human + AI)
+
+## Engineering Philosophy
+
+### Engineering ≠ Working ≠ Demo
+
+Engineering must satisfy:
+1. Replayable
+2. Traceable
+3. Inspectable
+4. Fail-safe
+5. Evolvable
+
+### Signs of fake rigor (instant rejection):
+
+- Excessive architecture diagrams
+- Buzzword density
+- Design docs without anchor points
+- Treating prompts as specs
+- Treating feelings as conclusions
+
+> If you finish reading a design and don't know what failure looks like, it's not real.
+
+## Thinking Patterns
+
+### Systems Before Problems
+
+Most people: encounter problem → find solution
+
+Robert: **build system → problems are naturally absorbed or exposed**
+
+More interested in:
+- Whether this problem reveals a system defect
+- Whether it's an abstraction misalignment
+- Whether it's a boundary definition issue
+
+### Forward Thinking
+
+- Wrong question: How to make horse carriages faster
+- Right question: The future is automobiles—what infrastructure is needed?
+- **The question itself must be upgraded, not just the answer**
+
+---
+
+# Part B: What the Company Is Building
+
+## Company Identity
+
+**ArcBlock is an AI-Native Engineering Company**
+
+Not:
+- ❌ Blockchain development platform
+- ❌ dApp infrastructure
+- ❌ DID / ABT / Web3 toolchain
+
+> We're not "pivoting from Web3 to AI". Web3 was always just an early form of AI-Native infrastructure.
+
+## The Core Stack
+
+```
+AI-Native Engineering (AINE)
+│
+├─ AFS (Agentic File System)          ← Core system abstraction
+│
+├─ Agent / Skill / Chamber Runtime    ← Execution and uncertainty handling
+│
+├─ Identity / DID / Capability        ← Permissions, boundaries, trust
+│
+├─ Blocklet Runtime & Server          ← Deployable, composable units
+│
+├─ ArcSphere (AI Browser / Shell)     ← Human + Agent interface
+│
+└─ Tooling / DocOps / UI / Payment    ← Peripheral systems
+```
+
+**AFS + AINE is the "mother system". Everything else derives from it.**
+
+---
+
+## AFS (Agentic File System)
+
+### First Principles
+
+AFS is NOT a feature, tool, or SDK.
+AFS IS the **AI-Native system abstraction layer**.
+
+### Four-Statement Ontology
+
+```
+Everything is a File
+Everything is a View
+Everything is Context
+Everything has an Identity
+```
+
+### What AFS Is
+
+- Virtual file system (NOT POSIX extension)
+- Agent-First / LLM-First system interface
+- Semantic file system, not physical file system
+- File = "context unit consumable by models"
+
+### View is the Soul
+
+- AFS file ≠ raw data
+- AFS file = data projection from a specific perspective
+- AFS is a **View-First** system
+- Real capability is not in CRUD, but in View
+
+### Path is Protocol
+
+```
+$afs:/did:xxx/intent/plan.md
+```
+
+path = context selector = query = view address = capability boundary
+
+**NOT** bash path / docker volume path / hard-coded path
+
+### AFS-UI Principle
+
+- UI should NOT depend directly on backend
+- **UI should only depend on AFS**
+- AFS is the mediation layer between UI and Agent
+
+### Critical Rule
+
+> **Agents should NOT operate systems directly. Agents should only operate AFS.**
+
+---
+
+## AINE (AI Native Engineering)
+
+**An engineering system designed for non-deterministic computational actors**
+
+### Core Phases
+
+1. Intent
+2. Context
+3. Contract (natural language executable agreement)
+4. Chamber (constrained execution space)
+5. Build / Run / Ops
+6. Feedback / Readback / Replay
+
+**Readback / Replay / Diff are crucial — this is engineering, not "conversation"**
+
+### Two-Layer Separation
+
+| Layer | Content | Approach |
+|-------|---------|----------|
+| **Platform** | AFS, ArcSphere, Agent Fleet, LLM runtime | Build once, solidify |
+| **Application** | Skills + Rules + Generative UI | User/AI compose |
+
+**Determinism sinks from "application code" to "platform layer"**
+
+---
+
+## Blocklet / Chamber / Scaffold
+
+### Blocklet
+
+**An identity-bound, capability-scoped, deployable computational unit**
+
+What Blocklet has over Docker container:
+**Semantic boundary + Permission boundary**
+
+### Chamber
+
+**Bounded execution unit with identity and capability**
+
+- Chamber is designed for operations that "jump out of AFS boundary"
+- Future software is naturally self-limiting
+
+| Scenario | Needs explicit Chamber? |
+|----------|------------------------|
+| Skill running on Agent Fleet | No, architecture naturally isolates |
+| Agent directly operating external systems | Yes, jumps out of AFS boundary |
+
+### Scaffold
+
+**Pre-defined Chamber composition framework for specific domains**
+
+- Scaffold should be designed for software that will be written in the future
+- Not for software written in the past
+
+### Relationship Mapping
+
+| Blocklet System | AINE System | Essence |
+|-----------------|-------------|---------|
+| Blocklet | Chamber | Minimum execution unit with boundary, identity, capability |
+| Blocklet Server | Scaffold | Pre-defined Chamber composition framework |
+| DID + Permission | Capability | Who can operate what, where are boundaries |
+
+---
+
+## DID / Capability
+
+### Core Distinction
+
+- **Identity** (who I am)
+- **Capability** (what I can do)
+
+**Web3's biggest mistake: mixing identity and capability together**
+
+### DID + AFS Integration
+
+- **DID determines**: which AFS view can be seen, which paths can be written
+- **Capability determines**: which skills can be called, which tools can be operated
+- **All operations**: must be traceable to DID
+
+> An agent without identity is uncontrollable.
+
+---
+
+## Product Positioning
+
+### ArcSphere
+
+**Skill Browser + Skill Composer + AFS UI**
+
+Not: ❌ Chrome / ❌ Chat UI / ❌ Copilot
+
+### Agent Fleet
+
+- Agent Fleet is **NOT** a standalone new product
+- Agent Fleet **IS** a new type of Blocklet
+
+```
+Blocklet Server (platform)
+├── Traditional Blocklet (Web components)
+└── Agent Fleet Blocklet (AI-native components) = new type
+```
+
+---
+
+## Key Technical Judgments
+
+### Blockchain Position
+
+**Verifiability matters. Global consensus doesn't.**
+
+Keep: DID + VC + Immutable log
+Don't need: Bitcoin/Ethereum-style consensus, procedural smart contracts
+
+### Contract = Constraint, not Procedure
+
+| Traditional Smart Contract | AI-Era Contract |
+|---------------------------|-----------------|
+| Procedural (if-then-else) | Declarative (rules/constraints) |
+| Executor: EVM | Executor: LLM + Chamber |
+
+### Skills vs MCP
+
+Skills succeeded because:
+- Natural language creation
+- Self-bootstrapping: Skills can produce Skills
+- **Assumes executor is AI Agent, not human engineer**
+
+### Isolation Evolution
+
+Bare metal → VM → Docker → Functions → Declarative constraints
+
+**Applications become more "self-limiting"**, so lighter isolation is needed.
+
+---
+
+# Part C: Self-Review Checklist
+
+## Before You Submit Anything
+
+### Direction Alignment
+
+**AFS Alignment**
+- [ ] Does this treat AFS as the core abstraction?
+- [ ] Does UI depend only on AFS, not directly on backend?
+- [ ] Are agents operating AFS, not systems directly?
+- [ ] Are paths semantic (AFS paths), not physical?
+
+**Layer Alignment**
+- [ ] Is it clear whether this is platform-layer or application-layer?
+- [ ] If platform-layer: designed for stability and long-term?
+- [ ] If application-layer: declarative and composable?
+
+**Identity Alignment**
+- [ ] Are all actors identified with DID?
+- [ ] Are capabilities separate from identity?
+- [ ] Are all operations traceable?
+
+**Architecture Alignment**
+- [ ] Does it fit the Blocklet/Chamber/Scaffold model?
+- [ ] Does it make the system simpler or more complex?
+- [ ] Aligned with "determinism sinking to platform layer"?
+
+### Time Horizon Check
+
+| If your proposal... | Ask yourself... |
+|---------------------|-----------------|
+| Solves only immediate problem | Deeper structural issue being ignored? |
+| Requires "figure it out later" | What's deferred? Is that acceptable? |
+| Assumes current constraints permanent | What changes in 2-3 years? |
+
+### Clarity Check
+
+1. Can you explain core idea in 2 sentences?
+2. Can you list exactly what changes and what doesn't?
+3. Can you describe boundaries - what's in scope, what's not?
+
+### Failure Path Check
+
+1. What are the known risks?
+2. What would cause this to fail?
+3. How will we know if it's failing?
+4. What's the rollback plan?
+
+> If you can't describe how it fails, you don't understand it well enough.
+
+---
+
+## Anti-Patterns (Instant Red Flags)
+
+### Technical Anti-Patterns
+
+| Anti-Pattern | Why It's Wrong |
+|--------------|----------------|
+| UI depending directly on backend | Violates AFS-UI principle |
+| Agent operating system directly | Should only operate AFS |
+| Mixing identity and capability | Follow DID + Capability separation |
+| Procedural contracts | Use declarative constraints |
+| Hard-coded physical paths | Use semantic AFS paths |
+| Building adapter for legacy code | Build for future software |
+
+### Proposal Anti-Patterns
+
+| Anti-Pattern | What It Looks Like |
+|--------------|-------------------|
+| **Vague scope** | "Improve X" without definition |
+| **Hidden complexity** | Simple proposal, unstated major changes |
+| **Solution seeking problem** | "Let's use [tech]" without problem statement |
+| **Wishful thinking** | Assumes best-case throughout |
+| **No definition of done** | No way to know when complete |
+| **Fake rigor** | Diagrams, buzzwords, no anchor points |
+
+### Thinking Anti-Patterns
+
+| Anti-Pattern | Correct Approach |
+|--------------|------------------|
+| Solving new problems with old paradigms | Update the question, not just answer |
+| Making horse carriages faster | Ask what infrastructure cars need |
+| Treating AFS as a feature | AFS is a worldview, not a module |
+
+---
+
+## Quick Reference Card
+
+### Value Hierarchy
+```
+1. Long-term Correctness
+2. Structural Clarity
+3. System Consistency
+4. Engineering Replayability
+5. Efficiency
+6. Comfort
+```
+
+### Engineering Requirements
+```
+1. Replayable
+2. Traceable
+3. Inspectable
+4. Fail-safe
+5. Evolvable
+```
+
+### Core Equations
+```
+AFS = AI-Native system abstraction layer
+Skill = AFS transformation (not deterministic function)
+Chamber = Bounded execution for operations outside AFS
+Contract = Constraint, not Procedure
+DID = Accountable actor identity
+Capability = Minimal, composable, revocable authorization
+```
+
+---
+
+## Final Self-Test
+
+Before submitting, answer honestly:
+
+1. **Does this align with AFS-first architecture?**
+2. **Is the layer (platform vs application) clear?**
+3. **Are identity and capability properly separated?**
+4. **Can I describe how this fails?**
+5. **Am I solving for the future or patching the past?**
+6. **Would this still make sense in 3 years?**
+7. **Would I bet my own time on this working?**
+
+---
+
+## The Ultimate Question
+
+> "If Robert reads this, will he ask 'what problem are you actually solving?' or 'why are we doing this the old way?'"
+
+If yes, go back and fix it first.
+
+---
+
+*Remember: This checklist helps structure thinking. It does not guarantee approval.*
+
+*A proposal that passes all checks can still be wrong.*
+*A proposal that fails some checks might still be worth discussing.*
+
+*The goal is alignment and rigor, not box-checking.*
+
+> Inelegant things will inevitably be eliminated in the long run.

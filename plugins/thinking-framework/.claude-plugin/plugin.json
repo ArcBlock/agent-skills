@@ -1,0 +1,11 @@
+{
+  "name": "thinking-framework",
+  "version": "0.1.0",
+  "description": "ArcBlock's technical thinking framework and proposal review methodology for team alignment",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["thinking", "methodology", "proposal-review", "architecture", "AFS", "AINE", "engineering"]
+}
