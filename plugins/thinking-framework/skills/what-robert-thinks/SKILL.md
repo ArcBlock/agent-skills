@@ -1,3 +1,8 @@
+---
+name: what-robert-thinks
+description: Evaluate proposals, technical decisions, and product directions against Robert's thinking patterns, ArcBlock's AFS/AINE architecture, and engineering philosophy. Use when reviewing proposals, evaluating technologies, or self-reviewing designs.
+---
+
 # What Robert Thinks
 
 When you're not sure if your idea will survive a review, run it through this first.
