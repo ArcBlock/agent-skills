@@ -141,6 +141,41 @@ In aviation, when ATC gives an instruction, pilots read it back verbatim. This c
 
 > If you can't readback the requirement clearly, you don't understand it yet.
 
+### Extreme Precision in Naming and Expression
+
+**Inaccuracy is where misunderstanding begins.**
+
+Code style, variable naming, and text expression must be precise — not for aesthetics, but because:
+- Wrong names create wrong mental models
+- Wrong mental models create wrong code
+- Wrong code creates wrong systems
+- The error compounds at every layer
+
+**Naming precision:**
+- A variable named `data` tells you nothing
+- A variable named `userSessionToken` tells you exactly what it is
+- The cost of a good name: seconds
+- The cost of a bad name: hours of confusion, bugs, miscommunication
+
+**Expression precision:**
+- "It handles the thing" → useless
+- "It validates user input and returns sanitized data" → useful
+- Vague writing = vague thinking
+- If you can't express it precisely, you don't understand it precisely
+
+**This is not pedantry. This is engineering.**
+
+Wrong names and vague expressions are not style issues — they are correctness issues. They are the seeds of bugs, miscommunication, and technical debt.
+
+**Standard:**
+- Code should read like well-written prose
+- Names should be self-documenting
+- Comments should explain "why", not "what"
+- Documentation should be precise enough to act on
+
+> 表达不准确是错误理解的开始。
+> (Imprecise expression is where misunderstanding begins.)
+
 ---
 
 ### KISS (Keep It Simple, Stupid)
