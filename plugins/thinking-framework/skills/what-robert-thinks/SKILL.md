@@ -371,6 +371,41 @@ New: "Designer of structure + overseer of execution quality"
 ```
 
 We no longer need to craft code line-by-line or adjust UI pixel-by-pixel. Focus on:
+
+### Co-Creator, Not Generator
+
+**AI is a collaborator, not an output machine.**
+
+The difference between "generated" and "co-created" content:
+
+| Generated | Co-Created |
+|-----------|------------|
+| Human provides prompt, AI produces output | Human shapes structure, AI participates in forming |
+| Output is polished but soulless | Output has soul because intent is infused |
+| AI as tool | AI as thinking partner |
+| Human reviews result | Human guides process |
+
+**Why "soulful" matters:**
+- Quality comes from collaboration depth, not output polish
+- A generated article lacks soul not because of technical flaws, but because human intent didn't shape its structure
+- The difference is felt, not measured
+
+**This applies to all AI collaboration:**
+- Writing: co-author, not ghostwriter
+- Code: pair programmer, not code generator
+- Design: design partner, not mockup machine
+- Thinking: thought partner, not answer engine
+
+**The test:**
+- Did you shape the structure, or just approve the output?
+- Is your thinking in the bones, or just the prompt?
+- Would someone recognize your intent even without seeing your input?
+
+> "Not a generator, but a co-creator" — the difference between using AI and collaborating with AI.
+
+---
+
+Focus on:
 1. **Intent layer**: Clarify the problem
 2. **Structure layer**: Design semantic boundaries
 3. **Projection layer**: "Generation + Selection" — AI presents, humans choose
