@@ -194,6 +194,35 @@ Wrong names and vague expressions are not style issues — they are correctness 
 
 > "Inelegant things will inevitably be eliminated in the long run."
 
+### Complexity = Smell
+
+**If it's complex and hard to understand, it's probably bad design.**
+
+Complexity is not a sign of sophistication. It's a warning sign.
+
+- Good design feels obvious in hindsight
+- If you need 30 minutes to explain it, something is wrong
+- If newcomers can't understand it quickly, it won't survive
+- If you can't hold it in your head, you can't maintain it
+
+**The test:**
+- Can a competent person understand this in 5 minutes?
+- Can you explain it without referring to the code?
+- Does it have a simple mental model?
+
+If no → redesign, don't document your way out of it.
+
+**Complexity sources (usually fixable):**
+- Unclear boundaries
+- Mixed responsibilities
+- Missing abstractions
+- Wrong abstractions
+- Premature optimization
+- Over-engineering
+
+> 复杂、难理解大概率意味着糟糕的设计。
+> (Complexity and difficulty to understand usually mean bad design.)
+
 ### Engineering ≠ Working ≠ Demo
 
 Engineering must satisfy:
