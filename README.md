@@ -10,8 +10,11 @@ A curated collection of agent skills and Claude Code plugins by the ArcBlock Tea
 # Start Claude Code
 claude
 
-# Add the ArcBlock marketplace
-/plugin marketplace add ArcBlock/agent-skills
+# Add the ArcBlock marketplace (preferred method)
+/plugin marketplace add git@github.com:ArcBlock/agent-skills.git
+
+# Or use the shorthand format
+# /plugin marketplace add ArcBlock/agent-skills
 
 # List available plugins
 /plugin list arcblock-agent-skills
