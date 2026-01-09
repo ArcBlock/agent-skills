@@ -401,6 +401,22 @@ The difference between "generated" and "co-created" content:
 - Is your thinking in the bones, or just the prompt?
 - Would someone recognize your intent even without seeing your input?
 
+**AI shapes us back:**
+
+True collaboration is bidirectional. Working with AI doesn't just produce better output — it transforms how we think:
+- Forces clearer expression (vague input → vague output)
+- Encourages systematic thinking (AI exposes structural gaps)
+- Reveals blind spots (AI asks questions you didn't consider)
+- Enhances self-reflection (explaining to AI = explaining to yourself)
+
+> A true partner is not just about completing tasks but about helping each other improve.
+
+The competition shift:
+```
+Software era: "Whose tools are better?"
+AI era: "Who can collaborate better with AI?"
+```
+
 > "Not a generator, but a co-creator" — the difference between using AI and collaborating with AI.
 
 ---
