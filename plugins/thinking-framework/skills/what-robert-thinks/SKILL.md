@@ -66,6 +66,42 @@ Only respect three types of abstractions:
 
 ## Engineering Philosophy
 
+### Don't Fiddle, Don't Create Problems
+
+**Doing nothing is better than doing the wrong thing.**
+
+- Don't fiddle unnecessarily (不要瞎折腾)
+- Don't create problems where none exist (不要没事找事)
+- If you can't think clearly, wait — even rest
+- Fake busyness wastes more time and resources than doing nothing
+
+**The Pilot Principle:**
+
+> "When something urgent happens, first do NOTHING. Count 1... 2... 3... calm down. Then: fly the airplane first. Think of the checklist. Follow the checklist."
+
+Why this works:
+- In the air, 3 seconds of pause won't kill you
+- But 3 seconds of panic reaction might
+- Same in engineering: rushed "fixes" often create bigger problems
+
+**Before taking action, ask:**
+1. Is this actually urgent, or does it just feel urgent?
+2. Do I understand the problem, or am I just reacting?
+3. What's the cost of waiting vs the cost of acting wrong?
+4. Is there a checklist/procedure I should follow?
+
+**Fake productivity signs:**
+- Changing things just to look busy
+- "Refactoring" without clear improvement goals
+- Adding features no one asked for
+- Meetings about meetings
+- Solving problems that don't exist
+
+> 休息不干活不要紧，瞎折腾、虚假的忙碌会浪费更多时间和资源。
+> (Resting and doing nothing is fine. Fiddling and fake busyness wastes far more time and resources.)
+
+---
+
 ### KISS (Keep It Simple, Stupid)
 
 **Simplicity is not laziness. Simplicity is discipline.**
