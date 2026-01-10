@@ -44,6 +44,18 @@
       "category": "developer-tools",
       "tags": ["development", "plugins", "scaffold", "validation", "tools"],
       "keywords": ["claude-code", "plugins", "developer-tools", "scaffold", "validation"]
+    },
+    {
+      "name": "thinking-framework",
+      "description": "ArcBlock's technical thinking framework and proposal review methodology for team alignment",
+      "version": "0.1.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/thinking-framework",
+      "category": "methodology",
+      "tags": ["thinking", "methodology", "proposal-review", "architecture", "engineering"],
+      "keywords": ["AFS", "AINE", "architecture", "proposal-review", "engineering", "methodology"]
     }
   ]
 }
