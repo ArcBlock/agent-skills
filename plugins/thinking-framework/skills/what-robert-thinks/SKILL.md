@@ -247,6 +247,143 @@ Engineering must satisfy:
 
 > If you finish reading a design and don't know what failure looks like, it's not real.
 
+### Engineering Documents: Anchor Points, Not Methodology Summaries
+
+**Using AI to write is allowed. Producing empty content is not.**
+
+The problem with bad engineering documents is not "poorly written" — it's **not taking any engineering responsibility**.
+
+**What "not taking responsibility" looks like:**
+
+- Long paragraphs explaining methodology, but no concrete decisions
+- Correct terminology everywhere, but applicable to any project
+- Describes "what should happen" but not "what I will do"
+- Reads like AI summarizing a high-level framework
+- Could swap in any other project name and nothing would change
+
+**The anchor point test:**
+
+An engineering document must answer these with specifics:
+
+| Question | Bad Answer | Good Answer |
+|----------|-----------|-------------|
+| Which files need work? | "Large files need splitting" | "`src/xxx.js` (6200 lines), `src/yyy.js` (3400 lines)" |
+| What's the priority? | "We'll tackle high-risk items first" | "Start with `xxx.js` because AI reads it most often" |
+| What's been tried? | "We plan to iterate" | "Ran the flow once, stuck at step 3 because..." |
+| What are the risks? | "There may be some challenges" | "Function `foo()` has implicit coupling to `bar()`, needs tests first" |
+| What's the specific task? | "Improve test coverage" | "Mock out process X in `test/abc.test.js`, reduce runtime from 40s to <2s" |
+
+**The "套话" (stock phrase) detector:**
+
+If you remove all the methodology descriptions and correct-sounding principles, what's left?
+
+- If nothing remains → the document is empty
+- If specific files, specific decisions, specific risks remain → it's real
+
+**Information density test (typical AI symptom):**
+
+高词汇密度 + 低信息密度 = AI 生成的典型症状
+
+| Lots of these (abstract nouns) | Almost none of these (engineering specifics) |
+|-------------------------------|---------------------------------------------|
+| 稳定迭代、工程化、流程 | Specific module names |
+| 能力、体系、支撑、演进 | Real file paths / directories / scripts |
+| 协作、规范、架构、抽象 | Verifiable constraints with numbers |
+| 可观察性、可追溯性 | Explicit trade-offs with reasoning |
+
+**The "tomorrow test":**
+
+> 读完这篇文章后，你能回答这个问题吗：
+> "如果我明天要改一行代码，我应该先做什么？"
+
+If the answer is "I still don't know" → the document is empty.
+
+A real engineering document should let any competent engineer know:
+- Where to start
+- What to check first
+- What might break
+- Who to ask if stuck
+
+**The "correct but non-executable" trap:**
+
+流程描述是"对的"，但完全不可执行。
+
+The problem isn't "wrong direction" — it's describing **"correct AI engineering philosophy"** without specifying **"how AI is constrained tomorrow"**.
+
+| What the document says | What's missing |
+|-----------------------|----------------|
+| "AI 会自动完成..." | Where is AI blocked? |
+| "AI 应该遵循..." | Where will AI fail? |
+| "AI 能够处理..." | Who handles failures? |
+| "AI 按照流程..." | What's the fallback when it doesn't? |
+
+**This is AI writing's most dangerous illusion:**
+
+> 把"工程责任"换成了"工程愿景"。
+> (Substituting "engineering responsibility" with "engineering vision".)
+
+**Engineering responsibility requires answering:**
+
+1. 约束在哪里？ — Where are the hard constraints?
+2. 失败会怎样？ — What happens when it fails?
+3. 谁来兜底？ — Who is accountable when things go wrong?
+4. 如何验证？ — How do we verify it's working?
+
+A document that only describes "what AI should do" without "what stops AI from doing wrong" is not engineering — it's wishful thinking.
+
+> 愿景不是工程。约束才是。
+> (Vision is not engineering. Constraints are.)
+
+**What a responsible engineering document looks like:**
+
+```markdown
+## Files to split (priority order)
+
+1. `blocklet-server/src/xxx.js` (6200 lines)
+   - Why first: AI hits token limit every time it reads this
+   - Split strategy: Separate into A (auth), B (routing), C (state)
+   - Risk: `handleRequest()` has implicit dependency on global state
+   - Pre-work: Add tests for lines 1200-1400 before touching
+
+2. `blocklet-server/src/yyy.js` (3400 lines)
+   - ...
+
+## What we tried and what failed
+
+- Attempted full AI iteration on issue #123
+- Stuck at E2E step: AI couldn't see browser state on failure
+- Temporary fix: Added screenshots at each step
+- Remaining issue: Screenshot doesn't capture console errors
+
+## Known risks
+
+- File split may break implicit imports in 12 places (list attached)
+- E2E migration timeline depends on framework X release
+```
+
+**The rule:**
+
+> 方法论是框架，不是交付物。真正的工程交付是：具体的判断、具体的选择、具体的风险承担。
+> (Methodology is a framework, not a deliverable. Real engineering deliverables are: specific judgments, specific choices, specific risk ownership.)
+
+**AI collaboration done right:**
+
+- ✅ Use AI to help structure your thinking
+- ✅ Use AI to check if you missed something
+- ✅ Use AI to improve clarity of expression
+- ❌ Let AI generate the content while you just approve
+- ❌ Let AI fill pages with correct-sounding abstractions
+- ❌ Substitute methodology description for engineering decisions
+
+**The test:**
+
+Read your document and ask: "Does this show that I understand THIS system specifically, or could any engineer paste this into any project?"
+
+If the latter → rewrite with anchor points.
+
+> 理解方法论 ≠ 工程工作。工程工作 = 具体系统的具体判断。
+> (Understanding methodology ≠ engineering work. Engineering work = specific judgments about a specific system.)
+
 ## Thinking Patterns
 
 ### Systems Before Problems
@@ -771,6 +908,8 @@ Bare metal → VM → Docker → Functions → Declarative constraints
 | **Wishful thinking** | Assumes best-case throughout |
 | **No definition of done** | No way to know when complete |
 | **Fake rigor** | Diagrams, buzzwords, no anchor points |
+| **AI-generated套话** | Methodology summary with no specific files, tasks, or risks. Could apply to any project. |
+| **No engineering responsibility** | Describes "what should happen" but not "what I will do to this specific system" |
 
 ### Thinking Anti-Patterns
 
@@ -826,6 +965,8 @@ Before submitting, answer honestly:
 5. **Am I solving for the future or patching the past?**
 6. **Would this still make sense in 3 years?**
 7. **Would I bet my own time on this working?**
+8. **Does this document have concrete anchor points?** (specific files, specific tasks, specific risks — not just methodology)
+9. **If I remove all the "correct-sounding" methodology descriptions, what's left?** (If nothing → rewrite)
 
 ---
 
