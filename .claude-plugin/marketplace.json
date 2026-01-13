@@ -56,6 +56,30 @@
       "category": "methodology",
       "tags": ["thinking", "methodology", "proposal-review", "architecture", "engineering"],
       "keywords": ["AFS", "AINE", "architecture", "proposal-review", "engineering", "methodology"]
+    },
+    {
+      "name": "arcblock-context",
+      "description": "ArcBlock company knowledge base: products, technical architecture, and strategy. Use /arcblock-context to load context on demand.",
+      "version": "1.0.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/arcblock-context",
+      "category": "knowledge",
+      "tags": ["arcblock", "knowledge-base", "products", "technical", "context"],
+      "keywords": ["arcblock", "products", "technical", "AFS", "AINE", "blocklet", "DID"]
+    },
+    {
+      "name": "content-creation",
+      "description": "AI interview-based content creation system. Creates blogs, social media posts in user's style through structured interviews.",
+      "version": "1.0.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/content-creation",
+      "category": "content",
+      "tags": ["content", "writing", "interview", "blog", "social-media"],
+      "keywords": ["content-creation", "interview", "writing", "blog", "social-media", "multi-language"]
     }
   ]
 }
