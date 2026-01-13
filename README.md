@@ -1,31 +1,61 @@
 # ArcBlock Agent Skills
 
-A curated collection of agent skills and Claude Code plugins by the ArcBlock Team.
+[中文版](README-zh.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+A collection of Claude Code plugins and agent skills built by the ArcBlock team to enhance AI-assisted engineering workflows.
 
-## Installation
+## Philosophy
+
+We believe in **AI-Native Engineering** - treating AI as a first-class collaborator in software development. These plugins encode our team's accumulated knowledge, workflows, and best practices, making them available to Claude on demand.
+
+Key principles:
+- **Context on demand**: Using ALP (Active Loading Policy) to load knowledge when relevant, not all at once
+- **Shared knowledge, personal overrides**: Team knowledge as plugin defaults, with personal/project customization
+- **Interview over automation**: For content creation, AI asks questions rather than generating blindly
+
+## Quick Start
 
 ```bash
 # Start Claude Code
 claude
 
-# Add the ArcBlock marketplace (preferred method)
+# Add the ArcBlock marketplace
 /plugin marketplace add git@github.com:ArcBlock/agent-skills.git
-
-# Or use the shorthand format
-# /plugin marketplace add ArcBlock/agent-skills
 
 # List available plugins
 /plugin list arcblock-agent-skills
 
-# Install a plugin
-/plugin install <plugin-name>@arcblock-agent-skills
+# Install plugins you need
+/plugin install arcblock-context@arcblock-agent-skills
+/plugin install content-creation@arcblock-agent-skills
 ```
+
+## Available Plugins
+
+### Core Knowledge
+
+| Plugin | Description |
+|--------|-------------|
+| **arcblock-context** | Company knowledge base (products, technical architecture, strategy). Loads context on demand via ALP. Use `/arcblock-context` to explore. |
+
+### Engineering Workflow
+
+| Plugin | Description |
+|--------|-------------|
+| **devflow** | Developer workflow automation: code review, pull requests, daily engineering tasks |
+| **blocklet** | Convert web projects to ArcBlock Blocklets and manage releases |
+| **thinking-framework** | Technical thinking framework and proposal review methodology (AFS/AINE) |
+| **plugin-development** | Scaffold, validate, and distribute Claude Code plugins |
+
+### Content Creation
+
+| Plugin | Description |
+|--------|-------------|
+| **content-creation** | AI interview-based writing system. Creates blogs and social media posts in your style through structured interviews. Use `/interview-writer`. |
 
 ## Team Integration
 
-Add this marketplace to your ArcBlock projects by including `.claude/settings.json`:
+Add this to your project's `.claude/settings.json` for automatic access:
 
 ```json
 {
@@ -40,58 +70,34 @@ Add this marketplace to your ArcBlock projects by including `.claude/settings.js
 }
 ```
 
-## Plugin Development
+## Understanding ALP
 
-### 1. Install the Plugin Development Toolkit
+ALP (Active Loading Policy) is a context management pattern we designed. Instead of loading all knowledge upfront, we define explicit rules for what Claude should load based on conversation topics.
 
-```bash
-# Start Claude Code
-claude
+Benefits:
+- Lower token usage (load only what's needed)
+- Faster responses (less context to process)
+- More focused outputs (attention not diluted)
 
-# Add your local marketplace
-/plugin marketplace add .
+See [docs/alp-guide.md](plugins/arcblock-context/docs/alp-guide.md) for the full guide.
 
-# Install the development toolkit
-/plugin install plugin-development@arcblock-agent-skills
-```
+## Override Mechanism
 
-### 2. Create Your First Plugin
+Plugins support a three-level priority chain:
 
-```bash
-# Scaffold a new plugin
-/plugin-development:init my-awesome-plugin
+1. **Project override**: `./.claude/arcblock-context/` - Project-specific customization
+2. **User override**: `~/.claude/arcblock-context/` - Personal customization
+3. **Plugin default**: Shared team knowledge
 
-# Add components
-/plugin-development:add-command my-command "Description of what it does"
-/plugin-development:add-skill my-skill "Use when working with..."
-
-# Validate before publishing
-/plugin-development:validate
-```
-
-### Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `/plugin-development:init [name]` | Scaffold a new plugin |
-| `/plugin-development:add-command [name] [desc]` | Add a slash command |
-| `/plugin-development:add-skill [name] [desc]` | Add a skill |
-| `/plugin-development:add-agent [name] [desc]` | Add a sub-agent |
-| `/plugin-development:add-hook [event] [matcher]` | Add a hook |
-| `/plugin-development:validate` | Validate plugin structure |
-| `/plugin-development:test-local` | Test locally |
+This lets the team maintain authoritative documentation while individuals extend or customize for their needs.
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Add your skill or plugin under `plugins/`
-4. Open a Pull Request
+2. Create your plugin under `plugins/`
+3. Use `/plugin-development:validate` to check structure
+4. Submit a pull request
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-## About ArcBlock
-
-[ArcBlock](https://www.arcblock.io/) is building the decentralized web with blockchain technology. This repository is part of our effort to enhance developer productivity with AI-powered tools.
