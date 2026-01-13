@@ -46,6 +46,7 @@ claude
 | **blocklet** | 将 Web 项目转换为 ArcBlock Blocklet 并管理发布 |
 | **thinking-framework** | 技术思考框架和提案评审方法论（AFS/AINE）|
 | **plugin-development** | 创建、验证和分发 Claude Code 插件 |
+| **aigne** | 使用 AIGNE Framework CLI 构建 AI Agent 的开发指南。涵盖 Agent 类型、技能、工作流和项目配置。|
 
 ### 内容创作
 

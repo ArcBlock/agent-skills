@@ -80,6 +80,18 @@
       "category": "content",
       "tags": ["content", "writing", "interview", "blog", "social-media"],
       "keywords": ["content-creation", "interview", "writing", "blog", "social-media", "multi-language"]
+    },
+    {
+      "name": "aigne",
+      "description": "Development tools and guides for building AI agents using the AIGNE Framework CLI",
+      "version": "0.1.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/aigne",
+      "category": "developer-tools",
+      "tags": ["aigne", "ai-agent", "framework", "cli", "arcblock"],
+      "keywords": ["aigne", "ai-agent", "agent-framework", "yaml", "cli", "workflow"]
     }
   ]
 }

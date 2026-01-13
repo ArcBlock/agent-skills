@@ -46,6 +46,7 @@ claude
 | **blocklet** | Convert web projects to ArcBlock Blocklets and manage releases |
 | **thinking-framework** | Technical thinking framework and proposal review methodology (AFS/AINE) |
 | **plugin-development** | Scaffold, validate, and distribute Claude Code plugins |
+| **aigne** | Development guide for building AI agents using AIGNE Framework CLI. Covers agent types, skills, workflows, and project configuration. |
 
 ### Content Creation
 
