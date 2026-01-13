@@ -5,7 +5,7 @@
 ## 功能
 
 - **自动加载**：通过 `claude.md` 中的 ALP 策略，根据上下文自动加载相关文件
-- **按需查询**：使用 `/company-context` 显式加载公司上下文
+- **按需查询**：使用 `/arcblock-context` 显式加载公司上下文
 - **覆盖机制**：支持项目级和用户级 override
 
 ## 目录结构
@@ -25,8 +25,8 @@ arcblock-context/
 ├── strategy/           # 公司战略
 │   └── README.md
 └── skills/
-    └── company-context/
-        └── SKILL.md    # /company-context 技能
+    └── arcblock-context/
+        └── SKILL.md    # /arcblock-context 技能
 ```
 
 ## 加载优先级
