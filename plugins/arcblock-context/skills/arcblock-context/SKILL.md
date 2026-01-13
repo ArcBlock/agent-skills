@@ -1,18 +1,18 @@
 ---
-name: company-context
-description: Load ArcBlock company context (products, technical architecture, strategy) on demand. Use `/company-context` to see available topics, or `/company-context <topic>` to load specific context.
+name: arcblock-context
+description: Load ArcBlock company context (products, technical architecture, strategy) on demand. Use `/arcblock-context` to see available topics, or `/arcblock-context <topic>` to load specific context.
 ---
 
-# Company Context
+# ArcBlock Context
 
 ArcBlock 公司知识库快速访问入口。
 
 ## Usage
 
 ```
-/company-context              # 显示可用主题列表
-/company-context <topic>      # 加载特定主题
-/company-context all          # 加载全部概览
+/arcblock-context              # 显示可用主题列表
+/arcblock-context <topic>      # 加载特定主题
+/arcblock-context all          # 加载全部概览
 ```
 
 ## Workflow
@@ -66,8 +66,8 @@ ArcBlock 公司知识库快速访问入口。
 - `technical` - 加载技术概览
 - `all` - 加载全部概览
 
-用法: `/company-context <topic>`
-示例: `/company-context afs` 或 `/company-context arcsphere`
+用法: `/arcblock-context <topic>`
+示例: `/arcblock-context afs` 或 `/arcblock-context arcsphere`
 ```
 
 ### Step 3: 有参数时 - 加载上下文
@@ -134,27 +134,27 @@ ArcBlock 公司知识库快速访问入口。
 
 ### 查看可用主题
 ```
-User: /company-context
+User: /arcblock-context
 Claude: [显示完整主题列表]
 ```
 
 ### 加载特定产品
 ```
-User: /company-context arcsphere
+User: /arcblock-context arcsphere
 Claude: ✓ 已加载: products/arcsphere.md
         [输出 ArcSphere 摘要]
 ```
 
 ### 加载技术概览
 ```
-User: /company-context technical
+User: /arcblock-context technical
 Claude: ✓ 已加载: technical/README.md
         [输出技术架构概览]
 ```
 
 ### 加载多个主题
 ```
-User: /company-context afs aine
+User: /arcblock-context afs aine
 Claude: ✓ 已加载: technical/afs.md, technical/aine.md
         [输出两个主题的摘要]
 ```
