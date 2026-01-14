@@ -11,7 +11,7 @@ input_key: message
 output_key: response
 memory: true
 skills:
-  - sandbox.js
+  - sandbox.mjs
 ```
 
 ## Input/Output Configuration
@@ -126,7 +126,7 @@ memory: false  # Stateless (default)
 
 ```yaml
 skills:
-  - sandbox.js
+  - sandbox.mjs
   - filesystem.yaml
   - url: ./tools/search.yaml
     default_input:

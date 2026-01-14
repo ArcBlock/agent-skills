@@ -3,7 +3,7 @@
 ## Overview
 
 Skills provide agents with executable capabilities:
-- **JavaScript Skills**: Custom functions in `.js` files
+- **JavaScript Skills**: Custom functions in `.mjs` files
 - **MCP Skills**: External services via Model Context Protocol in `.yaml` files
 
 ## JavaScript Skills
@@ -68,7 +68,6 @@ export default async function batchProcessor({ items }, options) {
 **Important:**
 - Use `options.context.agents["agent-name"]` to get agent reference
 - Use `options.context.invoke(agent, input)` to call the agent
-- Do NOT import `@anthropic-ai/aigne` package directly
 
 ### Example: Save Output
 
@@ -140,7 +139,7 @@ mode: sequential
 skills:
   - writer.yaml
   - cover-generator.yaml
-  - save-output.js
+  - save-output.mjs
 include_all_steps_output: true
 ```
 
@@ -148,7 +147,7 @@ include_all_steps_output: true
 # aigne.yaml - Register under 'agents', not 'skills'
 agents:
   - article-workflow.yaml
-  - save-output.js
+  - save-output.mjs
 ```
 
 ## MCP Skills
@@ -207,7 +206,7 @@ timeout: 60000
 // skill.test.js
 import assert from "node:assert";
 import test from "node:test";
-import mySkill from "./my-skill.js";
+import mySkill from "./my-skill.mjs";
 
 test("skill processes input correctly", async () => {
   const result = await mySkill({ param: "value" });

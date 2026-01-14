@@ -187,7 +187,7 @@ afs:
         localPath: .
 
 skills:
-  - code-reader.js
+  - code-reader.mjs
 ```
 
 Custom planner/worker/completer can override defaults.

@@ -15,7 +15,7 @@ image_model:
 
 agents:
   - chat.yaml
-  - save-output.js    # Function Agents here too
+  - save-output.mjs    # Function Agents here too
 
 cli:
   agents:
@@ -51,16 +51,16 @@ image_model:
 | Use `agents` for | Use `skills` for |
 |------------------|------------------|
 | All agent types (AI, Team, Image, etc.) | Utility tools for AI agents |
-| Function Agents (.js workflow steps) | MCP tools AI can call |
+| Function Agents (.mjs workflow steps) | MCP tools AI can call |
 
 ```yaml
 agents:
   - chat.yaml              # AI Agent
   - article-workflow.yaml  # Team Agent
-  - save-output.js         # Function Agent (workflow step)
+  - save-output.mjs         # Function Agent (workflow step)
 
 skills:
-  - sandbox.js             # Tool for AI agent to call
+  - sandbox.mjs             # Tool for AI agent to call
 ```
 
 ## CLI Configuration

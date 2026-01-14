@@ -6,7 +6,7 @@
 |------|-------------|---------|
 | AI Agent | `ai` (default) | LLM interaction, tool usage, structured output |
 | Team Agent | `team` | Orchestrate multiple agents |
-| Function Agent | `.js` file | Custom JavaScript logic |
+| Function Agent | `.mjs` file | Custom JavaScript logic |
 | Transform Agent | `transform` | JSONata data transformation |
 | MCP Agent | `mcp` | Connect to MCP servers |
 | Image Agent | `image` | Image generation |
@@ -27,7 +27,7 @@ input_key: message
 output_key: response
 memory: true
 skills:
-  - calculator.js
+  - calculator.mjs
 
 # Tool choice: auto | none | required | router
 tool_choice: auto
@@ -76,7 +76,7 @@ See [workflow-patterns.md](workflow-patterns.md) for detailed patterns.
 JavaScript functions for custom logic. Register under `agents` in aigne.yaml.
 
 ```javascript
-// save-output.js
+// save-output.mjs
 import fs from "node:fs/promises";
 
 export default async function saveOutput({ content, filename }) {
@@ -106,7 +106,7 @@ saveOutput.output_schema = {
 # aigne.yaml
 agents:
   - workflow.yaml
-  - save-output.js  # Function Agents go under 'agents'
+  - save-output.mjs  # Function Agents go under 'agents'
 ```
 
 See [skill-definition.md](skill-definition.md) for complete examples.
@@ -218,7 +218,7 @@ afs:
         localPath: .
 
 skills:
-  - code-reader.js
+  - code-reader.mjs
 ```
 
 Components: Planner → Worker → Completer. Override with custom agents if needed.
