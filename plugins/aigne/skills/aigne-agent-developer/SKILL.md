@@ -88,6 +88,43 @@ reflection:
   max_iterations: 3
 ```
 
+### Reflection Mechanism Details
+
+**Important:** Reflection triggers AFTER all skills complete. The reviewer receives the OUTPUT of the LAST skill.
+
+```yaml
+# ❌ WRONG: reviewer needs {title, article} but gets {success, path} from save-output
+skills:
+  - writer.yaml        # outputs: {title, article}
+  - save-output.mjs    # outputs: {success, path}
+reflection:
+  reviewer: reviewer.yaml  # expects: {title, article} - FAILS!
+
+# ✅ CORRECT: Use nested Team Agent for mid-workflow reflection
+# Step 1: Create writing-with-review.yaml
+name: writing-with-review
+type: team
+mode: sequential
+skills:
+  - writer.yaml        # outputs: {title, article}
+reflection:
+  reviewer: reviewer.yaml  # receives: {title, article} - WORKS!
+
+# Step 2: Use nested team in main pipeline
+name: article-pipeline
+type: team
+mode: sequential
+skills:
+  - writing-with-review.yaml  # outputs reviewed {title, article}
+  - cover-generator.yaml
+  - save-output.mjs
+```
+
+Key rules:
+- Reflection reviewer receives output from the **last skill** in the team
+- If reviewer needs specific fields, ensure the last skill outputs them
+- For mid-workflow review, wrap earlier skills in a nested Team Agent
+
 ## Function Agent (.mjs)
 
 ```javascript
@@ -117,6 +154,33 @@ saveOutput.output_schema = {
   required: ["success", "path"]
 };
 ```
+
+**Calling other agents from Function Agent:**
+
+Function Agent can invoke other agents using `options.context`:
+
+```javascript
+// batch-processor.mjs
+export default async function batchProcessor({ topics }, options) {
+  const results = [];
+
+  // Get agent reference by name
+  const pipeline = options.context?.agents?.["article-pipeline"];
+
+  for (const topic of topics) {
+    // Invoke agent with input
+    const result = await options.context.invoke(pipeline, { topic });
+    results.push(result);
+  }
+
+  return { results, total: results.length };
+}
+```
+
+Key points:
+- Use `options.context.agents["agent-name"]` to get agent reference
+- Use `options.context.invoke(agent, input)` to call the agent
+- Do NOT import `@anthropic-ai/aigne` package directly
 
 ## Image Agent
 
