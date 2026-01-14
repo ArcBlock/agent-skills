@@ -5,7 +5,7 @@ description: Guide for developing AI agents using AIGNE Framework CLI. Use when 
 
 # AIGNE Agent Developer
 
-## Project Structure
+## Quick Start
 
 ```
 my-project/
@@ -15,222 +15,87 @@ my-project/
 └── utils.mjs           # JavaScript skill (.mjs extension required)
 ```
 
-## Agent Types
-
-| Type | YAML `type` | File Extension |
-|------|-------------|----------------|
-| AI Agent | `ai` (default) | `.yaml` |
-| Team Agent | `team` | `.yaml` |
-| Function Agent | - | `.mjs` |
-| Image Agent | `image` | `.yaml` |
-| MCP Agent | `mcp` | `.yaml` |
-
-## aigne.yaml
-
 ```yaml
+# aigne.yaml
 name: my-project
-
 chat_model:
   model: google/gemini-3-pro-preview
-
 image_model:
-  model: google/gemini-3-pro-image-preview  # slash not colon
-
+  model: google/gemini-3-pro-image-preview
 agents:
   - chat.yaml
-  - save-output.mjs
+  - utils.mjs
 ```
-
-## Agent Definition
-
-**All agents require `input_schema` and `output_schema`:**
-
-```yaml
-name: writer
-instructions: |
-  Write an article about {{topic}}.
-input_schema:
-  type: object
-  properties:
-    topic: { type: string, description: Article topic }
-  required: [topic]
-output_schema:
-  type: object
-  properties:
-    article: { type: string }
-    title: { type: string }
-  required: [article, title]
-```
-
-## Team Agent (Workflows)
-
-**Use Team Agent for fixed workflows, not AI Agent with skills:**
-
-```yaml
-# Correct: Fixed sequential workflow (predictable)
-name: main
-type: team
-mode: sequential  # or: parallel
-input_schema:
-  type: object
-  properties:
-    topic: { type: string }
-  required: [topic]
-skills:
-  - writer.yaml
-  - reviewer.yaml
-  - save-output.mjs
-
-# Reflection pattern
-reflection:
-  reviewer: reviewer.yaml
-  is_approved: approved
-  max_iterations: 3
-```
-
-### Reflection Mechanism Details
-
-**Important:** Reflection triggers AFTER all skills complete. The reviewer receives the OUTPUT of the LAST skill.
-
-```yaml
-# ❌ WRONG: reviewer needs {title, article} but gets {success, path} from save-output
-skills:
-  - writer.yaml        # outputs: {title, article}
-  - save-output.mjs    # outputs: {success, path}
-reflection:
-  reviewer: reviewer.yaml  # expects: {title, article} - FAILS!
-
-# ✅ CORRECT: Use nested Team Agent for mid-workflow reflection
-# Step 1: Create writing-with-review.yaml
-name: writing-with-review
-type: team
-mode: sequential
-skills:
-  - writer.yaml        # outputs: {title, article}
-reflection:
-  reviewer: reviewer.yaml  # receives: {title, article} - WORKS!
-
-# Step 2: Use nested team in main pipeline
-name: article-pipeline
-type: team
-mode: sequential
-skills:
-  - writing-with-review.yaml  # outputs reviewed {title, article}
-  - cover-generator.yaml
-  - save-output.mjs
-```
-
-Key rules:
-- Reflection reviewer receives output from the **last skill** in the team
-- If reviewer needs specific fields, ensure the last skill outputs them
-- For mid-workflow review, wrap earlier skills in a nested Team Agent
-
-## Function Agent (.mjs)
-
-```javascript
-// save-output.mjs
-import fs from "fs/promises";
-
-export default async function saveOutput({ title, article }) {
-  await fs.writeFile("output.md", `# ${title}\n\n${article}`);
-  return { success: true, path: "output.md" };
-}
-
-saveOutput.description = "Save article to file";
-saveOutput.input_schema = {
-  type: "object",
-  properties: {
-    title: { type: "string" },
-    article: { type: "string" }
-  },
-  required: ["title", "article"]
-};
-saveOutput.output_schema = {
-  type: "object",
-  properties: {
-    success: { type: "boolean" },
-    path: { type: "string" }
-  },
-  required: ["success", "path"]
-};
-```
-
-**Calling other agents from Function Agent:**
-
-Function Agent can invoke other agents using `options.context`:
-
-```javascript
-// batch-processor.mjs
-export default async function batchProcessor({ topics }, options) {
-  const results = [];
-
-  // Get agent reference by name
-  const pipeline = options.context?.agents?.["article-pipeline"];
-
-  for (const topic of topics) {
-    // Invoke agent with input
-    const result = await options.context.invoke(pipeline, { topic });
-    results.push(result);
-  }
-
-  return { results, total: results.length };
-}
-```
-
-Key points:
-- Use `options.context.agents["agent-name"]` to get agent reference
-- Use `options.context.invoke(agent, input)` to call the agent
-- Do NOT import `@anthropic-ai/aigne` package directly
-
-## Image Agent
-
-**Output is local file path, not base64:**
-
-```yaml
-name: cover-generator
-type: image
-instructions: Generate cover image for {{title}}
-input_schema:
-  type: object
-  properties:
-    title: { type: string }
-  required: [title]
-output_schema:
-  type: object
-  properties:
-    images:
-      type: array
-      items:
-        type: object
-        properties:
-          path: { type: string }      # Local temp file path
-          mimeType: { type: string }
-  required: [images]
-```
-
-**Handle image output in Function Agent:**
-```javascript
-// Copy from temp path, don't decode base64
-await fs.copyFile(images[0].path, "cover.jpg");
-```
-
-## CLI
 
 ```bash
-aigne run . <agent-name> --<param> "value"  # Run agent
-aigne run . main --topic "AI Future"        # Example
-aigne run . chat --interactive              # Interactive mode
+aigne run . <agent-name> --<param> "value"
+aigne run . chat --interactive
 ```
 
-## Key Rules
+## Reference Guide
+
+Read the appropriate reference file based on your task:
+
+| Task | Reference File |
+|------|----------------|
+| Creating any agent (AI, Team, Image, MCP, etc.) | [references/agent-types.md](references/agent-types.md) |
+| Configuring agent input/output, instructions, memory | [references/agent-definition.md](references/agent-definition.md) |
+| Writing JavaScript Function Agents (.mjs) | [references/skill-definition.md](references/skill-definition.md) |
+| Building workflows (sequential, parallel, batch, reflection) | [references/workflow-patterns.md](references/workflow-patterns.md) |
+| Configuring aigne.yaml project file | [references/aigne-yaml-config.md](references/aigne-yaml-config.md) |
+
+## Critical Rules
 
 1. **Function Agents use `.mjs`** - Not `.js`
-2. **Use `.env.example`** - Not `.env.local` with placeholders
-3. **All agents need schemas** - Both `input_schema` and `output_schema`
-4. **Team Agent for fixed workflows** - Don't let AI decide execution order
-5. **Image output is file path** - Copy file, don't decode base64
-6. **Nullable fields** - Use `type: ["string", "null"]`
+2. **All agents need schemas** - Both `input_schema` and `output_schema`
+3. **Image model uses slash** - `google/gemini-3-pro-image-preview` not colon
+4. **Nullable fields** - Use `type: ["string", "null"]`
 
-## References
+## Common Pitfalls
 
-See [references/](references/) for detailed documentation on agent types, workflows, and configurations.
+### Function Agent Calling Other Agents
+
+Use `options.context` to invoke other agents. Do NOT import `@anthropic-ai/aigne` directly:
+
+```javascript
+export default async function batch({ items }, options) {
+  const pipeline = options.context?.agents?.["my-pipeline"];
+  const results = [];
+  for (const item of items) {
+    results.push(await options.context.invoke(pipeline, item));
+  }
+  return { results };
+}
+```
+
+### Reflection Data Flow
+
+Reflection triggers AFTER all skills complete. Reviewer receives output from the LAST skill:
+
+```yaml
+# ❌ WRONG: reviewer needs {article} but gets {path} from save-output
+skills: [writer, save-output]
+reflection:
+  reviewer: reviewer  # FAILS - no article field
+
+# ✅ CORRECT: Nest Team Agent for mid-workflow review
+# writing-with-review.yaml
+skills: [writer]
+reflection:
+  reviewer: reviewer  # Gets {article} from writer
+
+# main-pipeline.yaml
+skills: [writing-with-review, save-output]
+```
+
+### Batch Processing Array Format
+
+Array elements MUST be objects, not primitives:
+
+```json
+// ❌ WRONG
+{ "items": ["AI", "Blockchain"] }
+
+// ✅ CORRECT
+{ "items": [{"topic": "AI"}, {"topic": "Blockchain"}] }
+```
