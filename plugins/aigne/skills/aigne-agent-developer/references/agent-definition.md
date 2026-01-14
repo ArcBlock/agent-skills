@@ -47,7 +47,7 @@ input_schema:
 aigne run . poet --topic "nature" --style "haiku"
 ```
 
-**Without input_schema**, CLI `--param` flags won't work—only `--input '{}'` is available.
+**Without input_schema**, CLI params won't work—only `--input '{}'` is available.
 
 ### output_schema (Structured Output)
 

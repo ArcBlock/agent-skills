@@ -103,6 +103,38 @@ output_schema:
   required: [approved]
 ```
 
+### Reflection Data Flow (Critical)
+
+**Reflection triggers AFTER all skills complete.** The reviewer receives the output of the LAST skill, not intermediate outputs.
+
+```yaml
+# ❌ WRONG: reviewer needs {title, article} but gets {success, path}
+type: team
+skills:
+  - writer.yaml        # outputs: {title, article}
+  - save-output.mjs    # outputs: {success, path}
+reflection:
+  reviewer: reviewer.yaml  # expects: {title, article} - FAILS!
+```
+
+**Solution: Use nested Team Agent for mid-workflow reflection:**
+
+```yaml
+# Step 1: writing-with-review.yaml (reflection happens here)
+type: team
+skills:
+  - writer.yaml        # outputs: {title, article}
+reflection:
+  reviewer: reviewer.yaml  # receives: {title, article} - WORKS!
+
+# Step 2: main-pipeline.yaml (uses nested team)
+type: team
+skills:
+  - writing-with-review.yaml  # outputs reviewed {title, article}
+  - cover-generator.yaml
+  - save-output.mjs
+```
+
 ## Batch Processing
 
 Process arrays of items with `iterate_on`.

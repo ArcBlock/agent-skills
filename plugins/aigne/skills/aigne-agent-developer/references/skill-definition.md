@@ -36,9 +36,39 @@ skillName.output_schema = {
 
 ### Requirements
 - Default export as async function
+- File extension must be `.mjs` (not `.js`)
 - `.description` - helps LLM decide when to use
 - `.input_schema` - JSON Schema for parameters
 - `.output_schema` - JSON Schema for return value
+
+### Calling Other Agents
+
+Function Agents can invoke other agents using `options.context`:
+
+```javascript
+export default async function batchProcessor({ items }, options) {
+  // Get agent reference by name
+  const pipeline = options.context?.agents?.["article-pipeline"];
+
+  if (!pipeline) {
+    throw new Error("article-pipeline agent not found");
+  }
+
+  const results = [];
+  for (const item of items) {
+    // Invoke agent with input
+    const result = await options.context.invoke(pipeline, item);
+    results.push(result);
+  }
+
+  return { results, total: results.length };
+}
+```
+
+**Important:**
+- Use `options.context.agents["agent-name"]` to get agent reference
+- Use `options.context.invoke(agent, input)` to call the agent
+- Do NOT import `@anthropic-ai/aigne` package directly
 
 ### Example: Save Output
 

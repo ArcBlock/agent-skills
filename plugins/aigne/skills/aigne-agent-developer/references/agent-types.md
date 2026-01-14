@@ -80,7 +80,6 @@ JavaScript functions for custom logic. Register under `agents` in aigne.yaml.
 import fs from "node:fs/promises";
 
 export default async function saveOutput({ content, filename }) {
-  await fs.mkdir(outputDir, { recursive: true });
   await fs.writeFile(filename, content);
   return { saved: true, path: filename };
 }
