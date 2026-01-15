@@ -1,352 +1,352 @@
 ---
 name: blocklet-branch
-description: Git 分支管理工具。检测主迭代分支、分支命名规范，处理分支创建和切换。被 blocklet-dev-setup 和 blocklet-pr 等 skill 引用。
+description: Git branch management tool. Detects main iteration branch and branch naming conventions, handles branch creation and switching. Referenced by blocklet-dev-setup, blocklet-pr, and other skills.
 ---
 
 # Blocklet Branch
 
-统一的 Git 分支管理工具，提供分支检测、创建、切换等功能。
+Unified Git branch management tool providing branch detection, creation, and switching capabilities.
 
-**设计原则**：
-- 不假设主分支是 `main` 或 `master`，通过历史 PR 动态检测
-- 分支命名规范从项目历史中学习
-- 切换分支前必须处理未提交改动
+**Design Principles**:
+- Never assume the main branch is `main` or `master`; detect dynamically through merged PR history
+- Learn branch naming conventions from project history
+- Must handle uncommitted changes before switching branches
 
 ---
 
-## 1. 仓库信息获取
+## 1. Repository Information Retrieval
 
-### 1.1 解析远程仓库
+### 1.1 Parse Remote Repository
 
 ```bash
 REMOTE_URL=$(git remote get-url origin)
 
-# 解析 org/repo
+# Parse org/repo
 ORG=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\1/')
 REPO=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\2/' | sed 's/\.git$//')
 
-echo "仓库: $ORG/$REPO"
+echo "Repository: $ORG/$REPO"
 ```
 
-### 1.2 获取当前分支
+### 1.2 Get Current Branch
 
 ```bash
 CURRENT_BRANCH=$(git branch --show-current)
-echo "当前分支: $CURRENT_BRANCH"
+echo "Current branch: $CURRENT_BRANCH"
 ```
 
 ---
 
-## 2. 主迭代分支检测
+## 2. Main Iteration Branch Detection
 
-**重要**：必须通过最近 10 个合并的 PR 来确定主迭代分支，而不是简单地假设是 `main` 或 `master`。
+**Important**: Must determine the main iteration branch by analyzing the last 10 merged PRs, rather than simply assuming it is `main` or `master`.
 
-### 2.1 检测主迭代分支
+### 2.1 Detect Main Iteration Branch
 
 ```bash
-# 获取最近 10 个合并 PR 的目标分支，统计出现最多的作为主迭代分支
+# Get target branches of the last 10 merged PRs, count occurrences to find the main iteration branch
 MAIN_BRANCH=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json baseRefName \
   | jq -r '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
 
-# 获取判断依据
+# Get detection rationale
 BRANCH_STATS=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json baseRefName \
   | jq -r '.[].baseRefName' | sort | uniq -c | sort -rn)
 
-echo "主迭代分支: $MAIN_BRANCH"
-echo "判断依据（最近 10 个合并 PR 的目标分支统计）:"
+echo "Main iteration branch: $MAIN_BRANCH"
+echo "Detection rationale (target branch statistics from last 10 merged PRs):"
 echo "$BRANCH_STATS"
 ```
 
-### 2.2 输出变量
+### 2.2 Output Variables
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `MAIN_BRANCH` | 检测到的主迭代分支 | `main`, `develop`, `master` |
-| `MAIN_BRANCH_REASON` | 判断原因 | "最近 10 个合并 PR 中有 8 个以 main 为目标" |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `MAIN_BRANCH` | Detected main iteration branch | `main`, `develop`, `master` |
+| `MAIN_BRANCH_REASON` | Detection rationale | "8 out of 10 recent merged PRs targeted main" |
 
 ---
 
-## 3. 分支命名规范检测
+## 3. Branch Naming Convention Detection
 
-**重要**：通过最近 10 个合并的 PR 来确定分支命名前缀规范。
+**Important**: Determine branch naming prefix conventions by analyzing the last 10 merged PRs.
 
-### 3.1 分析历史分支命名
+### 3.1 Analyze Historical Branch Naming
 
 ```bash
-# 获取最近 10 个合并 PR 的源分支名，分析命名规范
+# Get source branch names from the last 10 merged PRs, analyze naming conventions
 BRANCH_NAMES=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json headRefName \
   | jq -r '.[].headRefName')
 
-# 提取前缀（支持 / 和 - 分隔符）
+# Extract prefixes (supports both / and - separators)
 BRANCH_PREFIXES=$(echo "$BRANCH_NAMES" | sed -E 's/^([a-zA-Z]+)[\/\-].*/\1/' | sort | uniq -c | sort -rn)
 
-echo "分支命名前缀统计（最近 10 个合并 PR）:"
+echo "Branch naming prefix statistics (from last 10 merged PRs):"
 echo "$BRANCH_PREFIXES"
 
-# 检测分隔符风格（/ 或 -）
+# Detect separator style (/ or -)
 if echo "$BRANCH_NAMES" | grep -q '/'; then
     SEPARATOR="/"
 else
     SEPARATOR="-"
 fi
-echo "分隔符风格: $SEPARATOR"
+echo "Separator style: $SEPARATOR"
 ```
 
-### 3.2 常见分支前缀
+### 3.2 Common Branch Prefixes
 
-| 前缀 | 用途 | 示例 |
-|------|------|------|
-| `feat` / `feature` | 新功能 | `feat/add-login`, `feature/user-profile` |
-| `fix` / `bugfix` | Bug 修复 | `fix/login-error`, `bugfix/issue-123` |
-| `chore` | 日常维护 | `chore/update-deps` |
-| `refactor` | 代码重构 | `refactor/auth-module` |
-| `docs` | 文档更新 | `docs/api-guide` |
-| `test` | 测试相关 | `test/add-unit-tests` |
-| `style` | 代码风格 | `style/format-code` |
-| `perf` | 性能优化 | `perf/optimize-query` |
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `feat` / `feature` | New feature | `feat/add-login`, `feature/user-profile` |
+| `fix` / `bugfix` | Bug fix | `fix/login-error`, `bugfix/issue-123` |
+| `chore` | Routine maintenance | `chore/update-deps` |
+| `refactor` | Code refactoring | `refactor/auth-module` |
+| `docs` | Documentation update | `docs/api-guide` |
+| `test` | Test-related | `test/add-unit-tests` |
+| `style` | Code style | `style/format-code` |
+| `perf` | Performance optimization | `perf/optimize-query` |
 
-### 3.3 输出变量
+### 3.3 Output Variables
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `BRANCH_PREFIX_CONVENTION` | 主要前缀规范 | `feat`, `fix` |
-| `BRANCH_SEPARATOR` | 分隔符风格 | `/` 或 `-` |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BRANCH_PREFIX_CONVENTION` | Primary prefix convention | `feat`, `fix` |
+| `BRANCH_SEPARATOR` | Separator style | `/` or `-` |
 
 ---
 
-## 4. 未提交改动处理
+## 4. Uncommitted Changes Handling
 
-**重要**：切换分支前，必须先处理未提交的改动。
+**Important**: Before switching branches, uncommitted changes must be handled first.
 
-### 4.1 检查改动状态
+### 4.1 Check Change Status
 
 ```bash
 UNCOMMITTED_CHANGES=$(git status --porcelain)
 
 if [ -n "$UNCOMMITTED_CHANGES" ]; then
-    echo "⚠️ 检测到未提交的改动:"
+    echo "⚠️ Uncommitted changes detected:"
     git status --short
 fi
 ```
 
-### 4.2 处理改动
+### 4.2 Handle Changes
 
-如果有未提交的改动，使用 `AskUserQuestion` 询问用户：
+If there are uncommitted changes, use `AskUserQuestion` to ask the user:
 
 ```
-检测到未提交的改动，请选择处理方式：
+Uncommitted changes detected. Please choose how to proceed:
 
-选项：
-A. 暂存改动 (git stash) - 稍后可恢复 (Recommended)
-B. 提交改动 - 创建一个临时提交
-C. 放弃改动 (git checkout .) - ⚠️ 不可恢复
-D. 取消操作
+Options:
+A. Stash changes (git stash) - can be restored later (Recommended)
+B. Commit changes - create a temporary commit
+C. Discard changes (git checkout .) - ⚠️ cannot be undone
+D. Cancel operation
 ```
 
-**执行处理**：
+**Execute handling**:
 
 ```bash
-# 选项 A: 暂存
+# Option A: Stash
 git stash push -m "Auto stash before branch switch"
 
-# 选项 B: 提交
+# Option B: Commit
 git add -A && git commit -m "WIP: auto commit before branch switch"
 
-# 选项 C: 放弃
+# Option C: Discard
 git checkout . && git clean -fd
 ```
 
 ---
 
-## 5. 分支切换
+## 5. Branch Switching
 
-### 5.1 切换到主迭代分支
+### 5.1 Switch to Main Iteration Branch
 
 ```bash
-# 确保本地有最新的远程分支信息
+# Ensure local has latest remote branch info
 git fetch origin
 
-# 切换到主迭代分支并更新
+# Switch to main iteration branch and update
 git checkout $MAIN_BRANCH
 git pull origin $MAIN_BRANCH
 
-echo "✅ 已切换到主迭代分支: $MAIN_BRANCH"
+echo "✅ Switched to main iteration branch: $MAIN_BRANCH"
 ```
 
-### 5.2 切换到指定分支
+### 5.2 Switch to Specified Branch
 
 ```bash
 TARGET_BRANCH="feat/my-feature"
 
-# 检查分支是否存在
+# Check if branch exists
 if git show-ref --verify --quiet refs/heads/$TARGET_BRANCH; then
-    # 本地分支存在
+    # Local branch exists
     git checkout $TARGET_BRANCH
 elif git show-ref --verify --quiet refs/remotes/origin/$TARGET_BRANCH; then
-    # 远程分支存在，创建本地跟踪分支
+    # Remote branch exists, create local tracking branch
     git checkout -b $TARGET_BRANCH origin/$TARGET_BRANCH
 else
-    echo "❌ 分支 $TARGET_BRANCH 不存在"
+    echo "❌ Branch $TARGET_BRANCH does not exist"
 fi
 ```
 
 ---
 
-## 6. 工作分支创建
+## 6. Working Branch Creation
 
-### 6.1 生成分支名建议
+### 6.1 Generate Branch Name Suggestion
 
-根据任务类型和仓库命名规范生成建议的分支名：
+Generate suggested branch name based on task type and repository naming conventions:
 
 ```bash
-# 输入参数
+# Input parameters
 TASK_TYPE="fix"           # feat, fix, chore, refactor, docs, test
-TASK_DESCRIPTION="login"  # 简短描述
-ISSUE_NUMBER=""           # 可选的 Issue 编号
+TASK_DESCRIPTION="login"  # Brief description
+ISSUE_NUMBER=""           # Optional issue number
 
-# 生成分支名
+# Generate branch name
 if [ -n "$ISSUE_NUMBER" ]; then
     SUGGESTED_BRANCH="${TASK_TYPE}${BRANCH_SEPARATOR}issue-${ISSUE_NUMBER}-${TASK_DESCRIPTION}"
 else
     SUGGESTED_BRANCH="${TASK_TYPE}${BRANCH_SEPARATOR}${TASK_DESCRIPTION}"
 fi
 
-echo "建议的分支名: $SUGGESTED_BRANCH"
+echo "Suggested branch name: $SUGGESTED_BRANCH"
 ```
 
-### 6.2 创建工作分支
+### 6.2 Create Working Branch
 
-**前提**：必须基于最新的主迭代分支创建。
+**Prerequisite**: Must be created based on the latest main iteration branch.
 
 ```bash
-# 1. 确保主迭代分支是最新的
+# 1. Ensure main iteration branch is up to date
 git fetch origin $MAIN_BRANCH
 git checkout $MAIN_BRANCH
 git pull origin $MAIN_BRANCH
 
-# 2. 创建并切换到新分支
+# 2. Create and switch to new branch
 NEW_BRANCH="feat/my-new-feature"
 git checkout -b $NEW_BRANCH
 
-echo "✅ 已创建并切换到分支: $NEW_BRANCH (基于 $MAIN_BRANCH)"
+echo "✅ Created and switched to branch: $NEW_BRANCH (based on $MAIN_BRANCH)"
 ```
 
-### 6.3 用户确认流程
+### 6.3 User Confirmation Flow
 
-使用 `AskUserQuestion` 确认分支名：
+Use `AskUserQuestion` to confirm branch name:
 
 ```
-将基于 {MAIN_BRANCH} 创建新分支。
+Will create new branch based on {MAIN_BRANCH}.
 
-请选择分支名：
+Please select branch name:
 
-选项：
+Options:
 A. {SUGGESTED_BRANCH} (Recommended)
-B. 输入自定义分支名
-C. 取消操作
+B. Enter custom branch name
+C. Cancel operation
 ```
 
 ---
 
-## 7. 分支状态检查
+## 7. Branch Status Check
 
-### 7.1 检查是否在主迭代分支
+### 7.1 Check If on Main Iteration Branch
 
 ```bash
 if [ "$CURRENT_BRANCH" = "$MAIN_BRANCH" ]; then
-    echo "⚠️ 当前在主迭代分支上"
+    echo "⚠️ Currently on main iteration branch"
     ON_MAIN_BRANCH=true
 else
     ON_MAIN_BRANCH=false
 fi
 ```
 
-### 7.2 检查分支命名是否规范
+### 7.2 Check Branch Naming Convention Compliance
 
 ```bash
-# 检查分支名是否符合常见前缀规范
+# Check if branch name follows common prefix conventions
 if echo "$CURRENT_BRANCH" | grep -qE "^(feat|fix|chore|refactor|docs|test|style|perf|hotfix|release)[/\-]"; then
-    echo "✅ 分支命名符合规范"
+    echo "✅ Branch naming follows convention"
     BRANCH_NAME_VALID=true
 else
-    echo "⚠️ 分支命名不符合常见规范: $CURRENT_BRANCH"
+    echo "⚠️ Branch naming does not follow common conventions: $CURRENT_BRANCH"
     BRANCH_NAME_VALID=false
 fi
 ```
 
-### 7.3 检查分支与远程的同步状态
+### 7.3 Check Branch Sync Status with Remote
 
 ```bash
-# 获取本地和远程的差异
+# Get local and remote differences
 git fetch origin
 
 LOCAL_COMMIT=$(git rev-parse HEAD)
 REMOTE_COMMIT=$(git rev-parse origin/$CURRENT_BRANCH 2>/dev/null || echo "")
 
 if [ -z "$REMOTE_COMMIT" ]; then
-    echo "📤 分支尚未推送到远程"
+    echo "📤 Branch not yet pushed to remote"
     SYNC_STATUS="not_pushed"
 elif [ "$LOCAL_COMMIT" = "$REMOTE_COMMIT" ]; then
-    echo "✅ 分支与远程同步"
+    echo "✅ Branch is in sync with remote"
     SYNC_STATUS="synced"
 else
     AHEAD=$(git rev-list origin/$CURRENT_BRANCH..HEAD --count)
     BEHIND=$(git rev-list HEAD..origin/$CURRENT_BRANCH --count)
-    echo "📊 本地领先 $AHEAD 个提交，落后 $BEHIND 个提交"
+    echo "📊 Local is $AHEAD commits ahead, $BEHIND commits behind"
     SYNC_STATUS="diverged"
 fi
 ```
 
 ---
 
-## 8. 使用场景
+## 8. Usage Scenarios
 
-### 场景 A: 开发环境准备（blocklet-dev-setup）
+### Scenario A: Development Environment Setup (blocklet-dev-setup)
 
-1. 检测主迭代分支
-2. 处理未提交改动
-3. 切换到主迭代分支并更新
-4. （可选）创建工作分支
+1. Detect main iteration branch
+2. Handle uncommitted changes
+3. Switch to main iteration branch and update
+4. (Optional) Create working branch
 
-### 场景 B: 提交 PR（blocklet-pr）
+### Scenario B: Submit PR (blocklet-pr)
 
-1. 检测主迭代分支
-2. 检测分支命名规范
-3. 检查当前分支
-   - 如果在主迭代分支上 → **必须**创建工作分支
-   - 如果在工作分支上 → 检查命名规范
+1. Detect main iteration branch
+2. Detect branch naming conventions
+3. Check current branch
+   - If on main iteration branch → **Must** create working branch
+   - If on working branch → Check naming convention compliance
 
-### 场景 C: 切换任务
+### Scenario C: Switch Tasks
 
-1. 处理未提交改动（stash/commit/discard）
-2. 切换到目标分支
-3. 恢复之前的改动（如果需要）
-
----
-
-## 9. 被其他 Skill 引用
-
-本 skill 被以下 skill 引用：
-
-| Skill | 使用的功能 |
-|-------|-----------|
-| `blocklet-dev-setup` | 检测主迭代分支、处理未提交改动、切换分支、创建工作分支 |
-| `blocklet-pr` | 检测主迭代分支、分支命名规范、强制创建工作分支 |
-
-**引用方式**：
-
-```
-参考 blocklet-branch skill 执行分支操作。
-skill 位置: plugins/blocklet/skills/blocklet-branch/SKILL.md
-```
+1. Handle uncommitted changes (stash/commit/discard)
+2. Switch to target branch
+3. Restore previous changes (if needed)
 
 ---
 
-## 10. 错误处理
+## 9. Referenced by Other Skills
 
-| 错误 | 原因 | 处理 |
-|------|------|------|
-| 无法获取 PR 历史 | gh 未认证或网络问题 | 运行 `gh auth status` 检查认证 |
-| 分支切换失败 | 有未提交的改动冲突 | 先处理未提交改动 |
-| 分支创建失败 | 分支名已存在 | 使用其他分支名或切换到现有分支 |
-| 无法检测主迭代分支 | 仓库无合并的 PR | 回退到默认分支 `gh repo view --json defaultBranchRef` |
+This skill is referenced by the following skills:
+
+| Skill | Features Used |
+|-------|---------------|
+| `blocklet-dev-setup` | Detect main iteration branch, handle uncommitted changes, switch branches, create working branch |
+| `blocklet-pr` | Detect main iteration branch, branch naming conventions, enforce working branch creation |
+
+**How to reference**:
+
+```
+Refer to blocklet-branch skill for branch operations.
+Skill location: plugins/blocklet/skills/blocklet-branch/SKILL.md
+```
+
+---
+
+## 10. Error Handling
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| Cannot get PR history | gh not authenticated or network issue | Run `gh auth status` to check authentication |
+| Branch switch failed | Conflicting uncommitted changes | Handle uncommitted changes first |
+| Branch creation failed | Branch name already exists | Use different branch name or switch to existing branch |
+| Cannot detect main iteration branch | Repository has no merged PRs | Fall back to default branch `gh repo view --json defaultBranchRef` |

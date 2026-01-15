@@ -1,32 +1,32 @@
 ---
 name: blocklet-pr
-description: 为 blocklet 项目创建规范的 Pull Request。执行 lint 检查、单元测试、版本更新，并按照 PR 模板创建符合规范的 PR。使用 `/blocklet-pr` 或说"帮我提交 PR"、"创建 pull request"触发。
+description: Create standardized Pull Requests for blocklet projects. Performs lint checks, unit tests, version updates, and creates PRs following PR templates. Use `/blocklet-pr` or say "help me submit a PR", "create pull request" to trigger.
 ---
 
 # Blocklet PR
 
-帮助开发者为 blocklet 项目创建规范的 Pull Request，确保代码质量并遵循项目 PR 模板。
+Help developers create standardized Pull Requests for blocklet projects, ensuring code quality and following project PR templates.
 
-## 前置条件
+## Prerequisites
 
-- 当前目录是 blocklet 项目（存在 `blocklet.yml`）
-- 已有代码改动需要提交
-- 已配置 `gh` CLI 并完成认证
+- Current directory is a blocklet project (contains `blocklet.yml`)
+- Has code changes to commit
+- `gh` CLI is configured and authenticated
 
 ## Workflow
 
-按顺序执行以下阶段。
+Execute the following phases in order.
 
 ---
 
-### Phase 1: 工作区检查
+### Phase 1: Workspace Check
 
-**参考 `blocklet-branch` skill 执行分支操作**。
-skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+**Refer to `blocklet-branch` skill for branch operations**.
+Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
 
-#### 1.1 确认远程仓库
+#### 1.1 Confirm Remote Repository
 
-参考 blocklet-branch 第 1.1 节：
+Refer to blocklet-branch section 1.1:
 
 ```bash
 REMOTE_URL=$(git remote get-url origin)
@@ -34,61 +34,61 @@ ORG=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\1/')
 REPO=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\2/' | sed 's/\.git$//')
 ```
 
-#### 1.2 检测主迭代分支
+#### 1.2 Detect Main Iteration Branch
 
-参考 blocklet-branch 第 2 节：
+Refer to blocklet-branch section 2:
 
 ```bash
 MAIN_BRANCH=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json baseRefName \
   | jq -r '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
 ```
 
-**输出变量**: `MAIN_BRANCH`, `MAIN_BRANCH_REASON`
+**Output variables**: `MAIN_BRANCH`, `MAIN_BRANCH_REASON`
 
-#### 1.3 检测分支命名规范
+#### 1.3 Detect Branch Naming Conventions
 
-参考 blocklet-branch 第 3 节：
+Refer to blocklet-branch section 3:
 
 ```bash
 BRANCH_PREFIXES=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json headRefName \
   | jq -r '.[].headRefName' | sed -E 's/^([a-zA-Z]+)[\/\-].*/\1/' | sort | uniq -c | sort -rn)
 ```
 
-**输出变量**: `BRANCH_PREFIX_CONVENTION`, `BRANCH_SEPARATOR`
+**Output variables**: `BRANCH_PREFIX_CONVENTION`, `BRANCH_SEPARATOR`
 
-#### 1.4 分支检查与创建（强制）
+#### 1.4 Branch Check and Creation (Mandatory)
 
-参考 blocklet-branch 第 6、7 节。
+Refer to blocklet-branch sections 6, 7.
 
-**重要**：提交 PR 之前，**必须**确保在工作分支上，不能在主迭代分支上直接提交。
+**Important**: Before submitting a PR, you **must** ensure you are on a working branch; cannot commit directly on the main iteration branch.
 
 ```bash
 CURRENT_BRANCH=$(git branch --show-current)
 
 if [ "$CURRENT_BRANCH" = "$MAIN_BRANCH" ]; then
-    echo "⚠️ 当前在主迭代分支 $MAIN_BRANCH 上，必须创建新分支！"
+    echo "⚠️ Currently on main iteration branch $MAIN_BRANCH, must create new branch!"
 fi
 ```
 
-| 情况 | 处理 |
-|------|------|
-| 在主迭代分支上 | **必须**创建新分支（参考 blocklet-branch 第 6 节） |
-| 在工作分支上 | 检查分支命名是否符合规范（参考 blocklet-branch 第 7.2 节） |
+| Situation | Handling |
+|-----------|----------|
+| On main iteration branch | **Must** create new branch (refer to blocklet-branch section 6) |
+| On working branch | Check if branch naming follows convention (refer to blocklet-branch section 7.2) |
 
-**如果在主迭代分支上**，使用 `AskUserQuestion`：
+**If on main iteration branch**, use `AskUserQuestion`:
 
 ```
-⚠️ 当前在主迭代分支 {MAIN_BRANCH} 上，无法直接提交 PR。
+⚠️ Currently on main iteration branch {MAIN_BRANCH}, cannot submit PR directly.
 
-请选择新分支名（将基于 {MAIN_BRANCH} 创建）：
+Please select new branch name (will be created based on {MAIN_BRANCH}):
 
-选项：
-A. {建议的分支名，根据改动类型和 BRANCH_PREFIX_CONVENTION 生成} (Recommended)
-B. 输入自定义分支名
-C. 取消操作
+Options:
+A. {suggested branch name, generated based on change type and BRANCH_PREFIX_CONVENTION} (Recommended)
+B. Enter custom branch name
+C. Cancel operation
 ```
 
-**创建工作分支**（参考 blocklet-branch 第 6.2 节）：
+**Create working branch** (refer to blocklet-branch section 6.2):
 
 ```bash
 git fetch origin $MAIN_BRANCH
@@ -97,156 +97,156 @@ git pull origin $MAIN_BRANCH
 git checkout -b $NEW_BRANCH_NAME
 ```
 
-#### 1.5 检查未提交改动
+#### 1.5 Check Uncommitted Changes
 
 ```bash
 git status --porcelain
 ```
 
-| 情况 | 处理 |
-|------|------|
-| 有未暂存的改动 | 继续流程，后续会处理 |
-| 无任何改动 | 提示无改动可提交，询问用户意图 |
+| Situation | Handling |
+|-----------|----------|
+| Has unstaged changes | Continue flow, will handle later |
+| No changes at all | Prompt no changes to commit, ask user intent |
 
 ---
 
-### Phase 2: 代码质量检查
+### Phase 2: Code Quality Checks
 
-#### 2.1 Lint 检查
+#### 2.1 Lint Check
 
-**查找 lint 命令**：
+**Find lint command**:
 
 ```bash
-# 检查 package.json 中的 scripts
+# Check scripts in package.json
 cat package.json | jq -r '.scripts | keys[]' | grep -iE '^lint$|^eslint$|^check$'
 ```
 
-**常见 lint 命令优先级**：
+**Common lint command priority**:
 
-| 优先级 | Script 名称 | 说明 |
-|--------|-------------|------|
-| 1 | `lint` | 标准 lint 命令 |
-| 2 | `lint:fix` | 带自动修复的 lint |
-| 3 | `check` | 通用检查命令 |
-| 4 | `eslint` | ESLint 直接调用 |
+| Priority | Script Name | Description |
+|----------|-------------|-------------|
+| 1 | `lint` | Standard lint command |
+| 2 | `lint:fix` | Lint with auto-fix |
+| 3 | `check` | General check command |
+| 4 | `eslint` | Direct ESLint call |
 
-**执行 lint**：
+**Execute lint**:
 
 ```bash
 pnpm run lint
 ```
 
-| 结果 | 处理 |
-|------|------|
-| 通过 | 继续下一步 |
-| 失败（可自动修复） | 尝试 `pnpm run lint:fix`，然后重新检查 |
-| 失败（无法自动修复） | **停止流程**，输出错误信息，让用户修复 |
-| 无 lint 命令 | 跳过，继续下一步 |
+| Result | Handling |
+|--------|----------|
+| Pass | Continue to next step |
+| Fail (auto-fixable) | Try `pnpm run lint:fix`, then recheck |
+| Fail (cannot auto-fix) | **Stop flow**, output error info, let user fix |
+| No lint command | Skip, continue to next step |
 
-#### 2.2 单元测试
+#### 2.2 Unit Tests
 
-**查找测试命令**：
+**Find test command**:
 
 ```bash
 cat package.json | jq -r '.scripts | keys[]' | grep -iE '^test$|^test:unit$|^jest$|^vitest$'
 ```
 
-**常见测试命令优先级**：
+**Common test command priority**:
 
-| 优先级 | Script 名称 | 说明 |
-|--------|-------------|------|
-| 1 | `test` | 标准测试命令 |
-| 2 | `test:unit` | 单元测试 |
-| 3 | `test:ci` | CI 环境测试 |
+| Priority | Script Name | Description |
+|----------|-------------|-------------|
+| 1 | `test` | Standard test command |
+| 2 | `test:unit` | Unit tests |
+| 3 | `test:ci` | CI environment tests |
 
-**执行测试**：
+**Execute tests**:
 
 ```bash
 pnpm run test
 ```
 
-| 结果 | 处理 |
-|------|------|
-| 通过 | 继续下一步 |
-| 失败 | **停止流程**，输出失败的测试用例，让用户修复 |
-| 无测试命令 | 跳过，继续下一步（提示建议添加测试） |
+| Result | Handling |
+|--------|----------|
+| Pass | Continue to next step |
+| Fail | **Stop flow**, output failed test cases, let user fix |
+| No test command | Skip, continue to next step (suggest adding tests) |
 
 ---
 
-### Phase 3: 版本更新（可选）
+### Phase 3: Version Update (Optional)
 
-#### 3.1 询问是否需要版本更新
+#### 3.1 Ask If Version Update Needed
 
-使用 `AskUserQuestion` 询问：
+Use `AskUserQuestion` to ask:
 
 ```
-是否需要更新版本并创建 release？
+Do you need to update version and create release?
 
-选项：
-A. 是，更新 patch 版本 (x.x.X) (Recommended for bug fixes)
-B. 是，更新 minor 版本 (x.X.0)
-C. 是，更新 major 版本 (X.0.0)
-D. 否，跳过版本更新
+Options:
+A. Yes, update patch version (x.x.X) (Recommended for bug fixes)
+B. Yes, update minor version (x.X.0)
+C. Yes, update major version (X.0.0)
+D. No, skip version update
 ```
 
-#### 3.2 执行版本更新
+#### 3.2 Execute Version Update
 
-如果用户选择更新版本，**调用 blocklet-updater skill**：
+If user chooses to update version, **call blocklet-updater skill**:
 
-**blocklet-updater skill 位置**: `plugins/blocklet/skills/blocklet-updater/SKILL.md`
+**blocklet-updater skill location**: `plugins/blocklet/skills/blocklet-updater/SKILL.md`
 
 ---
 
-### Phase 4: Git 提交
+### Phase 4: Git Commit
 
-#### 4.1 暂存改动
+#### 4.1 Stage Changes
 
 ```bash
 git add -A
 git status
 ```
 
-显示将要提交的文件列表，使用 `AskUserQuestion` 确认：
+Display list of files to be committed, use `AskUserQuestion` to confirm:
 
 ```
-以下文件将被提交：
-{文件列表}
+The following files will be committed:
+{file list}
 
-是否继续？
-A. 是，提交所有改动 (Recommended)
-B. 否，让我选择要提交的文件
-C. 取消
+Continue?
+A. Yes, commit all changes (Recommended)
+B. No, let me select files to commit
+C. Cancel
 ```
 
-#### 4.2 生成 Commit Message
+#### 4.2 Generate Commit Message
 
-**根据改动类型生成规范的 commit message**：
+**Generate standardized commit message based on change type**:
 
-注意, 具体前缀请参考最近 20 个 Commit, 根据历史的规范来定.
+Note: Refer to the last 20 commits for the specific prefix, follow historical conventions.
 
-| 改动类型 | Commit 前缀 | 示例 |
-|----------|-------------|------|
-| 新功能 | `feat:` | `feat: add video preview support` |
-| Bug 修复 | `fix:` | `fix: resolve duplicate upload issue` |
-| 文档 | `docs:` | `docs: update API documentation` |
-| 重构 | `refactor:` | `refactor: simplify auth logic` |
-| 测试 | `test:` | `test: add unit tests for utils` |
-| 构建 | `chore:` | `chore: bump dependencies` |
+| Change Type | Commit Prefix | Example |
+|-------------|---------------|---------|
+| New feature | `feat:` | `feat: add video preview support` |
+| Bug fix | `fix:` | `fix: resolve duplicate upload issue` |
+| Documentation | `docs:` | `docs: update API documentation` |
+| Refactoring | `refactor:` | `refactor: simplify auth logic` |
+| Testing | `test:` | `test: add unit tests for utils` |
+| Build/Chore | `chore:` | `chore: bump dependencies` |
 
-**分析改动自动推断类型**，然后使用 `AskUserQuestion` 确认：
+**Analyze changes to automatically infer type**, then use `AskUserQuestion` to confirm:
 
 ```
-建议的 commit message:
+Suggested commit message:
 
-{生成的 commit message}
+{generated commit message}
 
-选项：
-A. 使用此 message (Recommended)
-B. 修改 message
-C. 取消
+Options:
+A. Use this message (Recommended)
+B. Modify message
+C. Cancel
 ```
 
-#### 4.3 执行提交
+#### 4.3 Execute Commit
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -259,20 +259,20 @@ EOF
 
 ---
 
-### Phase 5: 推送分支
+### Phase 5: Push Branch
 
-#### 5.1 检查远程分支
+#### 5.1 Check Remote Branch
 
 ```bash
 git ls-remote --heads origin $CURRENT_BRANCH
 ```
 
-| 情况 | 处理 |
-|------|------|
-| 远程分支不存在 | 使用 `-u` 推送并设置上游 |
-| 远程分支存在 | 正常推送 |
+| Situation | Handling |
+|-----------|----------|
+| Remote branch doesn't exist | Use `-u` to push and set upstream |
+| Remote branch exists | Normal push |
 
-#### 5.2 推送
+#### 5.2 Push
 
 ```bash
 git push -u origin $CURRENT_BRANCH
@@ -280,12 +280,12 @@ git push -u origin $CURRENT_BRANCH
 
 ---
 
-### Phase 6: 创建 Pull Request
+### Phase 6: Create Pull Request
 
-#### 6.1 检查 PR 模板
+#### 6.1 Check PR Template
 
 ```bash
-# 查找 PR 模板
+# Find PR template
 PR_TEMPLATE=""
 if [ -f ".github/PULL_REQUEST_TEMPLATE.md" ]; then
     PR_TEMPLATE=".github/PULL_REQUEST_TEMPLATE.md"
@@ -296,86 +296,86 @@ elif [ -f "docs/PULL_REQUEST_TEMPLATE.md" ]; then
 fi
 ```
 
-**如果找到模板**：读取并解析模板结构，按模板格式填写 PR 内容。
+**If template found**: Read and parse template structure, fill PR content according to template format.
 
-**如果未找到模板**：使用默认 PR 格式。
+**If template not found**: Use default PR format.
 
-#### 6.2 获取目标分支
+#### 6.2 Get Target Branch
 
 ```bash
-# 获取默认分支
+# Get default branch
 DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
 
-# 或根据最近 PR 判断
+# Or determine based on recent PRs
 DEV_BRANCH=$(gh pr list --state merged --limit 5 --json baseRefName --jq '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
 ```
 
-使用 `AskUserQuestion` 确认目标分支：
+Use `AskUserQuestion` to confirm target branch:
 
 ```
-PR 目标分支：
+PR target branch:
 
-选项：
+Options:
 A. {DEFAULT_BRANCH} (Recommended)
-B. 其他分支
+B. Other branch
 ```
 
-#### 6.3 关联 Issue（如有）
+#### 6.3 Link Issue (If Applicable)
 
-使用 `AskUserQuestion` 询问：
+Use `AskUserQuestion` to ask:
 
 ```
-是否需要关联 Issue？
+Do you need to link an Issue?
 
-选项：
-A. 否，不关联 Issue
-B. 是，关联 Issue（请输入 Issue 编号）
+Options:
+A. No, don't link Issue
+B. Yes, link Issue (please enter Issue number)
 ```
 
-如果关联 Issue，在 PR 描述中添加：
-- `Closes #123` - 合并时自动关闭 Issue
-- `Fixes #123` - 修复 Issue
-- `Relates to #123` - 相关但不自动关闭
+If linking Issue, add to PR description:
+- `Closes #123` - Auto-close Issue when merged
+- `Fixes #123` - Fix Issue
+- `Relates to #123` - Related but don't auto-close
 
-#### 6.4 生成 PR 内容
+#### 6.4 Generate PR Content
 
-**PR 标题**：基于 commit message 或分支名生成，格式简洁清晰。
+**PR Title**: Generate based on commit message or branch name, keep format concise and clear.
 
-**PR 描述**（按模板或默认格式）：
+**PR Description** (according to template or default format):
 
 ```markdown
 ## Summary
 
-{改动概述，2-3 句话说明这个 PR 做了什么}
+{Change overview, 2-3 sentences explaining what this PR does}
 
 ## Changes
 
-{具体改动列表}
-- 改动点 1
-- 改动点 2
+{Specific change list}
+- Change 1
+- Change 2
 - ...
 
 ## Related Issues
 
-{如有关联的 Issue}
+{If there are linked Issues}
 Closes #{issue_number}
 
 ## Test Plan
 
-{验证方式和测试点}
-- [ ] 验证点 1
-- [ ] 验证点 2
-- [ ] 单元测试通过
-- [ ] Lint 检查通过
+{Verification methods and test points}
+- [ ] Verification point 1
+- [ ] Verification point 2
+- [ ] Unit tests pass
+- [ ] Lint check passes
 
 ## Screenshots (if applicable)
 
-{如有 UI 改动，添加截图说明}
+{If there are UI changes, add screenshots}
 ```
 
-#### 6.5 创建 PR
+#### 6.5 Create PR
 
-在 PR 输出后, 等待用户确认后再创建 PR, PR 的 base 分支, 请使用近期 10 个 PR,最多合并的那个分支
+Wait for user confirmation after outputting PR content before creating PR. For PR base branch, use the branch that appears most frequently in recent 10 PRs.
 
 ```bash
 gh pr create \
@@ -387,18 +387,18 @@ EOF
   --base $TARGET_BRANCH
 ```
 
-#### 6.6 输出结果
+#### 6.6 Output Result
 
 ```
-===== PR 创建成功 =====
+===== PR Created Successfully =====
 
 PR URL: {pr_url}
-标题: {pr_title}
-目标分支: {target_branch}
-关联 Issue: {issue_numbers 或 "无"}
+Title: {pr_title}
+Target Branch: {target_branch}
+Linked Issues: {issue_numbers or "None"}
 
-===== 后续步骤 =====
-等待 Code Review
+===== Next Steps =====
+Wait for Code Review
 
 ```
 
@@ -406,21 +406,21 @@ PR URL: {pr_url}
 
 ## Error Handling
 
-| 错误 | 处理 |
-|------|------|
-| Lint 失败 | 显示错误详情，建议运行 `pnpm run lint:fix` |
-| 测试失败 | 显示失败的测试用例，让用户修复 |
-| 推送失败 | 检查权限，提示 `git pull --rebase` |
-| PR 创建失败 | 显示 gh 错误信息，检查认证状态 |
-| 已存在相同 PR | 显示现有 PR 链接，询问是否更新 |
+| Error | Handling |
+|-------|----------|
+| Lint failed | Show error details, suggest running `pnpm run lint:fix` |
+| Tests failed | Show failed test cases, let user fix |
+| Push failed | Check permissions, suggest `git pull --rebase` |
+| PR creation failed | Show gh error message, check authentication status |
+| Same PR already exists | Show existing PR link, ask whether to update |
 
 
 ---
 
-## 与其他 Skill 的关系
+## Relationship with Other Skills
 
-| Skill | 关系 |
-|-------|------|
-| `blocklet-dev-setup` | 开发环境准备，在 PR 之前使用 |
-| `blocklet-updater` | 版本更新，在 PR 中可选调用 |
-| `blocklet-url-analyzer` | 分析 Blocklet URL，定位仓库 |
+| Skill | Relationship |
+|-------|--------------|
+| `blocklet-dev-setup` | Development environment setup, use before PR |
+| `blocklet-updater` | Version update, optionally called during PR |
+| `blocklet-url-analyzer` | Analyze Blocklet URL, locate repository |

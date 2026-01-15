@@ -1,26 +1,26 @@
 ---
 name: blocklet-server-dev-setup
-description: 克隆 blocklet-server 仓库并引导执行项目内的 project-setup skill。使用 `/blocklet-server-dev-setup` 或说"帮我配置 blocklet-server 环境"、"setup blocklet-server"触发。
+description: Clone blocklet-server repository and guide execution of the in-project project-setup skill. Use `/blocklet-server-dev-setup` or say "help me configure blocklet-server environment", "setup blocklet-server" to trigger.
 ---
 
 # Blocklet Server Dev Setup
 
-帮助开发者克隆 blocklet-server 仓库到约定目录，切换到开发分支，然后引导执行项目内置的 `project-setup` skill 完成环境配置。
+Help developers clone the blocklet-server repository to the convention directory, switch to the development branch, then guide execution of the built-in `project-setup` skill to complete environment configuration.
 
-**注意**: 此 skill 用于 blocklet-server **源码开发**，与 `blocklet-dev-setup`（使用 `blocklet dev` 开发 blocklet）不同。
+**Note**: This skill is for blocklet-server **source code development**, different from `blocklet-dev-setup` (which uses `blocklet dev` to develop blocklets).
 
-## 约定目录
+## Convention Directories
 
-| 目录 | 用途 |
-|------|------|
-| `~/arcblock-repos/` | 所有 ArcBlock 项目仓库 |
-| `~/arcblock-repos/blocklet-server/` | Blocklet Server 源码 |
-| `~/arcblock-repos/agent-skills/` | AI Agent 技能集（查询 skill 定义时使用） |
-| `~/blocklet-server-dev-data/` | Blocklet Server 源码开发, 数据目录 |
+| Directory | Purpose |
+|-----------|---------|
+| `~/arcblock-repos/` | All ArcBlock project repositories |
+| `~/arcblock-repos/blocklet-server/` | Blocklet Server source code |
+| `~/arcblock-repos/agent-skills/` | AI Agent skill set (used when querying skill definitions) |
+| `~/blocklet-server-dev-data/` | Blocklet Server source code development, data directory |
 
-## 查询 Skill 定义
+## Query Skill Definitions
 
-当需要了解 agent-skills 中的 skill 定义时，**必须**先确保本地仓库是最新的：
+When you need to understand skill definitions in agent-skills, you **must** first ensure the local repository is up to date:
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/agent-skills"
@@ -35,95 +35,100 @@ fi
 
 ## Workflow
 
-### Phase 0: GitHub CLI 认证检查
+### Phase 0: GitHub CLI Authentication Check
 
-**最优先执行**: 在执行任何 `gh` 命令之前，必须先确保 GitHub CLI 已认证。
+**Execute first**: Before running any `gh` command, must ensure GitHub CLI is authenticated.
+
+**Important**: Must use `--scopes read:org` to request only read-level permissions. Do NOT omit this parameter.
 
 ```bash
-# 检查 gh 是否已认证
+# Check if gh is authenticated
 if ! gh auth status &>/dev/null; then
-    echo "❌ GitHub CLI 未认证，请先执行认证"
-    gh auth login
+    echo "❌ GitHub CLI not authenticated, please authenticate first"
+    # MUST specify --scopes read:org for read-only permissions
+    gh auth login --scopes read:org
 fi
 ```
 
-| 认证状态 | 处理 |
-|----------|------|
-| 未安装 gh | 提示安装：`brew install gh` (macOS) 或参考 https://cli.github.com/ |
-| 未认证 | 引导执行 `gh auth login` 完成认证, 可以帮用户执行认证, 并且告诉用户怎么做 |
-| 已认证 | 继续下一步 |
+| Authentication Status | Action |
+|-----------------------|--------|
+| gh not installed | Prompt to install: `brew install gh` (macOS) or refer to https://cli.github.com/ |
+| Not authenticated | **Must** run `gh auth login --scopes read:org` (read-only permissions required) |
+| Authenticated | Continue to next step |
 
 ---
 
-### Phase 1: 输入分析（可选）
+### Phase 1: Input Analysis (Optional)
 
-当用户提供 URL 时，首先判断是否应该使用本 skill：
+**Prerequisite**: Must complete Phase 0 (GitHub CLI Authentication) before analyzing any URL.
 
-#### 1.1 URL 类型判断
+When user provides a URL, first determine if this skill should be used:
+
+#### 1.1 URL Type Detection
 
 ```bash
-# 判断 URL 类型
+# Determine URL type
 if [[ "$URL" =~ ^https?://github\.com/ ]]; then
-    # GitHub Issue URL → 检查是否为 blocklet-server 仓库
+    # GitHub Issue URL → check if it's blocklet-server repository
     if [[ "$URL" =~ github\.com/ArcBlock/blocklet-server ]]; then
-        # 是 blocklet-server 的 issue → 继续本 skill
+        # Is blocklet-server issue → continue with this skill
         IS_TARGET_REPO=true
     else
-        # 其他仓库的 issue → 提示使用 blocklet-dev-setup
+        # Other repository's issue → suggest using blocklet-dev-setup
         IS_TARGET_REPO=false
     fi
 else
-    # 非 GitHub URL → 使用 blocklet-url-analyzer skill 分析
-    # 读取 plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md
+    # Non-GitHub URL → use blocklet-url-analyzer skill to analyze
+    # Read plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md
 fi
 ```
 
-#### 1.2 非 GitHub URL 处理
+#### 1.2 Non-GitHub URL Handling
 
-使用 `blocklet-url-analyzer` skill 分析 URL：
+Use `blocklet-url-analyzer` skill to analyze URL:
 
-| 分析结果类型 | 处理 |
-|-------------|------|
-| `DAEMON` | 继续本 skill（blocklet-server 源码开发） |
-| `BLOCKLET_SERVICE` | 继续本 skill（blocklet-server 源码开发） |
-| `BLOCKLET` | 提示用户应使用 `blocklet-dev-setup`，并告知对应仓库 |
-| `UNKNOWN` | 使用 AskUserQuestion 让用户确认是否继续本 skill |
+| Analysis Result Type | Handling |
+|---------------------|----------|
+| `DAEMON` | Continue with this skill (blocklet-server source code development) |
+| `BLOCKLET_SERVICE` | Continue with this skill (blocklet-server source code development) |
+| `BLOCKLET` | Inform user they should use `blocklet-dev-setup`, and provide the corresponding repository |
+| `UNKNOWN` | Use AskUserQuestion to let user confirm whether to continue with this skill |
 
-**blocklet-url-analyzer skill 位置**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
+**blocklet-url-analyzer skill location**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
 
-#### 1.3 无 URL 输入
+#### 1.3 No URL Input
 
-如果用户没有提供 URL（如直接说"帮我配置 blocklet-server 环境"），跳过此 Phase，直接进入 Phase 2。
+If user did not provide URL (e.g., directly said "help me configure blocklet-server environment"), skip this Phase and proceed directly to Phase 2.
 
 ---
 
-### Phase 2: 检查 GitHub 权限
+### Phase 2: Check GitHub Permissions
 
 ```bash
-gh api repos/ArcBlock/blocklet-server --jq '.permissions'
+gh api repos/ArcBlock/blocklet-server --jq '.permissions.pull'
+# Returns: true or false
 ```
 
-| 权限情况 | 处理 |
-|----------|------|
-| 无访问权限 | 提示联系管理员或检查 GitHub 登录 |
-| 只有 read 权限 | 提示可查看但无法推送，建议 fork |
-| 有 push 权限 | 正常继续 |
+| Permission Status | Handling |
+|-------------------|----------|
+| No access (`pull: false`) | Prompt to contact administrator or check GitHub login |
+| Has read permission (`pull: true`) | Continue normally |
 
 ---
 
-### Phase 3: 克隆仓库到约定目录
+### Phase 3: Clone Repository to Convention Directory
 
-#### 3.1 检查本地仓库
+#### 3.1 Check Local Repository
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/blocklet-server"
 if [ -d "$REPO_PATH" ]; then
     cd "$REPO_PATH" && git fetch origin
-    echo "仓库已存在"
+    echo "Repository already exists"
 fi
 ```
 
-#### 3.2 克隆仓库（如不存在）
+#### 3.2 Clone Repository (If Not Exists)
 
 ```bash
 mkdir -p ~/arcblock-repos && cd ~/arcblock-repos
@@ -132,115 +137,114 @@ git clone git@github.com:ArcBlock/blocklet-server.git || git clone https://githu
 
 ---
 
-### Phase 4: 切换到 dev 分支
+### Phase 4: Switch to dev Branch
 
-#### 4.1 检查当前分支是否有未提交的改动
+#### 4.1 Check If Current Branch Has Uncommitted Changes
 
 ```bash
 cd ~/arcblock-repos/blocklet-server
 git status --porcelain
 ```
 
-**重要**: 如果有未提交的改动，**必须**使用 AskUserQuestion 询问用户如何处理：
-- 选项 A: 暂存改动 (`git stash`)
-- 选项 B: 提交改动
-- 选项 C: 放弃改动 (`git checkout .`)
-- 选项 D: 取消操作
+**Important**: If there are uncommitted changes, **must** use AskUserQuestion to ask user how to handle:
+- Option A: Stash changes (`git stash`)
+- Option B: Commit changes
+- Option C: Discard changes (`git checkout .`)
+- Option D: Cancel operation
 
-#### 4.2 切换分支
+#### 4.2 Switch Branch
 
 ```bash
 git checkout dev && git pull origin dev
 ```
 
-**规则**:
-- 所有开发者都在 `dev` 分支开始
-- 如果当前在 `master` 分支，必须切换到 `dev`
+**Rules**:
+- All developers start on the `dev` branch
+- If currently on `master` branch, must switch to `dev`
 
 ---
 
-### Phase 5: 前置环境检查
+### Phase 5: Pre-environment Check
 
-#### 5.1 检查 blocklet 开发进程冲突
+#### 5.1 Check for Blocklet Development Process Conflicts
 
-**重要**: 在启动 blocklet-server 源码开发之前，必须检查是否有 Blocklet Server 生产版本在运行。两者不能同时运行。
+**Important**: Before starting blocklet-server source development, must check if Blocklet Server production version is running. The two cannot run simultaneously.
 
 ```bash
-# 检查 blocklet server 是否在运行
+# Check if blocklet server is running
 if blocklet server status 2>/dev/null | grep -q "running"; then
-    echo "⚠️ 检测到 Blocklet Server 生产版本正在运行"
-    echo "请先停止: blocklet server stop -f"
+    echo "⚠️ Detected Blocklet Server production version running"
+    echo "Please stop first: blocklet server stop -f"
     exit 1
 fi
 ```
 
-| 检测结果 | 处理 |
-|----------|------|
-| blocklet server 正在运行 | 使用 AskUserQuestion 询问用户是否停止该进程 |
-| 未运行 | 继续下一步 |
+| Detection Result | Handling |
+|------------------|----------|
+| blocklet server is running | Use AskUserQuestion to ask user whether to stop that process |
+| Not running | Continue to next step |
 
-**冲突原因**: blocklet-server 源码开发（`bun run start`）和 Blocklet Server 生产版本（`blocklet server start`）使用相同的端口和资源，不能同时运行。
+**Conflict reason**: blocklet-server source development (`bun run start`) and Blocklet Server production version (`blocklet server start`) use the same ports and resources, cannot run simultaneously.
 
 ---
 
-### Phase 6: 执行项目内置的 project-setup skill
+### Phase 6: Execute Built-in project-setup Skill
 
-项目仓库内已有完整的 `project-setup` skill，位于：
+The project repository already has a complete `project-setup` skill located at:
 
 ```
 ~/arcblock-repos/blocklet-server/.claude/skills/project-setup/SKILL.md
 ```
 
-**执行方式**:
+**Execution method**:
 
-1. 读取该 skill 文件内容
-2. 按照 skill 中的步骤执行：
-   - 前置条件检查（Node.js v22+, bun, nginx）
-   - 安装依赖 (`bun install`)
-   - 编译依赖包 (`bun turbo:dep`)
-   - 配置环境变量 (`core/webapp/.env.development`)
-   - 持续查看 tmux 中 blocklet windows 的 webapp window, 看看日志输出, 要确保成功. 如果出现 [nodemon] app crashed - waiting, 记得停止这个进程,重新执行
-   - 输出启动指南
+1. Read the skill file content
+2. Execute according to the steps in the skill:
+   - Prerequisites check (Node.js v22+, bun, nginx)
+   - Install dependencies (`bun install`)
+   - Compile dependency packages (`bun turbo:dep`)
+   - Configure environment variables (`core/webapp/.env.development`)
+   - Continuously check the webapp window in the blocklet tmux session to view logs and ensure success. If you see [nodemon] app crashed - waiting, remember to stop that process and re-execute
+   - Output startup guide
 
 ---
 
 
-## 输出完成信息
+## Output Completion Information
 
 ```
-===== Blocklet Server 开发环境已就绪 =====
+===== Blocklet Server Development Environment Ready =====
 
-仓库位置: ~/arcblock-repos/blocklet-server
-当前分支: dev
+Repository location: ~/arcblock-repos/blocklet-server
+Current branch: dev
 
-访问地址: http://127.0.0.1:3000, 而不是 http://127.0.0.1:3030, 3030 只是代理地址
+Access URL: http://127.0.0.1:3000, not http://127.0.0.1:3030, 3030 is just the proxy address
 
-正在启动开发环境：
+Starting development environment:
   cd ~/arcblock-repos/blocklet-server
   bun run start
 
-其他常用命令：
-  bun run test        # 运行测试
-  bun run turbo:lint  # 运行 lint 检查
+Other common commands:
+  bun run test        # Run tests
+  bun run turbo:lint  # Run lint checks
 
-使用其他 SKill 完成工作:
+Use other skills to complete work:
 
-/blocklet-pr 修改完代码, 提交一个符合规范的 PR
+/blocklet-pr After modifying code, submit a PR that follows conventions
 ```
 
-## 启动开发环境
+## Start Development Environment
 
-使用 bun run start 启动, 过程中如果有问题, 请帮忙修复
+Use bun run start to start. If there are issues during the process, please help fix them.
 
-启动成功后, 输出命令, 教会用户如何查看 tmux 的这些进程
+After successful startup, output commands to teach user how to view the tmux processes.
 
 ---
 
 ## Error Handling
 
-| 错误 | 处理 |
-|------|------|
-| GitHub 权限不足 | 提示联系管理员或 fork |
-| 克隆失败 | 检查网络，尝试 HTTPS 方式 |
-| project-setup skill 不存在 | 提示可能是旧版本仓库，手动执行安装步骤 |
-
+| Error | Handling |
+|-------|----------|
+| Insufficient GitHub permissions | Prompt to contact administrator or fork |
+| Clone failed | Check network, try HTTPS method |
+| project-setup skill not found | Prompt may be old version repository, manually execute installation steps |

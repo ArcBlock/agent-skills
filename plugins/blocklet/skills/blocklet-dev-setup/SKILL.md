@@ -1,26 +1,26 @@
 ---
 name: blocklet-dev-setup
-description: 配置 blocklet 类型仓库的开发环境。支持解析 GitHub Issue URL、Blocklet URL 或问题描述，自动定位仓库、检查权限、克隆代码、安装依赖、启动开发服务器。使用 `/blocklet-dev-setup` 或说"帮我修复 xxx blocklet 的问题"、"我要开发 xxx blocklet"、"我想修改这个 URL 相关的代码"触, 总之希望开发 blocklet 时出发点。
+description: Configure development environment for blocklet-type repositories. Supports parsing GitHub Issue URLs, Blocklet URLs, or problem descriptions to automatically locate repositories, check permissions, clone code, install dependencies, and start development server. Use `/blocklet-dev-setup` or say "help me fix the xxx blocklet issue", "I want to develop xxx blocklet", "I want to modify code related to this URL" to trigger. In short, use this as the starting point when you want to develop a blocklet.
 ---
 
 # Blocklet Dev Setup
 
-帮助开发者快速定位、克隆并配置任意 blocklet 仓库的开发环境，进入 live 开发状态。
+Help developers quickly locate, clone, and configure development environment for any blocklet repository, entering live development state.
 
-**关键**: blocklet dev 需要本地有 Blocklet Server 在运行。
+**Key**: blocklet dev requires a local Blocklet Server to be running.
 
-## 约定目录
+## Convention Directories
 
-| 目录 | 用途 |
-|------|------|
-| `~/arcblock-repos/` | 所有 ArcBlock 项目仓库 |
-| `~/arcblock-repos/agent-skills/` | AI Agent 技能集（查询 skill 定义时使用） |
-| `~/blocklet-server-data/` | Blocklet Server 数据目录 |
-| `~/blocklet-server-dev-data/` | Blocklet Server 源码开发数据目录 |
+| Directory | Purpose |
+|-----------|---------|
+| `~/arcblock-repos/` | All ArcBlock project repositories |
+| `~/arcblock-repos/agent-skills/` | AI Agent skill set (used when querying skill definitions) |
+| `~/blocklet-server-data/` | Blocklet Server data directory |
+| `~/blocklet-server-dev-data/` | Blocklet Server source code development data directory |
 
-## 查询 Skill 定义
+## Query Skill Definitions
 
-当需要了解 agent-skills 中的 skill 定义时，**必须**先确保本地仓库是最新的：
+When you need to understand skill definitions in agent-skills, you **must** first ensure the local repository is up to date:
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/agent-skills"
@@ -31,266 +31,273 @@ else
 fi
 ```
 
-**原因**: Skill 运行时无法读取当前 repo 的其他上下文，必须从约定路径读取。
+**Reason**: Skills cannot read other context from the current repo at runtime; must read from the convention path.
 
-## PM2 进程管理
+## PM2 Process Management
 
-查看 PM2 进程时需要设置正确的 `PM2_HOME`：
+When viewing PM2 processes, set the correct `PM2_HOME`:
 
-| 环境 | PM2_HOME |
-|------|----------|
-| 生产环境 | `~/.arcblock/abtnode` |
-| 开发环境 | `~/.arcblock/abtnode-dev` |
-| e2e 测试 | `~/.arcblock/abtnode-test` |
+| Environment | PM2_HOME |
+|-------------|----------|
+| Production | `~/.arcblock/abtnode` |
+| Development | `~/.arcblock/abtnode-dev` |
+| e2e Testing | `~/.arcblock/abtnode-test` |
 
 ```bash
 PM2_HOME=~/.arcblock/abtnode pm2 list
 PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
 ```
+
 ## Active Loading Policy
-下面文件只要需要时, 才去读取, 文件在 arcblock 的 agent-skill repo 里:
-| 涉及产品 | 加载文件 |
-|---------|---------|
-| Blocklet 开发通用 | `arcblock-context/products/blocklet-developer.md` |
+
+The following files should only be read when needed. Files are in the ArcBlock agent-skills repo:
+
+| Related Product | File to Load |
+|-----------------|--------------|
+| Blocklet Development General | `arcblock-context/products/blocklet-developer.md` |
 | Blocklet Server | `arcblock-context/products/blocklet-server.md` |
 | DID Connect | `arcblock-context/products/did-connect.md` |
 | Discuss Kit | `arcblock-context/products/discuss-kit.md` |
 | PaymentKit | `arcblock-context/products/paymentkit.md` |
 | AIGNE CLI | `arcblock-context/products/aigne.md` |
 
-## 仓库搜索
+## Repository Search
 
-使用 GitHub API 动态搜索仓库，按最近更新排序：
+Use GitHub API for dynamic repository search, sorted by recent updates:
 
-### 搜索 ArcBlock 和 blocklet 组织的仓库
+### Search ArcBlock and blocklet Organization Repositories
 
 ```bash
-# 搜索 ArcBlock 组织的仓库（按最近更新排序）
+# Search ArcBlock organization repositories (sorted by recent updates)
 gh repo list ArcBlock --limit 20 --json name,description,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[] | "\(.name)\t\(.description // "N/A")"'
 
-# 搜索 blocklet 组织的仓库（按最近更新排序）
+# Search blocklet organization repositories (sorted by recent updates)
 gh repo list blocklet --limit 20 --json name,description,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[] | "\(.name)\t\(.description // "N/A")"'
 ```
 
-### 按关键词搜索仓库
+### Search Repositories by Keyword
 
 ```bash
-# 在两个组织中搜索包含关键词的仓库
+# Search repositories containing keywords in both organizations
 gh search repos "$KEYWORD" --owner ArcBlock --owner blocklet --sort updated --json fullName,description --jq '.[] | "\(.fullName)\t\(.description // "N/A")"'
 ```
 
-### 检查仓库是否存在
+### Check Repository Existence
 
 ```bash
-# 检查仓库是否存在并获取详情
-gh repo view "$ORG/$REPO" --json name,description,updatedAt,defaultBranchRef 2>/dev/null && echo "存在" || echo "不存在"
+# Check if repository exists and get details
+gh repo view "$ORG/$REPO" --json name,description,updatedAt,defaultBranchRef 2>/dev/null && echo "Exists" || echo "Does not exist"
 ```
 
 ### GitHub Organizations
 
-- **ArcBlock**: https://github.com/ArcBlock（主仓库，包含 blocklet-server 等核心项目）
-- **blocklet**: https://github.com/blocklet（Blocklet 应用仓库）
+- **ArcBlock**: https://github.com/ArcBlock (main repositories, including blocklet-server and other core projects)
+- **blocklet**: https://github.com/blocklet (Blocklet application repositories)
 
 ---
 
 ## Workflow
 
-按顺序执行以下阶段。
+Execute the following phases in order.
 
-### Phase 0: GitHub CLI 认证检查
+### Phase 0: GitHub CLI Authentication Check
 
-**最优先执行**: 在执行任何 `gh` 命令之前，必须先确保 GitHub CLI 已认证。
+**Execute first**: Before running any `gh` command, must ensure GitHub CLI is authenticated.
+
+**Important**: Must use `--scopes read:org` to request only read-level permissions. Do NOT omit this parameter.
 
 ```bash
-# 检查 gh 是否已认证
+# Check if gh is authenticated
 if ! gh auth status &>/dev/null; then
-    echo "❌ GitHub CLI 未认证，请先执行认证"
-    gh auth login
+    echo "❌ GitHub CLI not authenticated, please authenticate first"
+    # MUST specify --scopes read:org for read-only permissions
+    gh auth login --scopes read:org
 fi
 ```
 
-| 认证状态 | 处理 |
-|----------|------|
-| 未安装 gh | 提示安装：`brew install gh` (macOS) 或参考 https://cli.github.com/ |
-| 未认证 | 引导执行 `gh auth login` 完成认证, 可以帮用户执行认证, 并且告诉用户怎么做 |
-| 已认证 | 继续下一步 |
+| Authentication Status | Action |
+|-----------------------|--------|
+| gh not installed | Prompt to install: `brew install gh` (macOS) or refer to https://cli.github.com/ |
+| Not authenticated | **Must** run `gh auth login --scopes read:org` (read-only permissions required) |
+| Authenticated | Continue to next step |
 
 ---
 
 ### Phase 1: Issue/Repo Resolution
 
-识别用户意图，确定要开发的仓库。
+**Prerequisite**: Must complete Phase 0 (GitHub CLI Authentication) before analyzing any URL or repository.
 
-| 触发方式 | 示例 | 处理 |
-|----------|------|------|
-| GitHub Issue URL | `https://github.com/ArcBlock/media-kit/issues/123` | **必须**读取 issue 内容分析 |
-| **Blocklet URL** | `https://xxx.ip.abtnet.io/image-bin/admin` | 使用 `blocklet-url-analyzer` skill 分析 |
-| 仓库名 + 问题描述 | "帮我修复 media-kit 的图片问题" | 使用 gh API 搜索仓库 |
-| 问题描述 | "讨论区评论功能有 bug" | 关键词搜索仓库 |
-| 直接指定 | "我要开发 snap-kit" | 使用 gh API 验证仓库存在 |
+Identify user intent and determine which repository to develop.
 
-#### 1.0 URL 类型判断
+| Trigger Method | Example | Handling |
+|----------------|---------|----------|
+| GitHub Issue URL | `https://github.com/ArcBlock/media-kit/issues/123` | **Must** read issue content for analysis |
+| **Blocklet URL** | `https://xxx.ip.abtnet.io/image-bin/admin` | Use `blocklet-url-analyzer` skill to analyze |
+| Repo name + problem description | "Help me fix the media-kit image issue" | Use gh API to search repository |
+| Problem description | "Discussion comment feature has a bug" | Keyword search repository |
+| Direct specification | "I want to develop snap-kit" | Use gh API to verify repository exists |
 
-当用户提供 URL 时，首先判断 URL 类型：
+#### 1.0 URL Type Detection
+
+When user provides a URL, first determine URL type:
 
 ```bash
-# 判断是否为 GitHub URL
+# Check if it's a GitHub URL
 if [[ "$URL" =~ ^https?://github\.com/ ]]; then
-    # GitHub URL → 走 1.2 Issue 处理或直接提取仓库
+    # GitHub URL → proceed to 1.2 Issue handling or directly extract repository
     IS_GITHUB_URL=true
 else
-    # 非 GitHub URL → 使用 blocklet-url-analyzer skill 分析
+    # Non-GitHub URL → use blocklet-url-analyzer skill to analyze
     IS_GITHUB_URL=false
 fi
 ```
 
-**非 GitHub URL 处理流程**:
+**Non-GitHub URL Handling Flow**:
 
-1. 读取 `blocklet-url-analyzer` skill 定义
-2. 按照 skill 流程分析 URL
-3. 根据分析结果判断：
+1. Read `blocklet-url-analyzer` skill definition
+2. Follow skill flow to analyze URL
+3. Based on analysis result:
 
-| 分析结果类型 | 处理 |
-|-------------|------|
-| `DAEMON` | 提示用户应使用 `blocklet-server-dev-setup` |
-| `BLOCKLET_SERVICE` | 提示用户应使用 `blocklet-server-dev-setup` |
-| `BLOCKLET` | 获取对应仓库，继续 Phase 2 |
-| `UNKNOWN` | 使用 AskUserQuestion 让用户手动指定 |
+| Analysis Result Type | Handling |
+|---------------------|----------|
+| `DAEMON` | Inform user they should use `blocklet-server-dev-setup` |
+| `BLOCKLET_SERVICE` | Inform user they should use `blocklet-server-dev-setup` |
+| `BLOCKLET` | Get corresponding repository, continue to Phase 2 |
+| `UNKNOWN` | Use AskUserQuestion to let user specify manually |
 
-**blocklet-url-analyzer skill 位置**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
+**blocklet-url-analyzer skill location**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
 
-#### 1.1 仓库搜索与验证
+#### 1.1 Repository Search and Verification
 
-当用户提供仓库名或关键词时，使用 gh API 搜索：
+When user provides repository name or keywords, use gh API to search:
 
 ```bash
-# 精确匹配仓库名（优先在 ArcBlock 和 blocklet 组织搜索）
+# Exact match repository name (prioritize ArcBlock and blocklet organizations)
 REPO_NAME="media-kit"
 gh repo view "ArcBlock/$REPO_NAME" --json fullName 2>/dev/null || \
 gh repo view "blocklet/$REPO_NAME" --json fullName 2>/dev/null || \
-echo "未找到仓库"
+echo "Repository not found"
 
-# 模糊搜索（按更新时间排序）
+# Fuzzy search (sorted by update time)
 gh search repos "$KEYWORD" --owner ArcBlock --owner blocklet --sort updated --limit 5 \
   --json fullName,description,updatedAt \
   --jq '.[] | "\(.fullName) - \(.description // "N/A") (updated: \(.updatedAt[:10]))"'
 ```
 
-**匹配失败**: 使用 AskUserQuestion 显示搜索结果让用户选择。
+**Match failure**: Use AskUserQuestion to display search results for user selection.
 
-#### 1.2 Issue URL 处理（重要）
+#### 1.2 Issue URL Handling (Important)
 
-当用户提供 GitHub Issue URL 时，**不能**只解析 URL 提取仓库，**必须**读取 issue 内容：
+When user provides GitHub Issue URL, you **must not** just parse URL to extract repository, you **must** read issue content:
 
 ```bash
-# 解析 URL 提取 org/repo/issue_number
+# Parse URL to extract org/repo/issue_number
 gh issue view $ISSUE_NUMBER --repo $ORG/$REPO --json title,body,labels
 ```
 
-**分析 issue 内容**:
-1. 阅读 issue 标题和正文
-2. 识别涉及的产品/组件关键词
-3. 判断是否涉及多个仓库
+**Analyze issue content**:
+1. Read issue title and body
+2. Identify product/component keywords mentioned
+3. Determine if multiple repositories are involved
 
-**多仓库场景示例**:
+**Multi-repository scenario examples**:
 
-| Issue 位置 | Issue 内容关键词 | 实际涉及仓库 |
-|------------|------------------|--------------|
-| `media-kit` | "Discuss Kit 上传图片触发 2 次" | `media-kit`（uploader）+ `discuss-kit`（调用方） |
-| `discuss-kit` | "图片上传组件 onUploadSuccess 异常" | `discuss-kit` + `media-kit`（组件提供方） |
-| `blocklet-server` | "DID Connect 登录失败" | `blocklet-server` + `did-connect` |
-| `did-spaces` | "PaymentKit 支付回调问题" | `did-spaces` + `paymentkit` |
+| Issue Location | Issue Content Keywords | Actual Repositories Involved |
+|----------------|------------------------|------------------------------|
+| `media-kit` | "Discuss Kit image upload triggers twice" | `media-kit` (uploader) + `discuss-kit` (caller) |
+| `discuss-kit` | "Image upload component onUploadSuccess exception" | `discuss-kit` + `media-kit` (component provider) |
+| `blocklet-server` | "DID Connect login failed" | `blocklet-server` + `did-connect` |
+| `did-spaces` | "PaymentKit payment callback issue" | `did-spaces` + `paymentkit` |
 
-**判断逻辑**:
-- Issue 所在仓库是**主仓库**（问题报告位置）
-- Issue 内容提到的其他产品是**关联仓库**（可能需要同时查看）
+**Decision logic**:
+- Repository where Issue is located is the **primary repository** (issue report location)
+- Other products mentioned in Issue content are **related repositories** (may need to view simultaneously)
 
-#### 1.3 多仓库处理
+#### 1.3 Multi-Repository Handling
 
-如果识别到多个仓库：
+If multiple repositories are identified:
 
-1. **使用 AskUserQuestion 询问用户**:
-   - 选项 A: 只克隆主仓库 `{主仓库名}`
-   - 选项 B: 同时克隆主仓库和关联仓库 `{主仓库名}` + `{关联仓库名}`
-   - 选项 C: 用户指定其他仓库
+1. **Use AskUserQuestion to ask user**:
+   - Option A: Clone only primary repository `{primary repository name}`
+   - Option B: Clone both primary and related repositories `{primary repository name}` + `{related repository name}`
+   - Option C: User specifies other repository
 
-2. **记录变量**:
-   - `PRIMARY_REPO`: 主仓库（issue 所在位置）
-   - `RELATED_REPOS`: 关联仓库列表（可能为空）
+2. **Record variables**:
+   - `PRIMARY_REPO`: Primary repository (where issue is located)
+   - `RELATED_REPOS`: Related repository list (may be empty)
 
-3. **后续 Phase 2-6 对每个选中的仓库执行**
+3. **Execute subsequent Phases 2-6 for each selected repository**
 
-**匹配失败**: 使用 AskUserQuestion 让用户选择或输入完整 GitHub 路径。
+**Match failure**: Use AskUserQuestion to let user select or input complete GitHub path.
 
 ---
 
 ### Phase 2: Repo Clone & Permission Check
 
-#### 2.1 检查本地仓库
+#### 2.1 Check Local Repository
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/$REPO"
 [ -d "$REPO_PATH" ] && cd "$REPO_PATH" && git fetch origin
 ```
 
-#### 2.2 检查 GitHub 权限
+#### 2.2 Check GitHub Permissions
 
 ```bash
-gh api repos/$ORG/$REPO --jq '.permissions'
-# 返回: {"admin":true,"push":true,"pull":true}
+gh api repos/$ORG/$REPO --jq '.permissions.pull'
+# Returns: true or false
 ```
 
-| 权限情况 | 处理 |
-|----------|------|
-| 无访问权限 | 提示联系管理员或检查 GitHub 登录 |
-| 只有 read 权限 | 提示可查看但无法推送，建议 fork |
-| 有 push 权限 | 正常继续 |
+| Permission Status | Handling |
+|-------------------|----------|
+| No access (`pull: false`) | Prompt to contact administrator or check GitHub login |
+| Has read permission (`pull: true`) | Continue normally |
 
-#### 2.3 克隆仓库
+#### 2.3 Clone Repository
 
-克隆到 `~/arcblock-repos/$REPO`（优先 SSH，失败则 HTTPS）。
+Clone to `~/arcblock-repos/$REPO` (prefer SSH, fallback to HTTPS on failure).
 
-#### 2.4 查找 Blocklet 项目
+#### 2.4 Find Blocklet Project
 
 ```bash
 find . -name "blocklet.yml" -o -name "blocklet.yaml" | grep -v node_modules
 ```
 
-| 情况 | 处理 |
-|------|------|
-| 未找到 | 提示不是 blocklet 项目 |
-| 找到 1 个 | 自动使用 |
-| 找到多个 | AskUserQuestion 让用户选择 |
+| Situation | Handling |
+|-----------|----------|
+| Not found | Prompt this is not a blocklet project |
+| Found 1 | Auto-select |
+| Found multiple | Use AskUserQuestion for user selection |
 
-**记录变量**:
-- `REPO_ROOT`: 仓库根目录（依赖安装在这里）
-- `BLOCKLET_DIR`: blocklet.yml 所在目录（启动在这里）
+**Record variables**:
+- `REPO_ROOT`: Repository root directory (dependencies installed here)
+- `BLOCKLET_DIR`: Directory containing blocklet.yml (start here)
 
-#### 2.5 检测开发分支并切换
+#### 2.5 Detect Development Branch and Switch
 
-**根据 `blocklet-branch` skill 切换到主工作分支**。
-skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+**Switch to main working branch according to `blocklet-branch` skill**.
+Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
 
 ---
 
 ### Phase 3: Prerequisites Check
 
-#### 3.0 基础工具检查
+#### 3.0 Basic Tool Check
 
-以下工具在整个流程中被频繁使用，必须首先确认已安装：
+The following tools are frequently used throughout the workflow and must be confirmed installed first:
 
-| 工具 | 用途 | 检查命令 | 安装方式 |
-|------|------|----------|----------|
-| **git** | 仓库克隆、分支操作 | `git --version` | 系统自带或 `brew install git` |
-| **gh** | GitHub API 操作（仓库搜索、权限检查、Issue 读取、PR 查询） | `gh --version` | `brew install gh` |
-| **jq** | JSON 解析 | `jq --version` | `brew install jq` (macOS) / `apt install jq` (Ubuntu) |
-| **curl** | 域名可达性测试 | `curl --version` | 系统自带 |
+| Tool | Purpose | Check Command | Installation |
+|------|---------|---------------|--------------|
+| **git** | Repository cloning, branch operations | `git --version` | Built-in or `brew install git` |
+| **gh** | GitHub API operations (repository search, permission check, Issue reading, PR queries) | `gh --version` | `brew install gh` |
+| **jq** | JSON parsing | `jq --version` | `brew install jq` (macOS) / `apt install jq` (Ubuntu) |
+| **curl** | Domain reachability testing | `curl --version` | Built-in |
 
-**注意**: gh 认证已在 Phase 0 检查完成。
+**Note**: gh authentication already checked in Phase 0.
 
 #### 3.1 Node.js (Required: 22+)
 
-未安装或版本过低时，使用 nvm 安装 Node.js 22。
+If not installed or version too low, use nvm to install Node.js 22.
 
 #### 3.2 pnpm
 
@@ -300,7 +307,7 @@ corepack enable && corepack prepare pnpm@latest --activate
 
 #### 3.3 nginx
 
-必须安装但**不能自启动运行**（Blocklet Server 自己管理）。
+Must be installed but **must not auto-start** (Blocklet Server manages it).
 
 **macOS**:
 ```bash
@@ -309,23 +316,23 @@ brew install nginx
 
 **Ubuntu/Debian**:
 ```bash
-# 必须安装 nginx-extras，包含 ngx_stream_module 等必需模块
+# Must install nginx-extras, which includes ngx_stream_module and other required modules
 sudo apt install -y nginx-extras
 sudo systemctl stop nginx
 sudo systemctl disable nginx
 ```
 
-**验证 nginx 模块**:
+**Verify nginx modules**:
 ```bash
 nginx -V 2>&1 | grep -o 'with-stream\|http_v2_module\|http_ssl_module'
-# 应显示: with-stream, http_v2_module, http_ssl_module
+# Should show: with-stream, http_v2_module, http_ssl_module
 ```
 
-**注意**: 普通 `nginx` 包可能缺少 `ngx_stream_module`，会导致 Blocklet Server 启动失败。
+**Note**: Regular `nginx` package may lack `ngx_stream_module`, causing Blocklet Server startup failure.
 
 #### 3.4 tmux
 
-如果没有 tmux，帮助用户安装，方便管理终端进程。
+If tmux is not available, help user install it for easier terminal process management.
 
 **macOS**:
 ```bash
@@ -343,140 +350,140 @@ sudo apt install -y tmux
 npm install -g @blocklet/cli@beta
 ```
 
-版本日期比当前早 1 周以上时更新。
+Update if version date is more than 1 week old.
 
 #### 3.6 ulimit Check
 
-**重要**: 必须在启动 Blocklet Server **之前**检查，否则会导致 `worker_connections NaN` 错误。
+**Important**: Must check **before** starting Blocklet Server, otherwise will cause `worker_connections NaN` error.
 
 ```bash
-ulimit -n  # 不能是 unlimited，建议 >= 10240
-ulimit -n 65536  # 临时设置
+ulimit -n  # Cannot be unlimited, recommend >= 10240
+ulimit -n 65536  # Temporary setting
 ```
 
 ---
 
 ### Phase 4: Blocklet Server Setup
 
-Blocklet Server 有两种运行方式，**不能同时运行**：
+Blocklet Server has two modes of operation that **cannot run simultaneously**:
 
-| 运行方式 | 启动命令 | 检测方法 | 数据目录 |
-|----------|----------|----------|----------|
-| 生产版本 | `blocklet server start` | `blocklet server status` | `~/blocklet-server-data/` |
-| 源码开发 | `bun run start` (在 blocklet-server 仓库) | tmux 会话 `blocklet` | `~/blocklet-server-dev-data/` |
+| Mode | Start Command | Detection Method | Data Directory |
+|------|---------------|------------------|----------------|
+| Production version | `blocklet server start` | `blocklet server status` | `~/blocklet-server-data/` |
+| Source development | `bun run start` (in blocklet-server repo) | tmux session `blocklet` | `~/blocklet-server-dev-data/` |
 
-#### 4.0 检查 Blocklet Server 运行状态
+#### 4.0 Check Blocklet Server Running Status
 
-**必须同时检查两种运行方式**：
+**Must check both modes**:
 
 ```bash
-# 检查方式 1: 生产版本是否在运行
+# Check method 1: Is production version running
 PRODUCTION_RUNNING=false
 if blocklet server status 2>/dev/null | grep -q "Running"; then
     PRODUCTION_RUNNING=true
-    echo "✅ 检测到 Blocklet Server 生产版本正在运行"
+    echo "✅ Detected Blocklet Server production version running"
 fi
 
-# 检查方式 2: 源码开发版本是否在运行（tmux 会话名为 "blocklet"）
+# Check method 2: Is source development version running (tmux session named "blocklet")
 DEV_RUNNING=false
 if tmux has-session -t "blocklet" 2>/dev/null; then
     DEV_RUNNING=true
-    echo "✅ 检测到 blocklet-server 源码开发版本正在运行 (tmux session: blocklet)"
+    echo "✅ Detected blocklet-server source development version running (tmux session: blocklet)"
 fi
 ```
 
-#### 4.1 根据检测结果处理
+#### 4.1 Handle Based on Detection Results
 
-| 生产版本 | 源码开发 | 处理 |
-|----------|----------|------|
-| 运行中 | 未运行 | ✅ 直接使用，跳到 Phase 5 |
-| 未运行 | 运行中 | ⚠️ 询问用户：停止源码开发并启动生产版本，或直接使用源码开发版本 |
-| 未运行 | 未运行 | 需要启动生产版本，继续 4.2 |
-| 运行中 | 运行中 | ❌ 异常状态，询问用户停止哪个 |
+| Production Version | Source Development | Handling |
+|--------------------|-------------------|----------|
+| Running | Not running | ✅ Use directly, skip to Phase 5 |
+| Not running | Running | ⚠️ Ask user: stop source development and start production version, or continue using source development version |
+| Not running | Not running | Need to start production version, continue to 4.2 |
+| Running | Running | ❌ Abnormal state, ask user which to stop |
 
-**源码开发版本运行时的处理**：
+**Handling when source development version is running**:
 
-使用 `AskUserQuestion` 询问用户：
+Use `AskUserQuestion` to ask user:
 
 ```
-检测到 blocklet-server 源码开发版本正在运行 (tmux session: blocklet)。
-源码开发和生产版本不能同时运行。
+Detected blocklet-server source development version running (tmux session: blocklet).
+Source development and production versions cannot run simultaneously.
 
-选项：
-A. 停止源码开发，启动生产版本 (Recommended for blocklet dev)
-   - 执行: tmux kill-session -t blocklet && blocklet server start
-B. 继续使用源码开发版本
-   - 需要使用 bn-dev 命令（而非 blocklet dev）
-   - 如未配置 bn-dev，将自动创建符号链接
-C. 取消操作
+Options:
+A. Stop source development, start production version (Recommended for blocklet dev)
+   - Execute: tmux kill-session -t blocklet && blocklet server start
+B. Continue using source development version
+   - Need to use bn-dev command (instead of blocklet dev)
+   - If bn-dev not configured, will automatically create symlink
+C. Cancel operation
 ```
 
-**停止源码开发版本**：
+**Stop source development version**:
 
 ```bash
 tmux kill-session -t "blocklet" 2>/dev/null
-# 等待端口释放
+# Wait for port release
 sleep 3
 ```
 
-#### 4.1.1 配置 bn-dev（选择源码开发版本时）
+#### 4.1.1 Configure bn-dev (When Choosing Source Development Version)
 
-如果用户选择继续使用源码开发版本，需要确保 bn-dev 命令可用：
+If user chooses to continue using source development version, ensure bn-dev command is available:
 
-**检查 bn-dev 是否存在**:
+**Check if bn-dev exists**:
 ```bash
-which bn-dev || echo "bn-dev 未配置"
+which bn-dev || echo "bn-dev not configured"
 ```
 
-**如果未配置，创建符号链接**:
+**If not configured, create symlink**:
 ```bash
-# bn-dev 指向 blocklet-server 源码中的 dev.js
+# bn-dev points to dev.js in blocklet-server source
 BLOCKLET_SERVER_REPO="$HOME/arcblock-repos/blocklet-server"
 if [ -f "$BLOCKLET_SERVER_REPO/core/cli/tools/dev.js" ]; then
     sudo ln -sf "$BLOCKLET_SERVER_REPO/core/cli/tools/dev.js" /usr/local/bin/bn-dev
-    echo "✅ bn-dev 已配置"
+    echo "✅ bn-dev configured"
 else
-    echo "❌ 未找到 blocklet-server 源码，请先使用 blocklet-server-dev-setup skill 克隆仓库"
+    echo "❌ blocklet-server source not found, please use blocklet-server-dev-setup skill to clone repository first"
 fi
 ```
 
-**记录变量**:
-- `USE_DEV_SERVER`: 是否使用源码开发版本（true/false）
-- `DEV_CMD`: 启动命令（bn-dev 或 blocklet dev）
+**Record variables**:
+- `USE_DEV_SERVER`: Whether using source development version (true/false)
+- `DEV_CMD`: Start command (bn-dev or blocklet dev)
 
-#### 4.2 初始化（如果需要）
+#### 4.2 Initialize (If Needed)
 
-检查 `~/blocklet-server-data/.blocklet-server/config.yml` 是否存在。
+Check if `~/blocklet-server-data/.blocklet-server/config.yml` exists.
 
 ```bash
 mkdir -p ~/blocklet-server-data && cd ~/blocklet-server-data
 blocklet server init --yes --http-port 8080 --https-port 8443
 ```
 
-#### 4.3 检查端口配置
+#### 4.3 Check Port Configuration
 
-如果端口不是 8080/8443，修改配置后启动时**必须**使用 `--update-db`。
+If ports are not 8080/8443, **must** use `--update-db` when starting after modifying config.
 
-#### 4.4 启动
+#### 4.4 Start
 
 ```bash
 cd ~/blocklet-server-data
 ulimit -n 65536 && blocklet server start --update-db
 ```
 
-**启动失败检查**:
-1. `ulimit -n` 不能是 `unlimited`
-2. 端口是否为 8080/8443
-3. 修改端口后是否用了 `--update-db`
-4. 查看日志: `PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 50`
+**Startup failure checks**:
+1. `ulimit -n` cannot be `unlimited`
+2. Are ports 8080/8443
+3. Used `--update-db` after modifying ports
+4. View logs: `PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 50`
 
 ---
 
 ### Phase 5: Project Dependencies Install
 
-**注意**: 在**仓库根目录**执行。
+**Note**: Execute in **repository root directory**.
 
-检测包管理器（按 lock 文件优先级）和项目类型（Makefile > pnpm-workspace > 普通项目）。
+Detect package manager (by lock file priority) and project type (Makefile > pnpm-workspace > regular project).
 
 ```bash
 cd $REPO_ROOT
@@ -490,251 +497,251 @@ fi
 
 ### Phase 6: Start Development Server
 
-**注意**: 在 **blocklet.yml 所在目录** 执行。
+**Note**: Execute in **directory containing blocklet.yml**.
 
-#### 6.1 检测 tmux 环境并启动
+#### 6.1 Detect tmux Environment and Start
 
-**启动命令选择**（根据 Phase 4 的选择）:
+**Start command selection** (based on Phase 4 choice):
 
-| Server 类型 | 启动命令 | 说明 |
-|------------|----------|------|
-| 生产版本 | `blocklet dev` | 连接到 `blocklet server start` 启动的 Server |
-| 源码开发版本 | `bn-dev` | 连接到源码开发的 Server（tmux session: blocklet） |
+| Server Type | Start Command | Description |
+|-------------|---------------|-------------|
+| Production version | `blocklet dev` | Connect to Server started by `blocklet server start` |
+| Source development version | `bn-dev` | Connect to source development Server (tmux session: blocklet) |
 
-**记录变量**:
-- `TMUX_SESSION`: 会话名称，格式为 `blocklet-dev-{REPO}`
-- `HAS_TMUX`: 是否有 tmux 环境
-- `DEV_CMD`: 启动命令（`bn-dev` 或 `blocklet dev`）
+**Record variables**:
+- `TMUX_SESSION`: Session name, format `blocklet-dev-{REPO}`
+- `HAS_TMUX`: Whether tmux environment available
+- `DEV_CMD`: Start command (`bn-dev` or `blocklet dev`)
 
-| tmux 状态 | 处理 |
-|-----------|------|
-| 可用 | 在 tmux 会话中启动（先清理同名会话） |
-| 不可用 | 直接在当前终端启动 |
+| tmux Status | Handling |
+|-------------|----------|
+| Available | Start in tmux session (clean up same-named session first) |
+| Not available | Start directly in current terminal |
 
 ```bash
-# 根据 Phase 4 的选择确定启动命令
+# Determine start command based on Phase 4 choice
 if [ "$USE_DEV_SERVER" = "true" ]; then
     DEV_CMD="bn-dev"
 else
     DEV_CMD="blocklet dev"
 fi
 
-# 有 tmux 时
+# When tmux available
 TMUX_SESSION="blocklet-dev-$REPO"
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 tmux new-session -d -s "$TMUX_SESSION" -c "$BLOCKLET_DIR" "$DEV_CMD"
 ```
 
-#### 6.1.1 启动监控（重要）
+#### 6.1.1 Startup Monitoring (Important)
 
-**立即输出日志**: 启动 tmux 会话后，**不要等待启动完成**，立即查看并输出日志给用户：
+**Output logs immediately**: After starting tmux session, **do not wait for startup to complete**, immediately view and output logs to user:
 
 ```bash
-# 启动后立即查看日志（等待 2 秒让进程开始输出）
+# View logs immediately after startup (wait 2 seconds for process to start outputting)
 sleep 2
 tmux capture-pane -t "$TMUX_SESSION" -p | tail -30
 ```
 
-**持续监控**: `blocklet dev` 启动过程因 blocklet 类型、依赖情况、环境配置不同而**差异很大**，必须持续监控：
+**Continuous monitoring**: `blocklet dev` startup process **varies greatly** depending on blocklet type, dependencies, and environment configuration; must continuously monitor:
 
 ```bash
-# 检查进程是否还在运行
-tmux has-session -t "$TMUX_SESSION" 2>/dev/null && echo "进程运行中" || echo "❌ 进程已退出"
+# Check if process is still running
+tmux has-session -t "$TMUX_SESSION" 2>/dev/null && echo "Process running" || echo "❌ Process exited"
 
-# 查看最新日志
+# View latest logs
 tmux capture-pane -t "$TMUX_SESSION" -p | tail -50
 ```
 
-**监控要点**:
+**Monitoring points**:
 
-| 检查项 | 命令 | 异常处理 |
-|--------|------|----------|
-| 进程是否存活 | `tmux has-session -t "$TMUX_SESSION"` | 进程退出则分析日志找原因 |
-| 是否有错误输出 | 查看日志中的 `error`、`failed`、`ENOENT` | 根据错误类型尝试修复 |
-| 是否卡住不动 | 多次查看日志无变化 | 可能缺少依赖或配置问题 |
-| 端口冲突 | `EADDRINUSE` | 找出占用端口的进程并处理 |
+| Check Item | Command | Exception Handling |
+|------------|---------|-------------------|
+| Process alive | `tmux has-session -t "$TMUX_SESSION"` | If process exits, analyze logs for cause |
+| Error output | Check logs for `error`, `failed`, `ENOENT` | Try to fix based on error type |
+| Stuck/frozen | Multiple log checks show no changes | May be missing dependencies or config issues |
+| Port conflict | `EADDRINUSE` | Find process using port and handle |
 
-**常见启动问题及解决**:
+**Common startup issues and solutions**:
 
-| 日志关键词 | 可能原因 | 解决方案 |
-|------------|----------|----------|
-| `ENOENT` | 缺少文件或依赖未安装 | 重新执行 `pnpm install` 或 `make init` |
-| `EADDRINUSE` | 端口被占用 | `lsof -i :PORT` 找出进程，决定是否 kill |
-| `Cannot find module` | 依赖未安装或路径错误 | 检查 node_modules，重新安装依赖 |
-| `Permission denied` | 权限问题 | 检查文件权限，可能需要 sudo |
-| `command not found` | 工具未安装 | 安装对应工具（如 turbo、vite 等） |
-| `Blocklet Server is not running` | Server 未启动 | 回到 Phase 4 启动 Server |
-| 进程直接退出无输出 | 配置错误或环境问题 | 检查 blocklet.yml 和 .env 文件 |
-| `out of memory` | 内存不足 | 关闭其他进程，或增加 swap |
+| Log Keyword | Possible Cause | Solution |
+|-------------|----------------|----------|
+| `ENOENT` | Missing file or dependencies not installed | Re-run `pnpm install` or `make init` |
+| `EADDRINUSE` | Port in use | `lsof -i :PORT` to find process, decide whether to kill |
+| `Cannot find module` | Dependencies not installed or path error | Check node_modules, reinstall dependencies |
+| `Permission denied` | Permission issue | Check file permissions, may need sudo |
+| `command not found` | Tool not installed | Install corresponding tool (e.g., turbo, vite, etc.) |
+| `Blocklet Server is not running` | Server not started | Return to Phase 4 to start Server |
+| Process exits immediately with no output | Config error or environment issue | Check blocklet.yml and .env files |
+| `out of memory` | Insufficient memory | Close other processes, or increase swap |
 
-**重要原则**:
-1. **不要假设启动成功** - 每个 blocklet 启动时间和行为都不同
-2. **主动查看日志** - 发现问题及时处理，不要等用户反馈
-3. **尝试自动修复** - 遇到常见问题先尝试解决，解决不了再告知用户
-4. **保持进程可见** - 始终让用户知道当前启动状态
+**Important principles**:
+1. **Do not assume startup succeeded** - each blocklet has different startup time and behavior
+2. **Proactively view logs** - identify issues early and handle them, don't wait for user feedback
+3. **Try automatic fixes** - attempt to resolve common issues first, inform user if unable to resolve
+4. **Keep process visible** - always let user know current startup status
 
 ---
 
-#### 6.2 测试域名可达性
+#### 6.2 Test Domain Reachability
 
-启动成功后，**必须**测试 DID 域名是否可访问：
+After successful startup, **must** test if DID domain is accessible:
 
 ```bash
-# 测试 IP 域名和 Blocklet DID 域名
+# Test IP domain and Blocklet DID domain
 curl -sI --connect-timeout 5 "https://{IP_DOMAIN}:8443" 2>/dev/null | head -1
 curl -sI --connect-timeout 5 "https://{BLOCKLET_DID_DOMAIN}:8443" 2>/dev/null | head -1
 ```
 
-| 测试结果 | 输出 |
-|----------|------|
-| 两个域名都返回 HTTP 状态码 | ✅ 域名访问正常 |
-| 任一域名无法访问 | ⚠️ 输出 DNS 修复建议（见 Error Handling） |
+| Test Result | Output |
+|-------------|--------|
+| Both domains return HTTP status code | ✅ Domain access normal |
+| Either domain inaccessible | ⚠️ Output DNS fix suggestions (see Error Handling) |
 
-#### 6.3 查询最近合并的 PR（如有 GitHub 权限）
+#### 6.3 Query Recent Merged PRs (If GitHub Permissions Available)
 
-如果 Phase 2.2 检测到有 push 权限，查询最近 5 个合并的 PR：
+If Phase 2.2 detected push permissions, query last 5 merged PRs:
 
 ```bash
 gh pr list --repo $ORG/$REPO --state merged --limit 5 --json number,title,author,mergedAt,baseRefName \
   --template '{{range .}}#{{.number}} {{.title}} (by @{{.author.login}}, merged to {{.baseRefName}}){{"\n"}}{{end}}'
 ```
 
-#### 6.4 输出启动信息
+#### 6.4 Output Startup Information
 
-**URL 路径说明（重要，不要混淆）**:
+**URL Path Notes (Important, do not confuse)**:
 
-| 类型 | 路径 | 用途 |
-|------|------|------|
-| **Server Admin** | `/.well-known/server/admin` | 整个 Blocklet Server 的管理面板 |
-| **Blocklet Service** | `/.well-known/service/admin` | 单个 blocklet 的管理页面 |
+| Type | Path | Purpose |
+|------|------|---------|
+| **Server Admin** | `/.well-known/server/admin` | Management panel for entire Blocklet Server |
+| **Blocklet Service** | `/.well-known/service/admin` | Management page for individual blocklet |
 
-⚠️ **注意**: Server Admin 使用 IP 域名（如 `192-168-1-80.ip.abtnet.io`），路径是 `/server/admin`，不是 `/service/admin`。
+⚠️ **Note**: Server Admin uses IP domain (e.g., `192-168-1-80.ip.abtnet.io`), path is `/server/admin`, not `/service/admin`.
 
 ```
-===== 开发环境已就绪 =====
+===== Development Environment Ready =====
 
-项目: {项目名称}
-仓库: {ORG}/{REPO}
-路径: ~/arcblock-repos/{REPO}
+Project: {project name}
+Repository: {ORG}/{REPO}
+Path: ~/arcblock-repos/{REPO}
 
-===== 访问地址 =====
+===== Access URLs =====
 Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
 Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
 Blocklet Service: https://{BLOCKLET_DID_DOMAIN}:8443/.well-known/service/admin/
 
-{根据 6.2 测试结果}
-✅ 域名访问正常
-或
-⚠️ DID 域名无法访问，请将 DNS 设置为 8.8.8.8:
+{Based on 6.2 test results}
+✅ Domain access normal
+or
+⚠️ DID domain inaccessible, please set DNS to 8.8.8.8:
    macOS: sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 
-===== 常用命令 =====
-{如果使用 tmux 启动}
-  - 查看 blocklet dev 输出: tmux attach -t {TMUX_SESSION}
-  - 在其他终端查看日志: tmux capture-pane -t {TMUX_SESSION} -p | tail -50
-  - 停止 blocklet dev: tmux kill-session -t {TMUX_SESSION}
-  - 列出所有 tmux 会话: tmux ls
+===== Common Commands =====
+{If started with tmux}
+  - View blocklet dev output: tmux attach -t {TMUX_SESSION}
+  - View logs in another terminal: tmux capture-pane -t {TMUX_SESSION} -p | tail -50
+  - Stop blocklet dev: tmux kill-session -t {TMUX_SESSION}
+  - List all tmux sessions: tmux ls
 
-{如果未使用 tmux}
-  - 停止 blocklet dev: Ctrl+C
+{If not using tmux}
+  - Stop blocklet dev: Ctrl+C
 
-{通用命令}
-  - 停止 Blocklet Server: blocklet server stop -f
-  - 查看 Server PM2 进程: PM2_HOME=~/.arcblock/abtnode pm2 list
-  - 查看 Server PM2 日志: PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
+{Common commands}
+  - Stop Blocklet Server: blocklet server stop -f
+  - View Server PM2 processes: PM2_HOME=~/.arcblock/abtnode pm2 list
+  - View Server PM2 logs: PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
 
-===== 版本更新指引 =====
-完成开发后，使用 blocklet-updater skill 创建新版本：
-  1. blocklet version patch  # 升级版本号
-  2. pnpm install && pnpm run build  # 安装依赖并构建
-  3. blocklet meta  # 验证元数据
-  4. blocklet bundle --create-release  # 创建发布包
+===== Version Update Guide =====
+After completing development, use blocklet-updater skill to create new version:
+  1. blocklet version patch  # Bump version number
+  2. pnpm install && pnpm run build  # Install dependencies and build
+  3. blocklet meta  # Verify metadata
+  4. blocklet bundle --create-release  # Create release bundle
 
-详细说明请参考: ~/arcblock-repos/agent-skills/plugins/blocklet/skills/blocklet-updater/SKILL.md
+For detailed instructions, refer to: ~/arcblock-repos/agent-skills/plugins/blocklet/skills/blocklet-updater/SKILL.md
 
-===== 接下来 =====
-开发环境已处于 live 状态，您可以：
-- 描述您要修改的功能
-- 粘贴需要修复的 bug 详情
+===== Next Steps =====
+Development environment is now in live state. You can:
+- Describe the feature you want to modify
+- Paste bug details that need fixing
 ```
 
 ---
 
-### Phase 7: 工作分支创建
+### Phase 7: Working Branch Creation
 
-当用户带着具体任务（Issue URL、问题描述、或明确说了想改什么）启动开发环境时，询问是否创建工作分支。
+When user starts development environment with a specific task (Issue URL, problem description, or explicitly stated what they want to change), ask whether to create a working branch.
 
-**触发条件**：用户提供了 Issue URL 或具体任务描述、或明确说了想改什么
-**跳过条件**：用户仅要求创建环境，没有具体任务
+**Trigger condition**: User provided Issue URL or specific task description, or explicitly stated what they want to change
+**Skip condition**: User only requested environment creation, no specific task
 
-**根据 `blocklet-branch` skill 的到主工作分支{MAIN_BRANCH}和分支前缀规律**。
-skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+**Get main working branch {MAIN_BRANCH} and branch prefix patterns according to `blocklet-branch` skill**.
+Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
 
-#### 7.1 询问是否创建工作分支
+#### 7.1 Ask Whether to Create Working Branch
 
-根据分支前缀规律来创建一个 {建议的分支名}
+Generate a {suggested branch name} based on branch prefix patterns
 
-使用 `AskUserQuestion`：
-
-```
-当前在 {MAIN_BRANCH} 分支上。是否需要创建工作分支？
-
-选项：
-A. 创建分支: {建议的分支名} (Recommended)
-B. 使用其他分支名
-C. 不创建，直接在 {MAIN_BRANCH} 上开发
-```
-
-#### 7.2 创建分支（如用户确认）
-
-基于 `$MAIN_BRANCH` 创建新分支并切换。
-
-#### 7.3 输出就绪信息
+Use `AskUserQuestion`:
 
 ```
-===== 开发环境已就绪 =====
+Currently on {MAIN_BRANCH} branch. Do you need to create a working branch?
 
-仓库: ~/arcblock-repos/{REPO}
-分支: {BRANCH_NAME} (基于 {MAIN_BRANCH})
-服务: blocklet dev 已在 tmux 会话 {TMUX_SESSION} 中运行
+Options:
+A. Create branch: {suggested branch name} (Recommended)
+B. Use a different branch name
+C. Don't create, develop directly on {MAIN_BRANCH}
+```
 
-访问地址:
+#### 7.2 Create Branch (If User Confirms)
+
+Create new branch based on `$MAIN_BRANCH` and switch to it.
+
+#### 7.3 Output Ready Information
+
+```
+===== Development Environment Ready =====
+
+Repository: ~/arcblock-repos/{REPO}
+Branch: {BRANCH_NAME} (based on {MAIN_BRANCH})
+Service: blocklet dev running in tmux session {TMUX_SESSION}
+
+Access URLs:
 - Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
 - Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
 
-常用命令:
-- 查看日志: tmux attach -t {TMUX_SESSION}
-- 停止服务: tmux kill-session -t {TMUX_SESSION}
+Common commands:
+- View logs: tmux attach -t {TMUX_SESSION}
+- Stop service: tmux kill-session -t {TMUX_SESSION}
 ```
 
-使用其他 SKill 完成工作:
+Use other skills to complete work:
 
-/blocklet-pr 修改完代码, 提交一个符合规范的 PR
+/blocklet-pr After modifying code, submit a PR that follows conventions
 
 ---
 
 ## Error Handling
 
-| 错误 | 处理 |
-|------|------|
-| 无法识别仓库 | 显示仓库列表让用户选择 |
-| GitHub 权限不足 | 提示联系管理员或 fork |
-| 不是 blocklet 项目 | 提示没有 blocklet.yml |
-| Blocklet Server 启动失败 | 检查 ulimit、端口、--update-db |
-| nginx `worker_connections NaN` | 设置 `ulimit -n 65536` |
-| DID 域名无法访问 | DNS 配置为 8.8.8.8（见下方） |
+| Error | Handling |
+|-------|----------|
+| Cannot identify repository | Display repository list for user selection |
+| Insufficient GitHub permissions | Prompt to contact administrator or fork |
+| Not a blocklet project | Prompt no blocklet.yml found |
+| Blocklet Server startup failed | Check ulimit, ports, --update-db |
+| nginx `worker_connections NaN` | Set `ulimit -n 65536` |
+| DID domain inaccessible | Configure DNS to 8.8.8.8 (see below) |
 
-### DID 域名无法访问
+### DID Domain Inaccessible
 
-**症状**: 浏览器无法访问 `*.did.abtnet.io` 或 `*.ip.abtnet.io`
+**Symptoms**: Browser cannot access `*.did.abtnet.io` or `*.ip.abtnet.io`
 
-**诊断**:
+**Diagnosis**:
 ```bash
-nslookup 192-168-1-80.ip.abtnet.io        # 本地 DNS
+nslookup 192-168-1-80.ip.abtnet.io        # Local DNS
 nslookup 192-168-1-80.ip.abtnet.io 8.8.8.8  # Google DNS
 ```
 
-**解决**: 更换 DNS
+**Solution**: Change DNS
 ```bash
 # macOS
 sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
@@ -742,16 +749,15 @@ sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 
 ---
 
-## 停止 Blocklet Dev 进程
+## Stop Blocklet Dev Process
 
 ```bash
-# 停止单个项目
+# Stop single project
 tmux kill-session -t "blocklet-dev-$REPO"
 
-# 完全清理（停止所有 blocklet-dev 会话 + Server）
+# Complete cleanup (stop all blocklet-dev sessions + Server)
 tmux ls 2>/dev/null | grep "^blocklet-dev-" | cut -d: -f1 | xargs -I {} tmux kill-session -t {}
 blocklet server stop -f
 ```
 
 ---
-
