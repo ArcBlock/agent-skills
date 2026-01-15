@@ -33,6 +33,7 @@ This skill includes local reference files for repository lookup:
 
 - `references/org-arcblock-repos.md` - All active ArcBlock organization repos
 - `references/org-blocklet-repos.md` - All active blocklet organization repos
+- `references/org-aigne-repos.md` - All active AIGNE-io organization repos
 
 **Always query these files first instead of using gh commands to search GitHub.**
 

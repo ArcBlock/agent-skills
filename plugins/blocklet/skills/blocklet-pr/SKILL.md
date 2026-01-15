@@ -51,6 +51,7 @@ Read from local reference files to get branch conventions for the repository.
 Search for repo-specific branch info in reference files:
 - `blocklet-url-analyzer/references/org-arcblock-repos.md`
 - `blocklet-url-analyzer/references/org-blocklet-repos.md`
+- `blocklet-url-analyzer/references/org-aigne-repos.md`
 
 **Default branch conventions** (if no specific info found in references):
 
@@ -58,6 +59,7 @@ Search for repo-specific branch info in reference files:
 |--------------|---------------------|
 | ArcBlock | `dev` |
 | blocklet | `main` |
+| AIGNE-io | `main` |
 
 **Output variables**: `MAIN_BRANCH`, `MAIN_BRANCH_REASON`
 

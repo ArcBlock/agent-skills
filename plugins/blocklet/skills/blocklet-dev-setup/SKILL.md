@@ -83,6 +83,7 @@ Query the `blocklet-url-analyzer` skill's reference files:
 
 - `blocklet-url-analyzer/references/org-arcblock-repos.md` - All ArcBlock organization repos
 - `blocklet-url-analyzer/references/org-blocklet-repos.md` - All blocklet organization repos
+- `blocklet-url-analyzer/references/org-aigne-repos.md` - All AIGNE-io organization repos
 
 These files contain: Name, URL, Main Branch, Branch Prefix, Description, Category for each repository.
 
@@ -94,6 +95,7 @@ Search by keyword in the reference files listed above.
 
 - **ArcBlock**: https://github.com/ArcBlock (main repositories, including blocklet-server and other core projects)
 - **blocklet**: https://github.com/blocklet (Blocklet application repositories)
+- **AIGNE-io**: https://github.com/AIGNE-io (AIGNE AI framework and related repositories)
 
 ---
 
@@ -173,6 +175,7 @@ When user provides repository name or keywords, search in local reference files:
 
 - `blocklet-url-analyzer/references/org-arcblock-repos.md`
 - `blocklet-url-analyzer/references/org-blocklet-repos.md`
+- `blocklet-url-analyzer/references/org-aigne-repos.md`
 
 **Reference files contain**: Name, URL, Main Branch, Branch Prefix, Description, Category for all active repositories.
 
