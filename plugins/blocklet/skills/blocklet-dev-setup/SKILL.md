@@ -1,6 +1,6 @@
 ---
 name: blocklet-dev-setup
-description: 配置 blocklet 类型仓库的开发环境。支持解析 GitHub Issue URL 或问题描述，自动定位仓库、检查权限、克隆代码、安装依赖、启动开发服务器。使用 `/blocklet-dev-setup` 或说"帮我修复 xxx blocklet 的问题"、"我要开发 xxx blocklet"触发。
+description: 配置 blocklet 类型仓库的开发环境。支持解析 GitHub Issue URL、Blocklet URL 或问题描述，自动定位仓库、检查权限、克隆代码、安装依赖、启动开发服务器。使用 `/blocklet-dev-setup` 或说"帮我修复 xxx blocklet 的问题"、"我要开发 xxx blocklet"、"我想修改这个 URL 相关的代码"触发。
 ---
 
 # Blocklet Dev Setup
@@ -378,13 +378,14 @@ fi
 
 ```
 检测到 blocklet-server 源码开发版本正在运行 (tmux session: blocklet)。
-源码开发和生产版本使用相同端口，不能同时运行。
+源码开发和生产版本不能同时运行。
 
 选项：
 A. 停止源码开发，启动生产版本 (Recommended for blocklet dev)
    - 执行: tmux kill-session -t blocklet && blocklet server start
 B. 继续使用源码开发版本
-   - blocklet dev 将连接到源码开发的 Server
+   - 需要使用 bn-dev 命令（而非 blocklet dev）
+   - 如未配置 bn-dev，将自动创建符号链接
 C. 取消操作
 ```
 
@@ -395,6 +396,31 @@ tmux kill-session -t "blocklet" 2>/dev/null
 # 等待端口释放
 sleep 3
 ```
+
+#### 4.1.1 配置 bn-dev（选择源码开发版本时）
+
+如果用户选择继续使用源码开发版本，需要确保 bn-dev 命令可用：
+
+**检查 bn-dev 是否存在**:
+```bash
+which bn-dev || echo "bn-dev 未配置"
+```
+
+**如果未配置，创建符号链接**:
+```bash
+# bn-dev 指向 blocklet-server 源码中的 dev.js
+BLOCKLET_SERVER_REPO="$HOME/arcblock-repos/blocklet-server"
+if [ -f "$BLOCKLET_SERVER_REPO/core/cli/tools/dev.js" ]; then
+    sudo ln -sf "$BLOCKLET_SERVER_REPO/core/cli/tools/dev.js" /usr/local/bin/bn-dev
+    echo "✅ bn-dev 已配置"
+else
+    echo "❌ 未找到 blocklet-server 源码，请先使用 blocklet-server-dev-setup skill 克隆仓库"
+fi
+```
+
+**记录变量**:
+- `USE_DEV_SERVER`: 是否使用源码开发版本（true/false）
+- `DEV_CMD`: 启动命令（bn-dev 或 blocklet dev）
 
 #### 4.2 初始化（如果需要）
 
@@ -446,20 +472,35 @@ fi
 
 #### 6.1 检测 tmux 环境并启动
 
+**启动命令选择**（根据 Phase 4 的选择）:
+
+| Server 类型 | 启动命令 | 说明 |
+|------------|----------|------|
+| 生产版本 | `blocklet dev` | 连接到 `blocklet server start` 启动的 Server |
+| 源码开发版本 | `bn-dev` | 连接到源码开发的 Server（tmux session: blocklet） |
+
 **记录变量**:
 - `TMUX_SESSION`: 会话名称，格式为 `blocklet-dev-{REPO}`
 - `HAS_TMUX`: 是否有 tmux 环境
+- `DEV_CMD`: 启动命令（`bn-dev` 或 `blocklet dev`）
 
 | tmux 状态 | 处理 |
 |-----------|------|
-| 可用 | 在 tmux 会话中启动 `blocklet dev`（先清理同名会话） |
+| 可用 | 在 tmux 会话中启动（先清理同名会话） |
 | 不可用 | 直接在当前终端启动 |
 
 ```bash
+# 根据 Phase 4 的选择确定启动命令
+if [ "$USE_DEV_SERVER" = "true" ]; then
+    DEV_CMD="bn-dev"
+else
+    DEV_CMD="blocklet dev"
+fi
+
 # 有 tmux 时
 TMUX_SESSION="blocklet-dev-$REPO"
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-tmux new-session -d -s "$TMUX_SESSION" -c "$BLOCKLET_DIR" "blocklet dev"
+tmux new-session -d -s "$TMUX_SESSION" -c "$BLOCKLET_DIR" "$DEV_CMD"
 ```
 
 #### 6.2 测试域名可达性
