@@ -35,11 +35,31 @@ fi
 
 ## Workflow
 
-### Phase 0: 输入分析（可选）
+### Phase 0: GitHub CLI 认证检查
+
+**最优先执行**: 在执行任何 `gh` 命令之前，必须先确保 GitHub CLI 已认证。
+
+```bash
+# 检查 gh 是否已认证
+if ! gh auth status &>/dev/null; then
+    echo "❌ GitHub CLI 未认证，请先执行认证"
+    gh auth login
+fi
+```
+
+| 认证状态 | 处理 |
+|----------|------|
+| 未安装 gh | 提示安装：`brew install gh` (macOS) 或参考 https://cli.github.com/ |
+| 未认证 | 引导执行 `gh auth login` 完成认证 |
+| 已认证 | 继续下一步 |
+
+---
+
+### Phase 1: 输入分析（可选）
 
 当用户提供 URL 时，首先判断是否应该使用本 skill：
 
-#### 0.1 URL 类型判断
+#### 1.1 URL 类型判断
 
 ```bash
 # 判断 URL 类型
@@ -58,7 +78,7 @@ else
 fi
 ```
 
-#### 0.2 非 GitHub URL 处理
+#### 1.2 非 GitHub URL 处理
 
 使用 `blocklet-url-analyzer` skill 分析 URL：
 
@@ -71,13 +91,13 @@ fi
 
 **blocklet-url-analyzer skill 位置**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
 
-#### 0.3 无 URL 输入
+#### 1.3 无 URL 输入
 
-如果用户没有提供 URL（如直接说"帮我配置 blocklet-server 环境"），跳过此 Phase，直接进入 Phase 1。
+如果用户没有提供 URL（如直接说"帮我配置 blocklet-server 环境"），跳过此 Phase，直接进入 Phase 2。
 
 ---
 
-### Phase 1: 检查 GitHub 权限
+### Phase 2: 检查 GitHub 权限
 
 ```bash
 gh api repos/ArcBlock/blocklet-server --jq '.permissions'
@@ -91,9 +111,9 @@ gh api repos/ArcBlock/blocklet-server --jq '.permissions'
 
 ---
 
-### Phase 2: 克隆仓库到约定目录
+### Phase 3: 克隆仓库到约定目录
 
-#### 2.1 检查本地仓库
+#### 3.1 检查本地仓库
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/blocklet-server"
@@ -103,7 +123,7 @@ if [ -d "$REPO_PATH" ]; then
 fi
 ```
 
-#### 2.2 克隆仓库（如不存在）
+#### 3.2 克隆仓库（如不存在）
 
 ```bash
 mkdir -p ~/arcblock-repos && cd ~/arcblock-repos
@@ -112,9 +132,9 @@ git clone git@github.com:ArcBlock/blocklet-server.git || git clone https://githu
 
 ---
 
-### Phase 3: 切换到 dev 分支
+### Phase 4: 切换到 dev 分支
 
-#### 3.1 检查当前分支是否有未提交的改动
+#### 4.1 检查当前分支是否有未提交的改动
 
 ```bash
 cd ~/arcblock-repos/blocklet-server
@@ -127,7 +147,7 @@ git status --porcelain
 - 选项 C: 放弃改动 (`git checkout .`)
 - 选项 D: 取消操作
 
-#### 3.2 切换分支
+#### 4.2 切换分支
 
 ```bash
 git checkout dev && git pull origin dev
@@ -139,9 +159,9 @@ git checkout dev && git pull origin dev
 
 ---
 
-### Phase 4: 前置环境检查
+### Phase 5: 前置环境检查
 
-#### 4.1 检查 blocklet 开发进程冲突
+#### 5.1 检查 blocklet 开发进程冲突
 
 **重要**: 在启动 blocklet-server 源码开发之前，必须检查是否有 Blocklet Server 生产版本在运行。两者不能同时运行。
 
@@ -163,7 +183,7 @@ fi
 
 ---
 
-### Phase 5: 执行项目内置的 project-setup skill
+### Phase 6: 执行项目内置的 project-setup skill
 
 项目仓库内已有完整的 `project-setup` skill，位于：
 
@@ -200,6 +220,10 @@ fi
 其他常用命令：
   bun run test        # 运行测试
   bun run turbo:lint  # 运行 lint 检查
+
+使用其他 SKill 完成工作:
+
+/blocklet-pr 修改完代码, 提交一个符合规范的 PR
 ```
 
 ## 启动开发环境
