@@ -19,9 +19,13 @@ When issues occur in production, developers only have a URL in hand. This skill 
 - During debugging, need to know which component a URL corresponds to
 - Reverse lookup development repository from production environment URL
 
-## Important Note
+## Critical Rule
 
-**When analyzing URLs, must use terminal commands (curl, wget, etc.) to make requests directly. Do not use Chrome browser for interactive operations.**
+> **⚠️ NEVER use Chrome browser or any interactive browser tools to analyze URLs.**
+>
+> **ALWAYS use terminal commands (curl, wget, etc.) to make HTTP requests directly.**
+>
+> This is a strict requirement - all URL analysis must be done via command line, not browser automation.
 
 ## Repository Reference Files
 

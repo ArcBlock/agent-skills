@@ -132,6 +132,10 @@ Identify user intent and determine which repository to develop.
 
 #### 1.0 URL Type Detection
 
+> **⚠️ Critical: When analyzing URLs, NEVER use Chrome browser or any interactive browser tools.**
+>
+> **ALWAYS use terminal commands (curl, wget, etc.) to make HTTP requests directly.**
+
 When user provides a URL, first determine URL type:
 
 ```bash
@@ -153,12 +157,15 @@ fi
 
 | Analysis Result Type | Handling |
 |---------------------|----------|
-| `DAEMON` | Inform user they should use `blocklet-server-dev-setup` |
-| `BLOCKLET_SERVICE` | Inform user they should use `blocklet-server-dev-setup` |
-| `BLOCKLET` | Get corresponding repository, continue to Phase 2 |
+| `DAEMON` | **Redirect** to `blocklet-server-dev-setup` skill |
+| `BLOCKLET_SERVICE` | **Redirect** to `blocklet-server-dev-setup` skill |
+| `BLOCKLET` | Get corresponding repository; if `blocklet-server`, redirect to `blocklet-server-dev-setup`; otherwise continue to Phase 2 |
 | `UNKNOWN` | Use AskUserQuestion to let user specify manually |
 
+**Important**: When the identified repository is `blocklet-server`, always redirect to `blocklet-server-dev-setup` skill instead of continuing with this skill.
+
 **blocklet-url-analyzer skill location**: `blocklet-url-analyzer/SKILL.md`
+**blocklet-server-dev-setup skill location**: `blocklet-server-dev-setup/SKILL.md`
 
 #### 1.1 Repository Search and Verification
 
@@ -168,6 +175,32 @@ When user provides repository name or keywords, search in local reference files:
 - `blocklet-url-analyzer/references/org-blocklet-repos.md`
 
 **Reference files contain**: Name, URL, Main Branch, Branch Prefix, Description, Category for all active repositories.
+
+**blocklet-server Repository Detection**:
+
+After identifying the repository, check if it is `blocklet-server`:
+
+```bash
+if [ "$REPO" = "blocklet-server" ]; then
+    echo "⚠️ Detected blocklet-server repository"
+    echo "→ Redirecting to blocklet-server-dev-setup skill"
+fi
+```
+
+| Repository | Handling |
+|------------|----------|
+| `blocklet-server` | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
+| Other repositories | Continue to Phase 2 |
+
+**Redirect message**:
+```
+The repository you want to develop is blocklet-server (Blocklet Server core).
+This requires a different development environment setup.
+
+→ Switching to blocklet-server-dev-setup skill...
+```
+
+**blocklet-server-dev-setup skill location**: `blocklet-server-dev-setup/SKILL.md`
 
 **Match failure**: Use AskUserQuestion to display search results for user selection.
 
@@ -182,6 +215,20 @@ When user provides GitHub Issue URL, first extract repository info from URL, the
 # Example: https://github.com/ArcBlock/media-kit/issues/123
 # → ORG=ArcBlock, REPO=media-kit, ISSUE_NUMBER=123
 ```
+
+**Step 1.5: Check if blocklet-server repository**
+
+```bash
+if [ "$REPO" = "blocklet-server" ]; then
+    # Redirect to blocklet-server-dev-setup skill
+    echo "→ Detected blocklet-server repository, switching to blocklet-server-dev-setup skill"
+fi
+```
+
+| Repository | Handling |
+|------------|----------|
+| `blocklet-server` | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
+| Other repositories | Continue to Step 2 |
 
 **Step 2: Check gh CLI availability and permissions**
 
