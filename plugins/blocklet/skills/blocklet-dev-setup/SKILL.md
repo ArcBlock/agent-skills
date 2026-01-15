@@ -81,15 +81,31 @@ Use local reference files for repository lookup (no GitHub API needed):
 
 Query the `blocklet-url-analyzer` skill's reference files:
 
-- `blocklet-url-analyzer/references/org-arcblock-repos.md` - All ArcBlock organization repos
-- `blocklet-url-analyzer/references/org-blocklet-repos.md` - All blocklet organization repos
-- `blocklet-url-analyzer/references/org-aigne-repos.md` - All AIGNE-io organization repos
+- `blocklet-url-analyzer/references/org-arcblock-repos.md` - ArcBlock repos (core infrastructure, SDKs, mobile apps)
+- `blocklet-url-analyzer/references/org-blocklet-repos.md` - Blocklet repos (blocklet applications, kits, tools)
+- `blocklet-url-analyzer/references/org-aigne-repos.md` - AIGNE repos (AI agent framework, LLM adapters)
 
 These files contain: Name, URL, Main Branch, Branch Prefix, Description, Category for each repository.
 
+### Active Loading Policy (ALP) for Repository Search
+
+> Load reference files on-demand based on context. Do not preload all files.
+
+| Trigger Condition | Load File |
+|-------------------|-----------|
+| Known ArcBlock repo (blocklet-server, ux, did-connect, SDKs) | `org-arcblock-repos.md` |
+| Known Blocklet app (payment-kit, media-kit, discuss-kit, etc.) | `org-blocklet-repos.md` |
+| Known AIGNE repo (aigne-framework, aigne-hub, LLM adapters) | `org-aigne-repos.md` |
+| Uncertain which organization | First read `blocklet-url-analyzer/references/README.md` |
+
+**Loading Strategy:**
+1. Analyze user input (repo name, keywords, blocklet name) to infer organization
+2. Load only the relevant reference file
+3. If uncertain, read README.md first for high-density summary to decide
+
 ### Search Method
 
-Search by keyword in the reference files listed above.
+Search by keyword in the reference file loaded based on ALP rules above.
 
 ### GitHub Organizations
 
@@ -171,11 +187,13 @@ fi
 
 #### 1.1 Repository Search and Verification
 
-When user provides repository name or keywords, search in local reference files:
+When user provides repository name or keywords, search in local reference files **following ALP**:
 
-- `blocklet-url-analyzer/references/org-arcblock-repos.md`
-- `blocklet-url-analyzer/references/org-blocklet-repos.md`
-- `blocklet-url-analyzer/references/org-aigne-repos.md`
+**Load reference file based on context** (see "Repository Search" section above):
+- Core infrastructure keywords → `blocklet-url-analyzer/references/org-arcblock-repos.md`
+- Blocklet app keywords (kit, store, marketing tools) → `blocklet-url-analyzer/references/org-blocklet-repos.md`
+- AI-related keywords (aigne, LLM, agent) → `blocklet-url-analyzer/references/org-aigne-repos.md`
+- Uncertain → First read `blocklet-url-analyzer/references/README.md` for summary
 
 **Reference files contain**: Name, URL, Main Branch, Branch Prefix, Description, Category for all active repositories.
 

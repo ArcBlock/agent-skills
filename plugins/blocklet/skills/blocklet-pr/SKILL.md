@@ -22,8 +22,25 @@ PRs are not submitted casually. Before submission, code must pass lint and tests
 
 Branch conventions and repository info are read from local reference files (in `blocklet-url-analyzer` skill directory):
 
-- `blocklet-url-analyzer/references/org-arcblock-repos.md` - ArcBlock organization repos with branch info
-- `blocklet-url-analyzer/references/org-blocklet-repos.md` - blocklet organization repos with branch info
+- `blocklet-url-analyzer/references/org-arcblock-repos.md` - ArcBlock repos (core infrastructure, SDKs, mobile apps)
+- `blocklet-url-analyzer/references/org-blocklet-repos.md` - Blocklet repos (blocklet applications, kits, tools)
+- `blocklet-url-analyzer/references/org-aigne-repos.md` - AIGNE repos (AI agent framework, LLM adapters)
+
+### Active Loading Policy (ALP)
+
+> Load reference files on-demand based on repository organization. Do not preload all files.
+
+| Trigger Condition | Load File |
+|-------------------|-----------|
+| Repository in ArcBlock org | `blocklet-url-analyzer/references/org-arcblock-repos.md` |
+| Repository in blocklet org | `blocklet-url-analyzer/references/org-blocklet-repos.md` |
+| Repository in AIGNE-io org | `blocklet-url-analyzer/references/org-aigne-repos.md` |
+| Uncertain which organization | First read `blocklet-url-analyzer/references/README.md` |
+
+**Loading Strategy:**
+1. Determine repository organization from `git remote get-url origin`
+2. Load only the reference file for that organization
+3. If organization unknown, read README.md first for high-density summary
 
 ## Workflow
 
@@ -46,12 +63,13 @@ REPO=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\2/' | sed '
 
 #### 1.2 Detect Main Iteration Branch
 
-Read from local reference files to get branch conventions for the repository.
+Read from local reference files to get branch conventions for the repository (following ALP).
 
-Search for repo-specific branch info in reference files:
-- `blocklet-url-analyzer/references/org-arcblock-repos.md`
-- `blocklet-url-analyzer/references/org-blocklet-repos.md`
-- `blocklet-url-analyzer/references/org-aigne-repos.md`
+**Load reference file based on repository organization** (from 1.1):
+- ArcBlock org → `blocklet-url-analyzer/references/org-arcblock-repos.md`
+- blocklet org → `blocklet-url-analyzer/references/org-blocklet-repos.md`
+- AIGNE-io org → `blocklet-url-analyzer/references/org-aigne-repos.md`
+- Unknown → First read `blocklet-url-analyzer/references/README.md`
 
 **Default branch conventions** (if no specific info found in references):
 

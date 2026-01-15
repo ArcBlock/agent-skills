@@ -31,11 +31,26 @@ When issues occur in production, developers only have a URL in hand. This skill 
 
 This skill includes local reference files for repository lookup:
 
-- `references/org-arcblock-repos.md` - All active ArcBlock organization repos
-- `references/org-blocklet-repos.md` - All active blocklet organization repos
-- `references/org-aigne-repos.md` - All active AIGNE-io organization repos
+- `references/org-arcblock-repos.md` - ArcBlock organization repos (core infrastructure, SDKs, mobile apps)
+- `references/org-blocklet-repos.md` - Blocklet organization repos (blocklet applications, kits, tools)
+- `references/org-aigne-repos.md` - AIGNE organization repos (AI agent framework, LLM adapters)
 
-**Always query these files first instead of using gh commands to search GitHub.**
+### Active Loading Policy (ALP)
+
+> Load reference files on-demand based on context. Do not preload all files.
+
+| Trigger Condition | Load File |
+|-------------------|-----------|
+| Need ArcBlock core repos (blocklet-server, ux, did-connect, SDKs) | `references/org-arcblock-repos.md` |
+| Need Blocklet app repos (payment-kit, media-kit, discuss-kit, etc.) | `references/org-blocklet-repos.md` |
+| Need AIGNE AI repos (aigne-framework, aigne-hub, LLM adapters) | `references/org-aigne-repos.md` |
+| Uncertain which organization | First read `references/README.md` for high-density summary |
+
+**Loading Strategy:**
+1. First determine which organization the repository likely belongs to based on blocklet name/context
+2. Load only the relevant reference file
+3. If uncertain, read `references/README.md` first to decide which file to load
+4. Prefer local reference files over `gh` commands for repository lookup
 
 ## URL Type Classification
 
@@ -206,17 +221,20 @@ Some Blocklets can be identified by their domain pattern:
 | `spaces*.arcblock.io` | did-spaces |
 | `store.blocklet.dev` | blocklet-store |
 
-**Step 2: Query local reference files**
+**Step 2: Query local reference files (following ALP)**
 
-- `references/org-arcblock-repos.md` - ArcBlock organization repos
-- `references/org-blocklet-repos.md` - blocklet organization repos
+Based on the blocklet name, determine which organization it likely belongs to:
+- Core infrastructure (blocklet-server, ux, did-connect, SDKs) → Load `references/org-arcblock-repos.md`
+- Blocklet apps (payment-kit, media-kit, discuss-kit, etc.) → Load `references/org-blocklet-repos.md`
+- AI-related (aigne-*, LLM adapters) → Load `references/org-aigne-repos.md`
+- Uncertain → First read `references/README.md` for high-density summary
 
 Reference file format:
 ```
 | Name | URL | Main Branch | Branch Prefix | Description | Category |
 ```
 
-Search by blocklet name or keyword in these files.
+Search by blocklet name or keyword in the loaded file.
 
 **Common blocklet name to repository name mapping**:
 

@@ -1,11 +1,34 @@
 # Reference Files
 
-This directory contains repository reference files for ArcBlock and Blocklet organizations.
+This directory contains repository reference files for ArcBlock, Blocklet, and AIGNE organizations.
+
+## High-Density Summary
+
+**ArcBlock** (`org-arcblock-repos.md`): Core infrastructure and SDKs
+- Core: blocklet-server, ux, did-connect
+- SDK: forge-js, ocap-javascript-sdk, arcblock-ios-sdk
+- Mobile: arc-wallet-ios, arc-wallet-android, arc-sphere-ios, arc-sphere-android
+- DID: did-spaces, did-motif, abt-did-spec
+- DevTools: arcli, eslint-config, auto-i18n
+
+**Blocklet** (`org-blocklet-repos.md`): Blocklet applications and tools
+- Kit: payment-kit, media-kit, discuss-kit, pages-kit, search-kit, push-kit, snap-kit
+- Store: blocklet-store, create-blocklet, toolkit, launcher
+- NFT: nft-studio, nft-tools
+- Marketing: lucky-draw, waiting-list, point-up, join-to-earn, promotion-tool
+- AI: daily-scribe, enamel-pin-maker, old-photo-fix, id-photo-maker, aistro
+
+**AIGNE** (`org-aigne-repos.md`): AI Agent framework and tools
+- Framework: aigne-framework, aigne-hub, aigne-studio
+- Smiths: aigne-doc-smith, aigne-image-smith, aigne-code-smith, aigne-web-smith
+- MCP: cmc-mcp-server, puppeteer-mcp-server, mcp-proxy
+- Adapters: claude-llm-adapter, groq-llm-adapter, chat-gpt-llm-adapter
 
 ## Files
 
-- `org-arcblock-repos.md` - ArcBlock organization repositories
-- `org-blocklet-repos.md` - Blocklet organization repositories
+- `org-arcblock-repos.md` - ArcBlock organization repositories (core infrastructure, SDKs, mobile apps)
+- `org-blocklet-repos.md` - Blocklet organization repositories (blocklet applications, kits, tools)
+- `org-aigne-repos.md` - AIGNE organization repositories (AI agent framework, LLM adapters)
 
 ## How These Files Were Generated
 
