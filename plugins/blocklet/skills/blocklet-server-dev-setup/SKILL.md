@@ -218,8 +218,3 @@ fi
 | 克隆失败 | 检查网络，尝试 HTTPS 方式 |
 | project-setup skill 不存在 | 提示可能是旧版本仓库，手动执行安装步骤 |
 
----
-
-## Skill 持续改进
-
-详见 `../blocklet-dev-setup/references/skill-contribution.md`。

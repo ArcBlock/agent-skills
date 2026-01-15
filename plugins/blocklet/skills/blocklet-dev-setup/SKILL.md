@@ -1,6 +1,6 @@
 ---
 name: blocklet-dev-setup
-description: 配置 blocklet 类型仓库的开发环境。支持解析 GitHub Issue URL、Blocklet URL 或问题描述，自动定位仓库、检查权限、克隆代码、安装依赖、启动开发服务器。使用 `/blocklet-dev-setup` 或说"帮我修复 xxx blocklet 的问题"、"我要开发 xxx blocklet"、"我想修改这个 URL 相关的代码"触发。
+description: 配置 blocklet 类型仓库的开发环境。支持解析 GitHub Issue URL、Blocklet URL 或问题描述，自动定位仓库、检查权限、克隆代码、安装依赖、启动开发服务器。使用 `/blocklet-dev-setup` 或说"帮我修复 xxx blocklet 的问题"、"我要开发 xxx blocklet"、"我想修改这个 URL 相关的代码"触, 总之希望开发 blocklet 时出发点。
 ---
 
 # Blocklet Dev Setup
@@ -246,35 +246,31 @@ find . -name "blocklet.yml" -o -name "blocklet.yaml" | grep -v node_modules
 - `REPO_ROOT`: 仓库根目录（依赖安装在这里）
 - `BLOCKLET_DIR`: blocklet.yml 所在目录（启动在这里）
 
-#### 2.5 检测开发分支
+#### 2.5 检测开发分支并切换
 
-**重要**: 切换分支前，先检查当前分支是否有未提交的改动：
-
-```bash
-git status --porcelain
-```
-
-如果有未提交的改动，**必须**使用 AskUserQuestion 询问用户如何处理：
-- 选项 A: 暂存改动 (`git stash`)
-- 选项 B: 提交改动
-- 选项 C: 放弃改动 (`git checkout .`)
-- 选项 D: 取消操作
-
-确认无改动或已处理后，再切换分支：
-
-```bash
-# 获取最近合并的 PR 的目标分支，统计出现最多的作为开发分支
-DEV_BRANCH=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json baseRefName | jq -r '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
-git checkout $DEV_BRANCH && git pull origin $DEV_BRANCH
-```
-
-**记录变量**:
-- `DEV_BRANCH`: 检测到的开发分支名称
-- `DEV_BRANCH_REASON`: 分支判断原因（如 "最近 10 个合并 PR 中有 8 个以 main 为目标"）
+**根据 `blocklet-branch` skill 切换到主工作分支**。
+skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
 
 ---
 
 ### Phase 3: Prerequisites Check
+
+#### 3.0 基础工具检查
+
+以下工具在整个流程中被频繁使用，必须首先确认已安装：
+
+| 工具 | 用途 | 检查命令 | 安装方式 |
+|------|------|----------|----------|
+| **git** | 仓库克隆、分支操作 | `git --version` | 系统自带或 `brew install git` |
+| **gh** | GitHub API 操作（仓库搜索、权限检查、Issue 读取、PR 查询） | `gh --version` | `brew install gh` 然后 `gh auth login` |
+| **jq** | JSON 解析 | `jq --version` | `brew install jq` (macOS) / `apt install jq` (Ubuntu) |
+| **curl** | 域名可达性测试 | `curl --version` | 系统自带 |
+
+**gh 认证检查**：
+```bash
+gh auth status
+# 如果未认证，执行: gh auth login
+```
 
 #### 3.1 Node.js (Required: 22+)
 
@@ -289,10 +285,6 @@ corepack enable && corepack prepare pnpm@latest --activate
 #### 3.3 nginx
 
 必须安装但**不能自启动运行**（Blocklet Server 自己管理）。
-
-#### 3.4 tmux
-
-如果没有 tmux, 帮助用户去安装 tmux, 方便管理终端进程
 
 **macOS**:
 ```bash
@@ -315,7 +307,21 @@ nginx -V 2>&1 | grep -o 'with-stream\|http_v2_module\|http_ssl_module'
 
 **注意**: 普通 `nginx` 包可能缺少 `ngx_stream_module`，会导致 Blocklet Server 启动失败。
 
-#### 3.4 @blocklet/cli
+#### 3.4 tmux
+
+如果没有 tmux，帮助用户安装，方便管理终端进程。
+
+**macOS**:
+```bash
+brew install tmux
+```
+
+**Ubuntu/Debian**:
+```bash
+sudo apt install -y tmux
+```
+
+#### 3.5 @blocklet/cli
 
 ```bash
 npm install -g @blocklet/cli@beta
@@ -323,7 +329,7 @@ npm install -g @blocklet/cli@beta
 
 版本日期比当前早 1 周以上时更新。
 
-#### 3.5 ulimit Check
+#### 3.6 ulimit Check
 
 **重要**: 必须在启动 Blocklet Server **之前**检查，否则会导致 `worker_connections NaN` 错误。
 
@@ -536,11 +542,6 @@ gh pr list --repo $ORG/$REPO --state merged --limit 5 --json number,title,author
 仓库: {ORG}/{REPO}
 路径: ~/arcblock-repos/{REPO}
 
-===== 工作分支 =====
-当前分支: {DEV_BRANCH}
-判断原因: {DEV_BRANCH_REASON}
-  （例如：最近 10 个合并 PR 中有 8 个以 main 为目标，因此判定 main 为主开发分支）
-
 ===== 访问地址 =====
 Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
 Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
@@ -561,7 +562,7 @@ Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
 根据上述 PR 风格，请遵循以下规范：
 1. 分支命名: feat/xxx, fix/xxx, chore/xxx
 2. PR 标题格式: 动词开头，简洁描述变更（如 "Fix login redirect issue"）
-3. PR 目标分支: {DEV_BRANCH}
+3. PR 目标分支: {MAIN_BRANCH}
 4. 提交前请确保: 代码通过 lint、测试通过、功能自测
 
 ===== 常用命令 =====
@@ -593,6 +594,59 @@ Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
 - 描述您要修改的功能
 - 粘贴需要修复的 bug 详情
 ```
+
+---
+
+### Phase 7: 工作分支创建
+
+当用户带着具体任务（Issue URL、问题描述、或明确说了想改什么）启动开发环境时，询问是否创建工作分支。
+
+**触发条件**：用户提供了 Issue URL 或具体任务描述、或明确说了想改什么
+**跳过条件**：用户仅要求创建环境，没有具体任务
+
+**根据 `blocklet-branch` skill 的到主工作分支{MAIN_BRANCH}和分支前缀规律**。
+skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+
+#### 7.1 询问是否创建工作分支
+
+根据分支前缀规律来创建一个 {建议的分支名}
+
+使用 `AskUserQuestion`：
+
+```
+当前在 {MAIN_BRANCH} 分支上。是否需要创建工作分支？
+
+选项：
+A. 创建分支: {建议的分支名} (Recommended)
+B. 使用其他分支名
+C. 不创建，直接在 {MAIN_BRANCH} 上开发
+```
+
+#### 7.2 创建分支（如用户确认）
+
+基于 `$MAIN_BRANCH` 创建新分支并切换。
+
+#### 7.3 输出就绪信息
+
+```
+===== 开发环境已就绪 =====
+
+仓库: ~/arcblock-repos/{REPO}
+分支: {BRANCH_NAME} (基于 {MAIN_BRANCH})
+服务: blocklet dev 已在 tmux 会话 {TMUX_SESSION} 中运行
+
+访问地址:
+- Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
+- Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
+
+常用命令:
+- 查看日志: tmux attach -t {TMUX_SESSION}
+- 停止服务: tmux kill-session -t {TMUX_SESSION}
+```
+
+使用其他 SKill 完成工作:
+
+/blocklet-pr 修改完代码, 提交一个符合规范的 PR
 
 ---
 
@@ -637,59 +691,4 @@ blocklet server stop -f
 ```
 
 ---
-
-### Phase 7: 工作分支创建
-
-当用户带着具体任务（Issue URL、问题描述）启动开发环境时，询问是否创建工作分支。
-
-**触发条件**：用户提供了 Issue URL 或具体任务描述
-**跳过条件**：用户仅要求创建环境，没有具体任务
-
-#### 7.1 询问是否创建工作分支
-
-使用 `AskUserQuestion`：
-
-```
-当前在 {DEV_BRANCH} 分支上。是否需要创建工作分支？
-
-选项：
-A. 创建分支: {建议的分支名} (Recommended)
-B. 使用其他分支名
-C. 不创建，直接在 {DEV_BRANCH} 上开发
-```
-
-**分支命名规则**：
-
-| 任务类型 | 分支前缀 | 示例 |
-|----------|----------|------|
-| Bug 修复 | `fix/` | `fix/issue-123-duplicate-upload` |
-| 新功能 | `feat/` | `feat/video-preview` |
-| 重构/优化 | `refactor/` | `refactor/image-loading` |
-
-#### 7.2 创建分支（如用户确认）
-
-基于 `$DEV_BRANCH` 创建新分支并切换。
-#### 7.3 输出就绪信息
-
-```
-===== 开发环境已就绪 =====
-
-仓库: ~/arcblock-repos/{REPO}
-分支: {BRANCH_NAME} (基于 {DEV_BRANCH})
-服务: blocklet dev 已在 tmux 会话 {TMUX_SESSION} 中运行
-
-访问地址:
-- Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
-- Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
-
-常用命令:
-- 查看日志: tmux attach -t {TMUX_SESSION}
-- 停止服务: tmux kill-session -t {TMUX_SESSION}
-```
-
----
-
-## Skill 持续改进
-
-详见 `references/skill-contribution.md`。
 
