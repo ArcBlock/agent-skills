@@ -7,7 +7,19 @@ description: Configure development environment for blocklet-type repositories. S
 
 Help developers quickly locate, clone, and configure development environment for any blocklet repository, entering live development state.
 
-**Key**: blocklet dev requires a local Blocklet Server to be running.
+## Core Philosophy
+
+**"Start from the problem, land in a running dev environment."**
+
+Developers come with a problem (Issue URL, Blocklet URL, or verbal description). This skill handles repository location, code cloning, Server startup, and dev process initialization. Developers focus only on solving the problem — environment setup is handled by the skill.
+
+**"Never assume success — monitor, diagnose, and fix."**
+
+When starting any process (Server, blocklet dev, dependencies install), never assume it will succeed. Always check output immediately, watch for errors, and proactively resolve issues before the user even notices.
+
+## Key Requirement
+
+blocklet dev requires a local Blocklet Server to be running.
 
 ## Convention Directories
 
@@ -63,31 +75,20 @@ The following files should only be read when needed. Files are in the ArcBlock a
 
 ## Repository Search
 
-Use GitHub API for dynamic repository search, sorted by recent updates:
+Use local reference files for repository lookup (no GitHub API needed):
 
-### Search ArcBlock and blocklet Organization Repositories
+### Reference Files Location
 
-```bash
-# Search ArcBlock organization repositories (sorted by recent updates)
-gh repo list ArcBlock --limit 20 --json name,description,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[] | "\(.name)\t\(.description // "N/A")"'
+Query the `blocklet-url-analyzer` skill's reference files:
 
-# Search blocklet organization repositories (sorted by recent updates)
-gh repo list blocklet --limit 20 --json name,description,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[] | "\(.name)\t\(.description // "N/A")"'
-```
+- `blocklet-url-analyzer/references/org-arcblock-repos.md` - All ArcBlock organization repos
+- `blocklet-url-analyzer/references/org-blocklet-repos.md` - All blocklet organization repos
 
-### Search Repositories by Keyword
+These files contain: Name, URL, Main Branch, Branch Prefix, Description, Category for each repository.
 
-```bash
-# Search repositories containing keywords in both organizations
-gh search repos "$KEYWORD" --owner ArcBlock --owner blocklet --sort updated --json fullName,description --jq '.[] | "\(.fullName)\t\(.description // "N/A")"'
-```
+### Search Method
 
-### Check Repository Existence
-
-```bash
-# Check if repository exists and get details
-gh repo view "$ORG/$REPO" --json name,description,updatedAt,defaultBranchRef 2>/dev/null && echo "Exists" || echo "Does not exist"
-```
+Search by keyword in the reference files listed above.
 
 ### GitHub Organizations
 
@@ -100,42 +101,34 @@ gh repo view "$ORG/$REPO" --json name,description,updatedAt,defaultBranchRef 2>/
 
 Execute the following phases in order.
 
-### Phase 0: GitHub CLI Authentication Check
+### Phase 0: Basic Tool Check
 
-**Execute first**: Before running any `gh` command, must ensure GitHub CLI is authenticated.
-
-**Important**: Must use `--scopes read:org` to request only read-level permissions. Do NOT omit this parameter.
+**Execute first**: Verify essential tools are installed.
 
 ```bash
-# Check if gh is authenticated
-if ! gh auth status &>/dev/null; then
-    echo "❌ GitHub CLI not authenticated, please authenticate first"
-    # MUST specify --scopes read:org for read-only permissions
-    gh auth login --scopes read:org
-fi
+# Check required tools
+git --version || echo "❌ git not installed"
+curl --version | head -1 || echo "❌ curl not installed"
 ```
 
-| Authentication Status | Action |
-|-----------------------|--------|
-| gh not installed | Prompt to install: `brew install gh` (macOS) or refer to https://cli.github.com/ |
-| Not authenticated | **Must** run `gh auth login --scopes read:org` (read-only permissions required) |
-| Authenticated | Continue to next step |
+| Tool | Purpose | Check Command | Installation |
+|------|---------|---------------|--------------|
+| **git** | Repository cloning, branch operations, commit history | `git --version` | Built-in or `brew install git` |
+| **curl** | Domain reachability testing | `curl --version` | Built-in |
 
 ---
 
 ### Phase 1: Issue/Repo Resolution
 
-**Prerequisite**: Must complete Phase 0 (GitHub CLI Authentication) before analyzing any URL or repository.
-
 Identify user intent and determine which repository to develop.
 
 | Trigger Method | Example | Handling |
 |----------------|---------|----------|
-| GitHub Issue URL | `https://github.com/ArcBlock/media-kit/issues/123` | **Must** read issue content for analysis |
+| GitHub Issue URL | `https://github.com/ArcBlock/media-kit/issues/123` | Extract repo from URL; if gh available, read issue content |
 | **Blocklet URL** | `https://xxx.ip.abtnet.io/image-bin/admin` | Use `blocklet-url-analyzer` skill to analyze |
-| Repo name + problem description | "Help me fix the media-kit image issue" | Use gh API to search repository |
-| Problem description | "Discussion comment feature has a bug" | Keyword search repository |
-| Direct specification | "I want to develop snap-kit" | Use gh API to verify repository exists |
+| Repo name + problem description | "Help me fix the media-kit image issue" | Search in local reference files |
+| Problem description | "Discussion comment feature has a bug" | Keyword search in reference files |
+| Direct specification | "I want to develop snap-kit" | Search in local reference files to verify |
 
 #### 1.0 URL Type Detection
 
@@ -165,40 +158,63 @@ fi
 | `BLOCKLET` | Get corresponding repository, continue to Phase 2 |
 | `UNKNOWN` | Use AskUserQuestion to let user specify manually |
 
-**blocklet-url-analyzer skill location**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
+**blocklet-url-analyzer skill location**: `blocklet-url-analyzer/SKILL.md`
 
 #### 1.1 Repository Search and Verification
 
-When user provides repository name or keywords, use gh API to search:
+When user provides repository name or keywords, search in local reference files:
 
-```bash
-# Exact match repository name (prioritize ArcBlock and blocklet organizations)
-REPO_NAME="media-kit"
-gh repo view "ArcBlock/$REPO_NAME" --json fullName 2>/dev/null || \
-gh repo view "blocklet/$REPO_NAME" --json fullName 2>/dev/null || \
-echo "Repository not found"
+- `blocklet-url-analyzer/references/org-arcblock-repos.md`
+- `blocklet-url-analyzer/references/org-blocklet-repos.md`
 
-# Fuzzy search (sorted by update time)
-gh search repos "$KEYWORD" --owner ArcBlock --owner blocklet --sort updated --limit 5 \
-  --json fullName,description,updatedAt \
-  --jq '.[] | "\(.fullName) - \(.description // "N/A") (updated: \(.updatedAt[:10]))"'
-```
+**Reference files contain**: Name, URL, Main Branch, Branch Prefix, Description, Category for all active repositories.
 
 **Match failure**: Use AskUserQuestion to display search results for user selection.
 
-#### 1.2 Issue URL Handling (Important)
+#### 1.2 Issue URL Handling
 
-When user provides GitHub Issue URL, you **must not** just parse URL to extract repository, you **must** read issue content:
+When user provides GitHub Issue URL, first extract repository info from URL, then check if gh CLI is available.
+
+**Step 1: Parse URL to extract repository**
 
 ```bash
-# Parse URL to extract org/repo/issue_number
+# Extract org/repo/issue_number from URL
+# Example: https://github.com/ArcBlock/media-kit/issues/123
+# → ORG=ArcBlock, REPO=media-kit, ISSUE_NUMBER=123
+```
+
+**Step 2: Check gh CLI availability and permissions**
+
+```bash
+# Check if gh is installed and authenticated
+if command -v gh &> /dev/null && gh auth status &> /dev/null; then
+    GH_AVAILABLE=true
+else
+    GH_AVAILABLE=false
+fi
+```
+
+**Step 3: Handle based on gh availability**
+
+| gh Status | Handling |
+|-----------|----------|
+| Available with auth | Read issue content for deeper analysis (multi-repo detection) |
+| Not available / No auth | Use repository from URL directly, skip issue content analysis |
+
+**If gh available - Read issue content**:
+
+```bash
 gh issue view $ISSUE_NUMBER --repo $ORG/$REPO --json title,body,labels
 ```
 
-**Analyze issue content**:
+Then analyze issue content:
 1. Read issue title and body
 2. Identify product/component keywords mentioned
 3. Determine if multiple repositories are involved
+
+**If gh not available - Use URL only**:
+
+Simply use the repository extracted from the Issue URL (`$ORG/$REPO`) and proceed to Phase 2. Skip multi-repository detection.
 
 **Multi-repository scenario examples**:
 
@@ -241,23 +257,11 @@ REPO_PATH="$HOME/arcblock-repos/$REPO"
 [ -d "$REPO_PATH" ] && cd "$REPO_PATH" && git fetch origin
 ```
 
-#### 2.2 Check GitHub Permissions
-
-```bash
-gh api repos/$ORG/$REPO --jq '.permissions.pull'
-# Returns: true or false
-```
-
-| Permission Status | Handling |
-|-------------------|----------|
-| No access (`pull: false`) | Prompt to contact administrator or check GitHub login |
-| Has read permission (`pull: true`) | Continue normally |
-
-#### 2.3 Clone Repository
+#### 2.2 Clone Repository
 
 Clone to `~/arcblock-repos/$REPO` (prefer SSH, fallback to HTTPS on failure).
 
-#### 2.4 Find Blocklet Project
+#### 2.3 Find Blocklet Project
 
 ```bash
 find . -name "blocklet.yml" -o -name "blocklet.yaml" | grep -v node_modules
@@ -273,27 +277,14 @@ find . -name "blocklet.yml" -o -name "blocklet.yaml" | grep -v node_modules
 - `REPO_ROOT`: Repository root directory (dependencies installed here)
 - `BLOCKLET_DIR`: Directory containing blocklet.yml (start here)
 
-#### 2.5 Detect Development Branch and Switch
+#### 2.4 Detect Development Branch and Switch
 
 **Switch to main working branch according to `blocklet-branch` skill**.
-Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+Skill location: `blocklet-branch/SKILL.md`
 
 ---
 
 ### Phase 3: Prerequisites Check
-
-#### 3.0 Basic Tool Check
-
-The following tools are frequently used throughout the workflow and must be confirmed installed first:
-
-| Tool | Purpose | Check Command | Installation |
-|------|---------|---------------|--------------|
-| **git** | Repository cloning, branch operations | `git --version` | Built-in or `brew install git` |
-| **gh** | GitHub API operations (repository search, permission check, Issue reading, PR queries) | `gh --version` | `brew install gh` |
-| **jq** | JSON parsing | `jq --version` | `brew install jq` (macOS) / `apt install jq` (Ubuntu) |
-| **curl** | Domain reachability testing | `curl --version` | Built-in |
-
-**Note**: gh authentication already checked in Phase 0.
 
 #### 3.1 Node.js (Required: 22+)
 
@@ -580,30 +571,63 @@ tmux capture-pane -t "$TMUX_SESSION" -p | tail -50
 3. **Try automatic fixes** - attempt to resolve common issues first, inform user if unable to resolve
 4. **Keep process visible** - always let user know current startup status
 
+#### 6.1.2 Parse Startup Output (Important)
+
+**Important**: The Blocklet URL and Service URL are **dynamically generated** by `blocklet dev`, not constructed from DID. You must parse them from the startup output.
+
+After `blocklet dev` starts successfully, parse the output to extract URLs:
+
+```bash
+# Capture blocklet dev output
+OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p)
+
+# Look for URL patterns in the output, typical formats:
+# "✔ Blocklet xxx is running at https://..."
+# "ℹ You can access with the following URL"
+# The URL format is usually: https://xxx.did.abtnet.io:8443 or https://xxx-ip.ip.abtnet.io:8443
+
+# Extract the Blocklet access URL from output
+BLOCKLET_URL=$(echo "$OUTPUT" | grep -oE 'https://[a-z0-9-]+\.(did|ip)\.abtnet\.io:[0-9]+' | head -1)
+
+# Service Admin URL is based on Blocklet URL
+SERVICE_URL="${BLOCKLET_URL}/.well-known/service/admin/"
+```
+
+**Record variables** (from blocklet dev output):
+| Variable | Description | Source |
+|----------|-------------|--------|
+| `BLOCKLET_URL` | Blocklet access URL | Parsed from `blocklet dev` output |
+| `SERVICE_URL` | Blocklet Service Admin URL | `${BLOCKLET_URL}/.well-known/service/admin/` |
+
+**Note**: Do NOT construct URLs by concatenating DID strings. Always use the URLs output by `blocklet dev`.
+
 ---
 
 #### 6.2 Test Domain Reachability
 
-After successful startup, **must** test if DID domain is accessible:
+After successful startup, **must** test if the URLs from `blocklet dev` output are accessible:
 
 ```bash
-# Test IP domain and Blocklet DID domain
+# Test using URLs parsed from blocklet dev output (from 6.1.2)
+curl -sI --connect-timeout 5 "$BLOCKLET_URL" 2>/dev/null | head -1
+
+# Also test Server Admin URL
 curl -sI --connect-timeout 5 "https://{IP_DOMAIN}:8443" 2>/dev/null | head -1
-curl -sI --connect-timeout 5 "https://{BLOCKLET_DID_DOMAIN}:8443" 2>/dev/null | head -1
 ```
 
 | Test Result | Output |
 |-------------|--------|
-| Both domains return HTTP status code | ✅ Domain access normal |
-| Either domain inaccessible | ⚠️ Output DNS fix suggestions (see Error Handling) |
+| Both URLs return HTTP status code | ✅ Domain access normal |
+| Either URL inaccessible | ⚠️ Output DNS fix suggestions (see Error Handling) |
 
-#### 6.3 Query Recent Merged PRs (If GitHub Permissions Available)
+#### 6.3 Query Recent Commits
 
-If Phase 2.2 detected push permissions, query last 5 merged PRs:
+After cloning, use git to view recent commit history:
 
 ```bash
-gh pr list --repo $ORG/$REPO --state merged --limit 5 --json number,title,author,mergedAt,baseRefName \
-  --template '{{range .}}#{{.number}} {{.title}} (by @{{.author.login}}, merged to {{.baseRefName}}){{"\n"}}{{end}}'
+# View last 10 commits with author and date
+cd $REPO_PATH
+git log --oneline -10 --format="%h %s (by %an, %ar)"
 ```
 
 #### 6.4 Output Startup Information
@@ -624,15 +648,18 @@ Project: {project name}
 Repository: {ORG}/{REPO}
 Path: ~/arcblock-repos/{REPO}
 
-===== Access URLs =====
+===== Access URLs (from blocklet dev output) =====
 Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
-Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
-Blocklet Service: https://{BLOCKLET_DID_DOMAIN}:8443/.well-known/service/admin/
+Blocklet URL: {BLOCKLET_URL}
+Blocklet Service: {SERVICE_URL}
+
+Note: Blocklet URL and Service URL are parsed from blocklet dev startup output (see 6.1.2).
+      Do NOT construct these URLs manually - always use the URLs output by blocklet dev.
 
 {Based on 6.2 test results}
 ✅ Domain access normal
 or
-⚠️ DID domain inaccessible, please set DNS to 8.8.8.8:
+⚠️ Domain inaccessible, please set DNS to 8.8.8.8:
    macOS: sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 
 ===== Common Commands =====
@@ -657,7 +684,7 @@ After completing development, use blocklet-updater skill to create new version:
   3. blocklet meta  # Verify metadata
   4. blocklet bundle --create-release  # Create release bundle
 
-For detailed instructions, refer to: ~/arcblock-repos/agent-skills/plugins/blocklet/skills/blocklet-updater/SKILL.md
+For detailed instructions, refer to: `blocklet-updater/SKILL.md`
 
 ===== Next Steps =====
 Development environment is now in live state. You can:
@@ -675,7 +702,7 @@ When user starts development environment with a specific task (Issue URL, proble
 **Skip condition**: User only requested environment creation, no specific task
 
 **Get main working branch {MAIN_BRANCH} and branch prefix patterns according to `blocklet-branch` skill**.
-Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+Skill location: `blocklet-branch/SKILL.md`
 
 #### 7.1 Ask Whether to Create Working Branch
 
@@ -705,9 +732,12 @@ Repository: ~/arcblock-repos/{REPO}
 Branch: {BRANCH_NAME} (based on {MAIN_BRANCH})
 Service: blocklet dev running in tmux session {TMUX_SESSION}
 
-Access URLs:
+Access URLs (from blocklet dev output):
 - Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
-- Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
+- Blocklet URL: {BLOCKLET_URL}
+- Blocklet Service: {SERVICE_URL}
+
+Note: URLs are parsed from blocklet dev output, not manually constructed.
 
 Common commands:
 - View logs: tmux attach -t {TMUX_SESSION}

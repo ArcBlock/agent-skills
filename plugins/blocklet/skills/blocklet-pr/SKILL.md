@@ -7,22 +7,32 @@ description: Create standardized Pull Requests for blocklet projects. Performs l
 
 Help developers create standardized Pull Requests for blocklet projects, ensuring code quality and following project PR templates.
 
+## Core Philosophy
+
+**"Quality gates + standardized workflow."**
+
+PRs are not submitted casually. Before submission, code must pass lint and tests, must be on a working branch (never directly on main branch), and PR content must follow project templates. Enforced standardization reduces human oversight errors.
+
 ## Prerequisites
 
 - Current directory is a blocklet project (contains `blocklet.yml`)
 - Has code changes to commit
-- `gh` CLI is configured and authenticated
+
+## Reference Files
+
+Branch conventions and repository info are read from local reference files (in `blocklet-url-analyzer` skill directory):
+
+- `blocklet-url-analyzer/references/org-arcblock-repos.md` - ArcBlock organization repos with branch info
+- `blocklet-url-analyzer/references/org-blocklet-repos.md` - blocklet organization repos with branch info
 
 ## Workflow
 
 Execute the following phases in order.
 
----
-
 ### Phase 1: Workspace Check
 
 **Refer to `blocklet-branch` skill for branch operations**.
-Skill location: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
+Skill location: `blocklet-branch/SKILL.md`
 
 #### 1.1 Confirm Remote Repository
 
@@ -36,23 +46,33 @@ REPO=$(echo $REMOTE_URL | sed -E 's/.*[:/]([^/]+)\/([^/]+)(\.git)?$/\2/' | sed '
 
 #### 1.2 Detect Main Iteration Branch
 
-Refer to blocklet-branch section 2:
+Read from local reference files to get branch conventions for the repository.
 
-```bash
-MAIN_BRANCH=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json baseRefName \
-  | jq -r '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
-```
+Search for repo-specific branch info in reference files:
+- `blocklet-url-analyzer/references/org-arcblock-repos.md`
+- `blocklet-url-analyzer/references/org-blocklet-repos.md`
+
+**Default branch conventions** (if no specific info found in references):
+
+| Organization | Default Main Branch |
+|--------------|---------------------|
+| ArcBlock | `dev` |
+| blocklet | `main` |
 
 **Output variables**: `MAIN_BRANCH`, `MAIN_BRANCH_REASON`
 
 #### 1.3 Detect Branch Naming Conventions
 
-Refer to blocklet-branch section 3:
+Read from local reference files to get branch prefix conventions for the repository.
 
-```bash
-BRANCH_PREFIXES=$(gh pr list --repo $ORG/$REPO --state merged --limit 10 --json headRefName \
-  | jq -r '.[].headRefName' | sed -E 's/^([a-zA-Z]+)[\/\-].*/\1/' | sort | uniq -c | sort -rn)
-```
+**Default prefix conventions** (if no specific info found in references):
+
+| Prefix | Usage |
+|--------|-------|
+| `feat/` or `feature/` | New features |
+| `fix/` | Bug fixes |
+| `chore/` | Maintenance tasks |
+| `docs/` | Documentation |
 
 **Output variables**: `BRANCH_PREFIX_CONVENTION`, `BRANCH_SEPARATOR`
 
@@ -193,7 +213,7 @@ D. No, skip version update
 
 If user chooses to update version, **call blocklet-updater skill**:
 
-**blocklet-updater skill location**: `plugins/blocklet/skills/blocklet-updater/SKILL.md`
+**blocklet-updater skill location**: `blocklet-updater/SKILL.md`
 
 ---
 
@@ -302,13 +322,7 @@ fi
 
 #### 6.2 Get Target Branch
 
-```bash
-# Get default branch
-DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
-
-# Or determine based on recent PRs
-DEV_BRANCH=$(gh pr list --state merged --limit 5 --json baseRefName --jq '.[].baseRefName' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
-```
+Use the `MAIN_BRANCH` detected in Phase 1.2 (from reference files).
 
 Use `AskUserQuestion` to confirm target branch:
 
@@ -316,7 +330,7 @@ Use `AskUserQuestion` to confirm target branch:
 PR target branch:
 
 Options:
-A. {DEFAULT_BRANCH} (Recommended)
+A. {MAIN_BRANCH} (Recommended)
 B. Other branch
 ```
 
@@ -373,9 +387,85 @@ Closes #{issue_number}
 {If there are UI changes, add screenshots}
 ```
 
-#### 6.5 Create PR
+#### 6.5 Choose PR Creation Method
 
-Wait for user confirmation after outputting PR content before creating PR. For PR base branch, use the branch that appears most frequently in recent 10 PRs.
+After generating PR content, use `AskUserQuestion` to ask user:
+
+```
+How would you like to create the PR?
+
+Options:
+A. Create PR.md file (for manual submission later)
+B. Submit PR directly using gh CLI (Recommended)
+```
+
+#### 6.5.1 Option A: Create PR.md File
+
+Create a PR.md file in the repository root with the PR content:
+
+```bash
+cat > PR.md << 'EOF'
+# {pr_title}
+
+**Target Branch**: {TARGET_BRANCH}
+**Source Branch**: {CURRENT_BRANCH}
+
+{pr_body}
+EOF
+
+echo "✅ PR.md created. You can manually create PR on GitHub using this content."
+```
+
+**Output**:
+```
+===== PR.md Created =====
+
+File: PR.md
+Title: {pr_title}
+Target Branch: {target_branch}
+
+Next Steps:
+1. Open GitHub repository: https://github.com/{ORG}/{REPO}
+2. Click "Pull requests" → "New pull request"
+3. Select base: {TARGET_BRANCH}, compare: {CURRENT_BRANCH}
+4. Copy content from PR.md
+```
+
+#### 6.5.2 Option B: Submit PR using gh CLI
+
+**First check gh CLI availability**:
+
+```bash
+# Check if gh is installed
+if ! command -v gh &> /dev/null; then
+    echo "❌ gh CLI is not installed."
+    echo ""
+    echo "Install gh CLI:"
+    echo "  macOS: brew install gh"
+    echo "  Linux: see https://cli.github.com/linux"
+    echo "  Windows: winget install GitHub.cli"
+    echo ""
+    echo "After installation, run: gh auth login"
+    exit 1
+fi
+
+# Check if gh is authenticated
+if ! gh auth status &> /dev/null; then
+    echo "❌ gh CLI is not authenticated."
+    echo ""
+    echo "Run: gh auth login"
+    echo "Then retry creating PR."
+    exit 1
+fi
+```
+
+| Status | Handling |
+|--------|----------|
+| gh not installed | Show installation instructions, fallback to PR.md |
+| gh not authenticated | Show `gh auth login` instructions, fallback to PR.md |
+| gh ready | Create PR |
+
+**Create PR**:
 
 ```bash
 gh pr create \
@@ -389,6 +479,7 @@ EOF
 
 #### 6.6 Output Result
 
+**If PR created via gh**:
 ```
 ===== PR Created Successfully =====
 
@@ -399,7 +490,14 @@ Linked Issues: {issue_numbers or "None"}
 
 ===== Next Steps =====
 Wait for Code Review
+```
 
+**If PR.md created**:
+```
+===== PR.md Created =====
+
+File: PR.md
+Please manually create PR on GitHub.
 ```
 
 ---
@@ -411,7 +509,9 @@ Wait for Code Review
 | Lint failed | Show error details, suggest running `pnpm run lint:fix` |
 | Tests failed | Show failed test cases, let user fix |
 | Push failed | Check permissions, suggest `git pull --rebase` |
-| PR creation failed | Show gh error message, check authentication status |
+| gh not installed | Show installation instructions, offer to create PR.md instead |
+| gh not authenticated | Show `gh auth login` instructions, offer to create PR.md instead |
+| PR creation failed | Show gh error message, offer to create PR.md instead |
 | Same PR already exists | Show existing PR link, ask whether to update |
 
 

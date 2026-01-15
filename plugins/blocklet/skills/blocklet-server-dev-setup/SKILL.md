@@ -7,7 +7,19 @@ description: Clone blocklet-server repository and guide execution of the in-proj
 
 Help developers clone the blocklet-server repository to the convention directory, switch to the development branch, then guide execution of the built-in `project-setup` skill to complete environment configuration.
 
-**Note**: This skill is for blocklet-server **source code development**, different from `blocklet-dev-setup` (which uses `blocklet dev` to develop blocklets).
+## Core Philosophy
+
+**"The entry point for developing the Server itself."**
+
+Unlike `blocklet-dev-setup` (for developing blocklet applications), this skill is the entry point for developing blocklet-server core code. The two use different Server modes and must not be confused.
+
+**"Never assume success — monitor, diagnose, and fix."**
+
+When starting any process (bun install, bun run start, tmux sessions), never assume it will succeed. Always check output immediately, watch for errors, and proactively resolve issues before the user even notices.
+
+## Important Note
+
+This skill is for blocklet-server **source code development**, different from `blocklet-dev-setup` (which uses `blocklet dev` to develop blocklets).
 
 ## Convention Directories
 
@@ -35,32 +47,22 @@ fi
 
 ## Workflow
 
-### Phase 0: GitHub CLI Authentication Check
+### Phase 0: Basic Tool Check
 
-**Execute first**: Before running any `gh` command, must ensure GitHub CLI is authenticated.
-
-**Important**: Must use `--scopes read:org` to request only read-level permissions. Do NOT omit this parameter.
+**Execute first**: Verify essential tools are installed.
 
 ```bash
-# Check if gh is authenticated
-if ! gh auth status &>/dev/null; then
-    echo "❌ GitHub CLI not authenticated, please authenticate first"
-    # MUST specify --scopes read:org for read-only permissions
-    gh auth login --scopes read:org
-fi
+# Check required tools
+git --version || echo "❌ git not installed"
 ```
 
-| Authentication Status | Action |
-|-----------------------|--------|
-| gh not installed | Prompt to install: `brew install gh` (macOS) or refer to https://cli.github.com/ |
-| Not authenticated | **Must** run `gh auth login --scopes read:org` (read-only permissions required) |
-| Authenticated | Continue to next step |
+| Tool | Purpose | Check Command | Installation |
+|------|---------|---------------|--------------|
+| **git** | Repository cloning, branch operations | `git --version` | Built-in or `brew install git` |
 
 ---
 
 ### Phase 1: Input Analysis (Optional)
-
-**Prerequisite**: Must complete Phase 0 (GitHub CLI Authentication) before analyzing any URL.
 
 When user provides a URL, first determine if this skill should be used:
 
@@ -79,7 +81,7 @@ if [[ "$URL" =~ ^https?://github\.com/ ]]; then
     fi
 else
     # Non-GitHub URL → use blocklet-url-analyzer skill to analyze
-    # Read plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md
+    # Read blocklet-url-analyzer/SKILL.md
 fi
 ```
 
@@ -94,7 +96,7 @@ Use `blocklet-url-analyzer` skill to analyze URL:
 | `BLOCKLET` | Inform user they should use `blocklet-dev-setup`, and provide the corresponding repository |
 | `UNKNOWN` | Use AskUserQuestion to let user confirm whether to continue with this skill |
 
-**blocklet-url-analyzer skill location**: `plugins/blocklet/skills/blocklet-url-analyzer/SKILL.md`
+**blocklet-url-analyzer skill location**: `blocklet-url-analyzer/SKILL.md`
 
 #### 1.3 No URL Input
 
@@ -102,23 +104,9 @@ If user did not provide URL (e.g., directly said "help me configure blocklet-ser
 
 ---
 
-### Phase 2: Check GitHub Permissions
+### Phase 2: Clone Repository to Convention Directory
 
-```bash
-gh api repos/ArcBlock/blocklet-server --jq '.permissions.pull'
-# Returns: true or false
-```
-
-| Permission Status | Handling |
-|-------------------|----------|
-| No access (`pull: false`) | Prompt to contact administrator or check GitHub login |
-| Has read permission (`pull: true`) | Continue normally |
-
----
-
-### Phase 3: Clone Repository to Convention Directory
-
-#### 3.1 Check Local Repository
+#### 2.1 Check Local Repository
 
 ```bash
 REPO_PATH="$HOME/arcblock-repos/blocklet-server"
@@ -128,7 +116,7 @@ if [ -d "$REPO_PATH" ]; then
 fi
 ```
 
-#### 3.2 Clone Repository (If Not Exists)
+#### 2.2 Clone Repository (If Not Exists)
 
 ```bash
 mkdir -p ~/arcblock-repos && cd ~/arcblock-repos
@@ -137,9 +125,9 @@ git clone git@github.com:ArcBlock/blocklet-server.git || git clone https://githu
 
 ---
 
-### Phase 4: Switch to dev Branch
+### Phase 3: Switch to dev Branch
 
-#### 4.1 Check If Current Branch Has Uncommitted Changes
+#### 3.1 Check If Current Branch Has Uncommitted Changes
 
 ```bash
 cd ~/arcblock-repos/blocklet-server
@@ -152,7 +140,7 @@ git status --porcelain
 - Option C: Discard changes (`git checkout .`)
 - Option D: Cancel operation
 
-#### 4.2 Switch Branch
+#### 3.2 Switch Branch
 
 ```bash
 git checkout dev && git pull origin dev
@@ -164,9 +152,9 @@ git checkout dev && git pull origin dev
 
 ---
 
-### Phase 5: Pre-environment Check
+### Phase 4: Pre-environment Check
 
-#### 5.1 Check for Blocklet Development Process Conflicts
+#### 4.1 Check for Blocklet Development Process Conflicts
 
 **Important**: Before starting blocklet-server source development, must check if Blocklet Server production version is running. The two cannot run simultaneously.
 
@@ -188,7 +176,7 @@ fi
 
 ---
 
-### Phase 6: Execute Built-in project-setup Skill
+### Phase 5: Execute Built-in project-setup Skill
 
 The project repository already has a complete `project-setup` skill located at:
 

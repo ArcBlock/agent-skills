@@ -7,7 +7,13 @@ description: Git branch management tool. Detects main iteration branch and branc
 
 Unified Git branch management tool providing branch detection, creation, and switching capabilities.
 
-**Design Principles**:
+## Core Philosophy
+
+**"Detect dynamically, never assume."**
+
+Branch management must not hardcode `main` or `master`. Different ArcBlock repositories follow different branch conventions. By analyzing PR history dynamically, branch operations adapt to each repository automatically.
+
+## Design Principles
 - Never assume the main branch is `main` or `master`; detect dynamically through merged PR history
 - Learn branch naming conventions from project history
 - Must handle uncommitted changes before switching branches
@@ -337,7 +343,7 @@ This skill is referenced by the following skills:
 
 ```
 Refer to blocklet-branch skill for branch operations.
-Skill location: plugins/blocklet/skills/blocklet-branch/SKILL.md
+Skill location: `blocklet-branch/SKILL.md`
 ```
 
 ---

@@ -7,6 +7,12 @@ description: Analyze Blocklet Server related URLs, identify their type (daemon/s
 
 Analyze URLs in the Blocklet Server ecosystem, identify request types, and locate corresponding development repositories.
 
+## Core Philosophy
+
+**"Bridge from URL to code."**
+
+When issues occur in production, developers only have a URL in hand. This skill serves as the bridge: analyzing URL type (Daemon/Service/Blocklet), locating the specific repository and code path, making the "URL → code" path clear and traceable.
+
 ## Use Cases
 
 - User provides a Blocklet Server related URL and wants to know which repository to develop in
@@ -16,6 +22,15 @@ Analyze URLs in the Blocklet Server ecosystem, identify request types, and locat
 ## Important Note
 
 **When analyzing URLs, must use terminal commands (curl, wget, etc.) to make requests directly. Do not use Chrome browser for interactive operations.**
+
+## Repository Reference Files
+
+This skill includes local reference files for repository lookup:
+
+- `references/org-arcblock-repos.md` - All active ArcBlock organization repos
+- `references/org-blocklet-repos.md` - All active blocklet organization repos
+
+**Always query these files first instead of using gh commands to search GitHub.**
 
 ## URL Type Classification
 
@@ -83,7 +98,7 @@ const path = url.pathname;
 
 ### Phase 2: Domain Type Detection
 
-#### 2.1 Detect IP DNS Domain
+#### 2.1 Detect Domain Type
 
 ```javascript
 // IP DNS domain regex
@@ -91,13 +106,15 @@ const IP_DNS_PATTERN = /^[a-z0-9]+-(\d{1,3}-){3}\d{1,3}\.ip\.abtnet\.io$/;
 const DID_DNS_PATTERN = /^[a-z0-9]+\.did\.abtnet\.io$/;
 
 const isIpDnsDomain = IP_DNS_PATTERN.test(host) || DID_DNS_PATTERN.test(host);
+const isArcBlockDomain = host.endsWith('.arcblock.io') || host.endsWith('.abtnet.io');
 ```
 
 | Domain Type | Detection Result |
 |-------------|------------------|
 | `*.ip.abtnet.io` | IP DNS domain → Possibly Blocklet |
 | `*.did.abtnet.io` | DID DNS domain → Possibly Blocklet |
-| Other domains | Regular domain → Check path |
+| `*.arcblock.io` / `*.abtnet.io` | ArcBlock domain → Check path and request API |
+| Other domains | Regular domain → Check path, may also be Blocklet |
 
 ### Phase 3: Path Type Detection
 
@@ -126,14 +143,20 @@ ELSE IF path.startsWith('/.well-known') AND !path.startsWith('/.well-known/servi
   → Type: WELLKNOWN
   → Repository: ArcBlock/blocklet-server
 
+ELSE IF isArcBlockDomain OR otherDomain
+  → Type: POSSIBLE_BLOCKLET
+  → Try to request API to identify (proceed to Phase 4)
+
 ELSE
   → Type: UNKNOWN
   → Need user to provide more information
 ```
 
-### Phase 4: Blocklet Identification (BLOCKLET Type Only)
+**Important**: For non-IP DNS domains (like `spaces.staging.arcblock.io`), always try to request the Blocklet API first before marking as UNKNOWN. Many Blocklets run on regular domains.
 
-When URL type is BLOCKLET, need to request API to get specific blocklet information.
+### Phase 4: Blocklet Identification (BLOCKLET or POSSIBLE_BLOCKLET Type)
+
+When URL type is BLOCKLET or POSSIBLE_BLOCKLET, need to request API to get specific blocklet information.
 
 #### 4.1 Extract Mount Path
 
@@ -169,25 +192,39 @@ curl -sS "${ORIGIN}${MOUNT_PATH}/__blocklet__.json" 2>/dev/null | jq '.name, .di
 
 #### 4.3 Blocklet to Repository Mapping
 
-Known Blocklet to repository mapping:
+**Step 1: Domain-based quick identification**
 
-| Blocklet Name | Mount Path Example | Repository |
-|---------------|-------------------|------------|
-| `image-bin` | `/image-bin` | `ArcBlock/media-kit` |
-| `payment-kit` | `/payment-kit` | `ArcBlock/payment-kit` |
-| `discuss-kit` | `/discuss-kit` | `blocklet/discuss-kit` |
-| `did-connect` | `/did-connect` | `ArcBlock/did-connect` |
-| `launcher-kit` | `/` | `ArcBlock/launcher-kit` |
-| `did-spaces` | `/` | `blocklet/did-spaces` |
+Some Blocklets can be identified by their domain pattern:
 
-**If no match found**:
-1. Search GitHub using blocklet name
-2. Use AskUserQuestion to let user confirm repository
+| Domain Pattern | Repository Name |
+|----------------|-----------------|
+| `spaces*.arcblock.io` | did-spaces |
+| `store.blocklet.dev` | blocklet-store |
 
-```bash
-# Search repositories
-gh search repos "$BLOCKLET_NAME" --owner ArcBlock --owner blocklet --sort updated --limit 5
+**Step 2: Query local reference files**
+
+- `references/org-arcblock-repos.md` - ArcBlock organization repos
+- `references/org-blocklet-repos.md` - blocklet organization repos
+
+Reference file format:
 ```
+| Name | URL | Main Branch | Branch Prefix | Description | Category |
+```
+
+Search by blocklet name or keyword in these files.
+
+**Common blocklet name to repository name mapping**:
+
+| Blocklet Name (from API) | Repository Name (in references) |
+|--------------------------|--------------------------------|
+| `image-bin` | media-kit |
+| `did-spaces` | did-spaces |
+| `payment-kit` | payment-kit |
+| `discuss-kit` | discuss-kit |
+
+**Step 3: If no match found**
+
+Use AskUserQuestion to let user confirm repository
 
 ### Phase 5: Output Analysis Result
 
