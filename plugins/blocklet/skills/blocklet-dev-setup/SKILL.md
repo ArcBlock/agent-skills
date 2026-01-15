@@ -47,9 +47,6 @@ fi
 PM2_HOME=~/.arcblock/abtnode pm2 list
 PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
 ```
-
----
-
 ## Active Loading Policy
 下面文件只要需要时, 才去读取, 文件在 arcblock 的 agent-skill repo 里:
 | 涉及产品 | 加载文件 |
@@ -59,8 +56,7 @@ PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
 | DID Connect | `arcblock-context/products/did-connect.md` |
 | Discuss Kit | `arcblock-context/products/discuss-kit.md` |
 | PaymentKit | `arcblock-context/products/paymentkit.md` |
-
----
+| AIGNE CLI | `arcblock-context/products/aigne.md` |
 
 ## 仓库搜索
 
@@ -340,33 +336,65 @@ ulimit -n 65536  # 临时设置
 
 ### Phase 4: Blocklet Server Setup
 
-#### 4.0 检查 blocklet-server 源码开发进程冲突
+Blocklet Server 有两种运行方式，**不能同时运行**：
 
-**重要**: 在启动 Blocklet Server 之前，必须检查是否有 blocklet-server 源码开发的 tmux 进程在运行（`bun run start`）。两者不能同时运行。
+| 运行方式 | 启动命令 | 检测方法 | 数据目录 |
+|----------|----------|----------|----------|
+| 生产版本 | `blocklet server start` | `blocklet server status` | `~/blocklet-server-data/` |
+| 源码开发 | `bun run start` (在 blocklet-server 仓库) | tmux 会话 `blocklet` | `~/blocklet-server-dev-data/` |
+
+#### 4.0 检查 Blocklet Server 运行状态
+
+**必须同时检查两种运行方式**：
 
 ```bash
-# 检查是否有 blocklet-server 源码开发的 tmux 会话
-if tmux has-session -t "blocklet-server" 2>/dev/null; then
-    echo "⚠️ 检测到 blocklet-server 源码开发进程正在运行"
-    echo "请先停止 blocklet-server 源码开发进程: tmux kill-session -t blocklet-server"
-    exit 1
+# 检查方式 1: 生产版本是否在运行
+PRODUCTION_RUNNING=false
+if blocklet server status 2>/dev/null | grep -q "Running"; then
+    PRODUCTION_RUNNING=true
+    echo "✅ 检测到 Blocklet Server 生产版本正在运行"
+fi
+
+# 检查方式 2: 源码开发版本是否在运行（tmux 会话名为 "blocklet"）
+DEV_RUNNING=false
+if tmux has-session -t "blocklet" 2>/dev/null; then
+    DEV_RUNNING=true
+    echo "✅ 检测到 blocklet-server 源码开发版本正在运行 (tmux session: blocklet)"
 fi
 ```
 
-| 检测结果 | 处理 |
-|----------|------|
-| 存在 blocklet-server tmux 会话 | 使用 AskUserQuestion 询问用户是否停止该进程 |
-| 不存在 | 继续下一步 |
+#### 4.1 根据检测结果处理
 
-**冲突原因**: blocklet-server 源码开发（`bun run start`）和 Blocklet Server 生产版本（`blocklet server start`）使用相同的端口和资源，不能同时运行。
+| 生产版本 | 源码开发 | 处理 |
+|----------|----------|------|
+| 运行中 | 未运行 | ✅ 直接使用，跳到 Phase 5 |
+| 未运行 | 运行中 | ⚠️ 询问用户：停止源码开发并启动生产版本，或直接使用源码开发版本 |
+| 未运行 | 未运行 | 需要启动生产版本，继续 4.2 |
+| 运行中 | 运行中 | ❌ 异常状态，询问用户停止哪个 |
 
-#### 4.1 检查状态
+**源码开发版本运行时的处理**：
 
-```bash
-blocklet server status
+使用 `AskUserQuestion` 询问用户：
+
+```
+检测到 blocklet-server 源码开发版本正在运行 (tmux session: blocklet)。
+源码开发和生产版本使用相同端口，不能同时运行。
+
+选项：
+A. 停止源码开发，启动生产版本 (Recommended for blocklet dev)
+   - 执行: tmux kill-session -t blocklet && blocklet server start
+B. 继续使用源码开发版本
+   - blocklet dev 将连接到源码开发的 Server
+C. 取消操作
 ```
 
-已运行则跳到 Phase 5。
+**停止源码开发版本**：
+
+```bash
+tmux kill-session -t "blocklet" 2>/dev/null
+# 等待端口释放
+sleep 3
+```
 
 #### 4.2 初始化（如果需要）
 
@@ -622,35 +650,5 @@ C. 不创建，直接在 {DEV_BRANCH} 上开发
 
 ## Skill 持续改进
 
-当开发过程中遇到 **本 skill 未记录的问题** 并成功解决后，应主动询问用户是否将经验贡献回 skill。
-
-### 触发条件
-
-| 场景 | 示例 |
-|------|------|
-| 遇到新的环境问题并解决 | nginx 模块缺失、端口冲突、权限问题等 |
-| 发现更好的诊断/修复方法 | 更快的问题定位命令、更可靠的修复步骤 |
-| 流程中有遗漏的步骤 | 某个必要的前置检查未包含 |
-
-### 询问流程
-
-使用 `AskUserQuestion` 询问用户是否贡献经验到 agent-skills 仓库。
-
-如用户同意，使用本 skill 配置 agent-skills 开发环境，补充修复方案后准备 PR 让用户确认。
-
-
-### 如果用户同意贡献, PR 准备流程
-
-```bash
-# 1. 确保 agent-skills 仓库最新
-SKILLS_REPO="$HOME/arcblock-repos/agent-skills"
-cd "$SKILLS_REPO" && git checkout main && git pull origin main
-
-# 2. 创建改进分支
-BRANCH_NAME="improve/blocklet-dev-setup-$(date +%Y%m%d)"
-git checkout -b "$BRANCH_NAME"
-
-# 3. 定位 skill 文件
-SKILL_FILE="$SKILLS_REPO/plugins/blocklet/skills/blocklet-dev-setup/SKILL.md"
-```
+详见 `references/skill-contribution.md`。
 
