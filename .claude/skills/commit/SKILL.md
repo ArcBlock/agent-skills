@@ -6,6 +6,7 @@ allowed-tools:
   - Read
   - Glob
   - Grep
+  - AskUserQuestion
 ---
 
 # Commit Skill
@@ -96,7 +97,7 @@ git diff
 
 ### Step 2: Verify All Changes Are Staged
 
-**IMPORTANT: If there are unstaged changes, STOP and notify the user.**
+**IMPORTANT: If there are unstaged changes, use AskUserQuestion to confirm how to proceed.**
 
 Check for unstaged changes:
 - Modified files not staged (`Changes not staged for commit`)
@@ -104,8 +105,25 @@ Check for unstaged changes:
 
 If unstaged changes exist:
 1. List all unstaged/untracked files
-2. Ask user: "There are unstaged changes. Please stage them with `git add` first, or tell me which files to include."
-3. **DO NOT proceed until all intended changes are staged**
+2. **Use AskUserQuestion tool** to ask user how to proceed:
+
+```json
+{
+  "questions": [{
+    "question": "There are unstaged changes. How would you like to proceed?",
+    "header": "Unstaged",
+    "options": [
+      {"label": "Stage all", "description": "Run `git add .` to stage all changes"},
+      {"label": "Abort", "description": "Cancel the commit and handle changes manually"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+3. If user selects "Stage all": run `git add .` then continue to Step 3
+4. If user selects "Abort": stop the workflow and inform user to stage changes manually
+5. **DO NOT proceed until all intended changes are staged**
 
 ### Step 3: Analyze Staged Changes
 
@@ -116,7 +134,7 @@ Only proceed if all changes are properly staged:
 
 ### Step 4: Generate and Confirm Commit Message
 
-Generate the commit message following the format, then **ASK USER FOR CONFIRMATION**:
+Generate the commit message following the format, then use **AskUserQuestion** tool to confirm:
 
 ```
 Proposed commit message:
@@ -128,10 +146,26 @@ Proposed commit message:
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
-**Wait for user approval before proceeding.** User may:
-- Approve: proceed to commit
-- Request changes: modify the message and ask again
-- Cancel: abort the commit
+**Use AskUserQuestion tool** with options:
+- `Approve` - Proceed to commit
+- `Edit message` - User wants to modify the message
+- `Cancel` - Abort the commit
+
+Example AskUserQuestion usage:
+```json
+{
+  "questions": [{
+    "question": "Proceed with this commit message?",
+    "header": "Commit",
+    "options": [
+      {"label": "Approve", "description": "Create the commit with this message"},
+      {"label": "Edit message", "description": "Modify the commit message"},
+      {"label": "Cancel", "description": "Abort the commit"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
 
 ### Step 5: Execute Commit (Only After User Confirmation)
 
