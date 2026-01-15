@@ -97,6 +97,26 @@ gh repo view "$ORG/$REPO" --json name,description,updatedAt,defaultBranchRef 2>/
 
 按顺序执行以下阶段。
 
+### Phase 0: GitHub CLI 认证检查
+
+**最优先执行**: 在执行任何 `gh` 命令之前，必须先确保 GitHub CLI 已认证。
+
+```bash
+# 检查 gh 是否已认证
+if ! gh auth status &>/dev/null; then
+    echo "❌ GitHub CLI 未认证，请先执行认证"
+    gh auth login
+fi
+```
+
+| 认证状态 | 处理 |
+|----------|------|
+| 未安装 gh | 提示安装：`brew install gh` (macOS) 或参考 https://cli.github.com/ |
+| 未认证 | 引导执行 `gh auth login` 完成认证, 可以帮用户执行认证, 并且告诉用户怎么做 |
+| 已认证 | 继续下一步 |
+
+---
+
 ### Phase 1: Issue/Repo Resolution
 
 识别用户意图，确定要开发的仓库。
@@ -262,15 +282,11 @@ skill 位置: `plugins/blocklet/skills/blocklet-branch/SKILL.md`
 | 工具 | 用途 | 检查命令 | 安装方式 |
 |------|------|----------|----------|
 | **git** | 仓库克隆、分支操作 | `git --version` | 系统自带或 `brew install git` |
-| **gh** | GitHub API 操作（仓库搜索、权限检查、Issue 读取、PR 查询） | `gh --version` | `brew install gh` 然后 `gh auth login` |
+| **gh** | GitHub API 操作（仓库搜索、权限检查、Issue 读取、PR 查询） | `gh --version` | `brew install gh` |
 | **jq** | JSON 解析 | `jq --version` | `brew install jq` (macOS) / `apt install jq` (Ubuntu) |
 | **curl** | 域名可达性测试 | `curl --version` | 系统自带 |
 
-**gh 认证检查**：
-```bash
-gh auth status
-# 如果未认证，执行: gh auth login
-```
+**注意**: gh 认证已在 Phase 0 检查完成。
 
 #### 3.1 Node.js (Required: 22+)
 
@@ -509,6 +525,56 @@ tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 tmux new-session -d -s "$TMUX_SESSION" -c "$BLOCKLET_DIR" "$DEV_CMD"
 ```
 
+#### 6.1.1 启动监控（重要）
+
+**立即输出日志**: 启动 tmux 会话后，**不要等待启动完成**，立即查看并输出日志给用户：
+
+```bash
+# 启动后立即查看日志（等待 2 秒让进程开始输出）
+sleep 2
+tmux capture-pane -t "$TMUX_SESSION" -p | tail -30
+```
+
+**持续监控**: `blocklet dev` 启动过程因 blocklet 类型、依赖情况、环境配置不同而**差异很大**，必须持续监控：
+
+```bash
+# 检查进程是否还在运行
+tmux has-session -t "$TMUX_SESSION" 2>/dev/null && echo "进程运行中" || echo "❌ 进程已退出"
+
+# 查看最新日志
+tmux capture-pane -t "$TMUX_SESSION" -p | tail -50
+```
+
+**监控要点**:
+
+| 检查项 | 命令 | 异常处理 |
+|--------|------|----------|
+| 进程是否存活 | `tmux has-session -t "$TMUX_SESSION"` | 进程退出则分析日志找原因 |
+| 是否有错误输出 | 查看日志中的 `error`、`failed`、`ENOENT` | 根据错误类型尝试修复 |
+| 是否卡住不动 | 多次查看日志无变化 | 可能缺少依赖或配置问题 |
+| 端口冲突 | `EADDRINUSE` | 找出占用端口的进程并处理 |
+
+**常见启动问题及解决**:
+
+| 日志关键词 | 可能原因 | 解决方案 |
+|------------|----------|----------|
+| `ENOENT` | 缺少文件或依赖未安装 | 重新执行 `pnpm install` 或 `make init` |
+| `EADDRINUSE` | 端口被占用 | `lsof -i :PORT` 找出进程，决定是否 kill |
+| `Cannot find module` | 依赖未安装或路径错误 | 检查 node_modules，重新安装依赖 |
+| `Permission denied` | 权限问题 | 检查文件权限，可能需要 sudo |
+| `command not found` | 工具未安装 | 安装对应工具（如 turbo、vite 等） |
+| `Blocklet Server is not running` | Server 未启动 | 回到 Phase 4 启动 Server |
+| 进程直接退出无输出 | 配置错误或环境问题 | 检查 blocklet.yml 和 .env 文件 |
+| `out of memory` | 内存不足 | 关闭其他进程，或增加 swap |
+
+**重要原则**:
+1. **不要假设启动成功** - 每个 blocklet 启动时间和行为都不同
+2. **主动查看日志** - 发现问题及时处理，不要等用户反馈
+3. **尝试自动修复** - 遇到常见问题先尝试解决，解决不了再告知用户
+4. **保持进程可见** - 始终让用户知道当前启动状态
+
+---
+
 #### 6.2 测试域名可达性
 
 启动成功后，**必须**测试 DID 域名是否可访问：
@@ -535,6 +601,15 @@ gh pr list --repo $ORG/$REPO --state merged --limit 5 --json number,title,author
 
 #### 6.4 输出启动信息
 
+**URL 路径说明（重要，不要混淆）**:
+
+| 类型 | 路径 | 用途 |
+|------|------|------|
+| **Server Admin** | `/.well-known/server/admin` | 整个 Blocklet Server 的管理面板 |
+| **Blocklet Service** | `/.well-known/service/admin` | 单个 blocklet 的管理页面 |
+
+⚠️ **注意**: Server Admin 使用 IP 域名（如 `192-168-1-80.ip.abtnet.io`），路径是 `/server/admin`，不是 `/service/admin`。
+
 ```
 ===== 开发环境已就绪 =====
 
@@ -543,27 +618,15 @@ gh pr list --repo $ORG/$REPO --state merged --limit 5 --json number,title,author
 路径: ~/arcblock-repos/{REPO}
 
 ===== 访问地址 =====
-Blocklet Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
+Server Admin: https://{IP_DOMAIN}:8443/.well-known/server/admin/
 Blocklet URL: https://{BLOCKLET_DID_DOMAIN}:8443
+Blocklet Service: https://{BLOCKLET_DID_DOMAIN}:8443/.well-known/service/admin/
 
 {根据 6.2 测试结果}
 ✅ 域名访问正常
 或
 ⚠️ DID 域名无法访问，请将 DNS 设置为 8.8.8.8:
    macOS: sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
-
-===== 最近合并的 PR =====
-{如有 GitHub 权限，列出最近 5 个合并的 PR}
-#123 Fix login issue (by @author, merged to main)
-#122 Add new feature (by @author, merged to main)
-...
-
-===== PR 提交规范 =====
-根据上述 PR 风格，请遵循以下规范：
-1. 分支命名: feat/xxx, fix/xxx, chore/xxx
-2. PR 标题格式: 动词开头，简洁描述变更（如 "Fix login redirect issue"）
-3. PR 目标分支: {MAIN_BRANCH}
-4. 提交前请确保: 代码通过 lint、测试通过、功能自测
 
 ===== 常用命令 =====
 {如果使用 tmux 启动}

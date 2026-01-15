@@ -50,7 +50,7 @@ fi
 | 认证状态 | 处理 |
 |----------|------|
 | 未安装 gh | 提示安装：`brew install gh` (macOS) 或参考 https://cli.github.com/ |
-| 未认证 | 引导执行 `gh auth login` 完成认证 |
+| 未认证 | 引导执行 `gh auth login` 完成认证, 可以帮用户执行认证, 并且告诉用户怎么做 |
 | 已认证 | 继续下一步 |
 
 ---
@@ -199,9 +199,11 @@ fi
    - 安装依赖 (`bun install`)
    - 编译依赖包 (`bun turbo:dep`)
    - 配置环境变量 (`core/webapp/.env.development`)
+   - 持续查看 tmux 中 blocklet windows 的 webapp window, 看看日志输出, 要确保成功. 如果出现 [nodemon] app crashed - waiting, 记得停止这个进程,重新执行
    - 输出启动指南
 
 ---
+
 
 ## 输出完成信息
 
