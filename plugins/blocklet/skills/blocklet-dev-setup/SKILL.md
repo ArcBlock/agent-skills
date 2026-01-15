@@ -494,6 +494,12 @@ fi
 Check if `~/blocklet-server-data/.blocklet-server/config.yml` exists.
 
 ```bash
+# Check if this is first-time setup
+FIRST_TIME_SETUP=false
+if [ ! -d "$HOME/blocklet-server-data/.blocklet-server" ]; then
+    FIRST_TIME_SETUP=true
+fi
+
 mkdir -p ~/blocklet-server-data && cd ~/blocklet-server-data
 blocklet server init --yes --http-port 8080 --https-port 8443
 ```
@@ -514,6 +520,58 @@ ulimit -n 65536 && blocklet server start --update-db
 2. Are ports 8080/8443
 3. Used `--update-db` after modifying ports
 4. View logs: `PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 50`
+
+#### 4.5 First-Time Wallet Binding Check (Critical)
+
+**Important**: If this is the first time starting Blocklet Server (no previous `.blocklet-server` directory), the user **MUST** complete wallet binding before proceeding. Without wallet binding, blocklets created later will have issues.
+
+**Detection methods**:
+
+1. **Check if first-time setup** (from 4.2):
+```bash
+if [ "$FIRST_TIME_SETUP" = "true" ]; then
+    echo "⚠️ First-time Blocklet Server setup detected"
+fi
+```
+
+2. **Check Server Admin URL response**:
+```bash
+# Get Server Admin URL
+IP_DOMAIN=$(hostname -I | awk '{print $1}' | tr '.' '-').ip.abtnet.io
+SERVER_ADMIN_URL="https://${IP_DOMAIN}:8443/.well-known/server/admin/"
+
+# Check if redirected to setup/authorization page
+RESPONSE=$(curl -sI --connect-timeout 5 -L "$SERVER_ADMIN_URL" 2>/dev/null | grep -i "location:")
+# If response contains "setup", "auth", or "connect", wallet binding is needed
+```
+
+**When first-time setup is detected, MUST use AskUserQuestion**:
+
+```
+⚠️ First-Time Blocklet Server Setup Detected
+
+Before continuing, you MUST complete wallet binding in the browser:
+
+1. Open Server Admin: {SERVER_ADMIN_URL}
+2. You will see an authorization/setup page
+3. Use DID Wallet to scan the QR code and complete binding
+4. After binding, the page will redirect to the Server Admin dashboard
+
+⚠️ IMPORTANT: If you skip this step, blocklets created later will have permission issues and may not function correctly.
+
+Options:
+A. I have completed wallet binding (Continue)
+B. Help me open the URL (will open browser)
+C. Cancel setup
+```
+
+**Wait for user confirmation before proceeding to Phase 5**.
+
+**Why wallet binding is required**:
+- Blocklet Server uses DID-based authentication
+- The first bound wallet becomes the Server owner/admin
+- Without an owner, blocklets cannot be properly registered
+- Permission system will malfunction without initial wallet binding
 
 ---
 
