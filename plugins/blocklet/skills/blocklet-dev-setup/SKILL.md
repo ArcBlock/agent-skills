@@ -473,6 +473,7 @@ A. Stop source development, start production version (Recommended for blocklet d
    - Execute: tmux kill-session -t blocklet && blocklet server start
 B. Continue using source development version
    - Need to use bn-dev command (instead of blocklet dev)
+   - bn-dev runs directly in the blocklet directory WITHOUT arguments (NOT "bn-dev start")
    - If bn-dev not configured, will automatically create symlink
 C. Cancel operation
 ```
@@ -623,7 +624,7 @@ fi
 | Server Type | Start Command | Description |
 |-------------|---------------|-------------|
 | Production version | `blocklet dev` | Connect to Server started by `blocklet server start` |
-| Source development version | `bn-dev` | Connect to source development Server (tmux session: blocklet) |
+| Source development version | `bn-dev` | Connect to source development Server (tmux session: blocklet). **Run directly without arguments** |
 
 **Record variables**:
 - `TMUX_SESSION`: Session name, format `blocklet-dev-{REPO}`
@@ -638,6 +639,7 @@ fi
 ```bash
 # Determine start command based on Phase 4 choice
 if [ "$USE_DEV_SERVER" = "true" ]; then
+    # bn-dev must be run WITHOUT arguments (e.g., do NOT use "bn-dev start")
     DEV_CMD="bn-dev"
 else
     DEV_CMD="blocklet dev"
