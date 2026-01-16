@@ -203,11 +203,11 @@ curl -sS "$API_URL" | jq '.name, .did, .title'
 curl -sS "$URL" | grep -oP '(?<=<meta name="blocklet-did" content=")[^"]*'
 ```
 
-**Method C: Request blocklet.json**
+**Method C: Request __blocklet__.js**
 
 ```bash
-# Try to get blocklet metadata
-curl -sS "${ORIGIN}${MOUNT_PATH}/__blocklet__.json" 2>/dev/null | jq '.name, .did'
+# Try to get blocklet metadata (returns JSON when type=json)
+curl -sS "${ORIGIN}${MOUNT_PATH}/__blocklet__.js?type=json" 2>/dev/null | jq '.appName, .appId'
 ```
 
 #### 4.3 Blocklet to Repository Mapping
