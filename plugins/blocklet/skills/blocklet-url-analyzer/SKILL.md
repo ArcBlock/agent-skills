@@ -188,12 +188,40 @@ const mountPath = pathParts.length > 0 ? `/${pathParts[0]}` : '/';
 
 #### 4.2 Request Blocklet Information
 
-**Method A: Request DID API**
+**Method A: Request __blocklet__.js (Recommended)**
+
+This is the most reliable method. The `__blocklet__.js?type=json` endpoint returns information about the main blocklet AND all its components.
 
 ```bash
-# Construct API URL
-API_URL="${ORIGIN}/.well-known/service/api/did/blocklet"
-curl -sS "$API_URL" | jq '.name, .did, .title'
+# Get full blocklet metadata (returns JSON when type=json)
+BLOCKLET_DATA=$(curl -sS "${ORIGIN}/__blocklet__.js?type=json" 2>/dev/null)
+
+# Extract main blocklet info
+echo "$BLOCKLET_DATA" | jq '{appName, appId, appUrl}'
+
+# Extract component mount points
+echo "$BLOCKLET_DATA" | jq '.componentMountPoints'
+```
+
+**Important**: The `appName` and `appId` fields are for the **main blocklet** (the service). To find the specific component for a mount path, you need to search in `componentMountPoints`:
+
+```bash
+# Find component by mount path
+# Example: For URL https://team.arcblock.io/task/..., MOUNT_PATH="/task"
+COMPONENT=$(echo "$BLOCKLET_DATA" | jq --arg mp "$MOUNT_PATH" '.componentMountPoints[] | select(.mountPoint == $mp)')
+echo "$COMPONENT" | jq '{name, did, title, mountPoint}'
+```
+
+**Component fields**:
+- `name`: Component name (may be the DID itself for some blocklets)
+- `did`: Component DID (use this to identify the blocklet)
+- `title`: Human-readable title (e.g., "FlowBoard", "Payment Kit")
+- `mountPoint`: The URL path where this component is mounted
+
+**Special case - root path**:
+If mount path is `/`, find the component with `mountPoint: "/"`:
+```bash
+ROOT_COMPONENT=$(echo "$BLOCKLET_DATA" | jq '.componentMountPoints[] | select(.mountPoint == "/")')
 ```
 
 **Method B: Request Page to Analyze Meta Tags**
@@ -203,11 +231,12 @@ curl -sS "$API_URL" | jq '.name, .did, .title'
 curl -sS "$URL" | grep -oP '(?<=<meta name="blocklet-did" content=")[^"]*'
 ```
 
-**Method C: Request __blocklet__.js**
+**Method C: Legacy DID API (may not work for all setups)**
 
 ```bash
-# Try to get blocklet metadata (returns JSON when type=json)
-curl -sS "${ORIGIN}${MOUNT_PATH}/__blocklet__.js?type=json" 2>/dev/null | jq '.appName, .appId'
+# Construct API URL
+API_URL="${ORIGIN}/.well-known/service/api/did/blocklet"
+curl -sS "$API_URL" | jq '.name, .did, .title'
 ```
 
 #### 4.3 Blocklet to Repository Mapping
@@ -236,14 +265,24 @@ Reference file format:
 
 Search by blocklet name or keyword in the loaded file.
 
-**Common blocklet name to repository name mapping**:
+**Common blocklet name/title to repository name mapping**:
 
-| Blocklet Name (from API) | Repository Name (in references) |
-|--------------------------|--------------------------------|
-| `image-bin` | media-kit |
-| `did-spaces` | did-spaces |
-| `payment-kit` | payment-kit |
-| `discuss-kit` | discuss-kit |
+| Blocklet Name/Title (from API) | Repository Name (in references) |
+|--------------------------------|--------------------------------|
+| `image-bin` / `Media Kit` | media-kit |
+| `did-spaces` / `DID Spaces` | did-spaces |
+| `payment-kit` / `Payment Kit` | payment-kit |
+| `did-comments` / `Discuss Kit` | discuss-kit |
+| `FlowBoard` | flow-board |
+| `pages-kit` / `Pages Kit` | pages-kit |
+| `vote` / `Vote` | vote |
+| `ai-studio` / `AIGNE Studio` | ai-studio |
+| `meilisearch` / `Search Kit` | meilisearch-kit |
+| `excalidraw` / `Excalidraw` | excalidraw |
+| `virtual-gift-card` / `Virtual Gift Card` | virtual-gift-card |
+| `nft-blender` / `NFT Blender` | nft-blender |
+
+**Note**: The `name` field from `componentMountPoints` may be a DID string (e.g., `z2qa4xMVAJxvA1GgfnPpMFqhdSjU9pe37NCiY`) when the blocklet uses its DID as the internal name. In such cases, use the `title` field for human-readable identification and search in reference files.
 
 **Step 3: If no match found**
 

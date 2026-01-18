@@ -23,12 +23,12 @@ blocklet dev requires a local Blocklet Server to be running.
 
 ## Convention Directories
 
-| Directory | Purpose |
-|-----------|---------|
-| `~/arcblock-repos/` | All ArcBlock project repositories |
+| Directory                        | Purpose                                                   |
+| -------------------------------- | --------------------------------------------------------- |
+| `~/arcblock-repos/`              | All ArcBlock project repositories                         |
 | `~/arcblock-repos/agent-skills/` | AI Agent skill set (used when querying skill definitions) |
-| `~/blocklet-server-data/` | Blocklet Server data directory |
-| `~/blocklet-server-dev-data/` | Blocklet Server source code development data directory |
+| `~/blocklet-server-data/`        | Blocklet Server data directory                            |
+| `~/blocklet-server-dev-data/`    | Blocklet Server source code development data directory    |
 
 ## Query Skill Definitions
 
@@ -49,10 +49,10 @@ fi
 
 When viewing PM2 processes, set the correct `PM2_HOME`:
 
-| Environment | PM2_HOME |
-|-------------|----------|
-| Production | `~/.arcblock/abtnode` |
-| Development | `~/.arcblock/abtnode-dev` |
+| Environment | PM2_HOME                   |
+| ----------- | -------------------------- |
+| Production  | `~/.arcblock/abtnode`      |
+| Development | `~/.arcblock/abtnode-dev`  |
 | e2e Testing | `~/.arcblock/abtnode-test` |
 
 ```bash
@@ -64,14 +64,14 @@ PM2_HOME=~/.arcblock/abtnode pm2 logs abt-node-daemon --lines 100
 
 The following files should only be read when needed. Files are in the ArcBlock agent-skills repo:
 
-| Related Product | File to Load |
-|-----------------|--------------|
+| Related Product              | File to Load                                      |
+| ---------------------------- | ------------------------------------------------- |
 | Blocklet Development General | `arcblock-context/products/blocklet-developer.md` |
-| Blocklet Server | `arcblock-context/products/blocklet-server.md` |
-| DID Connect | `arcblock-context/products/did-connect.md` |
-| Discuss Kit | `arcblock-context/products/discuss-kit.md` |
-| PaymentKit | `arcblock-context/products/paymentkit.md` |
-| AIGNE CLI | `arcblock-context/products/aigne.md` |
+| Blocklet Server              | `arcblock-context/products/blocklet-server.md`    |
+| DID Connect                  | `arcblock-context/products/did-connect.md`        |
+| Discuss Kit                  | `arcblock-context/products/discuss-kit.md`        |
+| PaymentKit                   | `arcblock-context/products/paymentkit.md`         |
+| AIGNE CLI                    | `arcblock-context/products/aigne.md`              |
 
 ## Repository Search
 
@@ -91,14 +91,15 @@ These files contain: Name, URL, Main Branch, Branch Prefix, Description, Categor
 
 > Load reference files on-demand based on context. Do not preload all files.
 
-| Trigger Condition | Load File |
-|-------------------|-----------|
-| Known ArcBlock repo (blocklet-server, ux, did-connect, SDKs) | `org-arcblock-repos.md` |
-| Known Blocklet app (payment-kit, media-kit, discuss-kit, etc.) | `org-blocklet-repos.md` |
-| Known AIGNE repo (aigne-framework, aigne-hub, LLM adapters) | `org-aigne-repos.md` |
-| Uncertain which organization | First read `blocklet-url-analyzer/references/README.md` |
+| Trigger Condition                                              | Load File                                               |
+| -------------------------------------------------------------- | ------------------------------------------------------- |
+| Known ArcBlock repo (blocklet-server, ux, did-connect, SDKs)   | `org-arcblock-repos.md`                                 |
+| Known Blocklet app (payment-kit, media-kit, discuss-kit, etc.) | `org-blocklet-repos.md`                                 |
+| Known AIGNE repo (aigne-framework, aigne-hub, LLM adapters)    | `org-aigne-repos.md`                                    |
+| Uncertain which organization                                   | First read `blocklet-url-analyzer/references/README.md` |
 
 **Loading Strategy:**
+
 1. Analyze user input (repo name, keywords, blocklet name) to infer organization
 2. Load only the relevant reference file
 3. If uncertain, read README.md first for high-density summary to decide
@@ -129,10 +130,10 @@ git --version || echo "❌ git not installed"
 curl --version | head -1 || echo "❌ curl not installed"
 ```
 
-| Tool | Purpose | Check Command | Installation |
-|------|---------|---------------|--------------|
-| **git** | Repository cloning, branch operations, commit history | `git --version` | Built-in or `brew install git` |
-| **curl** | Domain reachability testing | `curl --version` | Built-in |
+| Tool     | Purpose                                               | Check Command    | Installation                   |
+| -------- | ----------------------------------------------------- | ---------------- | ------------------------------ |
+| **git**  | Repository cloning, branch operations, commit history | `git --version`  | Built-in or `brew install git` |
+| **curl** | Domain reachability testing                           | `curl --version` | Built-in                       |
 
 ---
 
@@ -140,13 +141,13 @@ curl --version | head -1 || echo "❌ curl not installed"
 
 Identify user intent and determine which repository to develop.
 
-| Trigger Method | Example | Handling |
-|----------------|---------|----------|
-| GitHub Issue URL | `https://github.com/ArcBlock/media-kit/issues/123` | Extract repo from URL; if gh available, read issue content |
-| **Blocklet URL** | `https://xxx.ip.abtnet.io/image-bin/admin` | Use `blocklet-url-analyzer` skill to analyze |
-| Repo name + problem description | "Help me fix the media-kit image issue" | Search in local reference files |
-| Problem description | "Discussion comment feature has a bug" | Keyword search in reference files |
-| Direct specification | "I want to develop snap-kit" | Search in local reference files to verify |
+| Trigger Method                  | Example                                            | Handling                                                   |
+| ------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| GitHub Issue URL                | `https://github.com/ArcBlock/media-kit/issues/123` | Extract repo from URL; if gh available, read issue content |
+| **Blocklet URL**                | `https://xxx.ip.abtnet.io/image-bin/admin`         | Use `blocklet-url-analyzer` skill to analyze               |
+| Repo name + problem description | "Help me fix the media-kit image issue"            | Search in local reference files                            |
+| Problem description             | "Discussion comment feature has a bug"             | Keyword search in reference files                          |
+| Direct specification            | "I want to develop snap-kit"                       | Search in local reference files to verify                  |
 
 #### 1.0 URL Type Detection
 
@@ -173,12 +174,12 @@ fi
 2. Follow skill flow to analyze URL
 3. Based on analysis result:
 
-| Analysis Result Type | Handling |
-|---------------------|----------|
-| `DAEMON` | **Redirect** to `blocklet-server-dev-setup` skill |
-| `BLOCKLET_SERVICE` | **Redirect** to `blocklet-server-dev-setup` skill |
-| `BLOCKLET` | Get corresponding repository; if `blocklet-server`, redirect to `blocklet-server-dev-setup`; otherwise continue to Phase 2 |
-| `UNKNOWN` | Use AskUserQuestion to let user specify manually |
+| Analysis Result Type | Handling                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `DAEMON`             | **Redirect** to `blocklet-server-dev-setup` skill                                                                          |
+| `BLOCKLET_SERVICE`   | **Redirect** to `blocklet-server-dev-setup` skill                                                                          |
+| `BLOCKLET`           | Get corresponding repository; if `blocklet-server`, redirect to `blocklet-server-dev-setup`; otherwise continue to Phase 2 |
+| `UNKNOWN`            | Use AskUserQuestion to let user specify manually                                                                           |
 
 **Important**: When the identified repository is `blocklet-server`, always redirect to `blocklet-server-dev-setup` skill instead of continuing with this skill.
 
@@ -190,6 +191,7 @@ fi
 When user provides repository name or keywords, search in local reference files **following ALP**:
 
 **Load reference file based on context** (see "Repository Search" section above):
+
 - Core infrastructure keywords → `blocklet-url-analyzer/references/org-arcblock-repos.md`
 - Blocklet app keywords (kit, store, marketing tools) → `blocklet-url-analyzer/references/org-blocklet-repos.md`
 - AI-related keywords (aigne, LLM, agent) → `blocklet-url-analyzer/references/org-aigne-repos.md`
@@ -208,12 +210,13 @@ if [ "$REPO" = "blocklet-server" ]; then
 fi
 ```
 
-| Repository | Handling |
-|------------|----------|
-| `blocklet-server` | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
-| Other repositories | Continue to Phase 2 |
+| Repository         | Handling                                                              |
+| ------------------ | --------------------------------------------------------------------- |
+| `blocklet-server`  | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
+| Other repositories | Continue to Phase 2                                                   |
 
 **Redirect message**:
+
 ```
 The repository you want to develop is blocklet-server (Blocklet Server core).
 This requires a different development environment setup.
@@ -246,10 +249,10 @@ if [ "$REPO" = "blocklet-server" ]; then
 fi
 ```
 
-| Repository | Handling |
-|------------|----------|
-| `blocklet-server` | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
-| Other repositories | Continue to Step 2 |
+| Repository         | Handling                                                              |
+| ------------------ | --------------------------------------------------------------------- |
+| `blocklet-server`  | **Stop current skill**, redirect to `blocklet-server-dev-setup` skill |
+| Other repositories | Continue to Step 2                                                    |
 
 **Step 2: Check gh CLI availability and permissions**
 
@@ -264,9 +267,9 @@ fi
 
 **Step 3: Handle based on gh availability**
 
-| gh Status | Handling |
-|-----------|----------|
-| Available with auth | Read issue content for deeper analysis (multi-repo detection) |
+| gh Status               | Handling                                                      |
+| ----------------------- | ------------------------------------------------------------- |
+| Available with auth     | Read issue content for deeper analysis (multi-repo detection) |
 | Not available / No auth | Use repository from URL directly, skip issue content analysis |
 
 **If gh available - Read issue content**:
@@ -276,6 +279,7 @@ gh issue view $ISSUE_NUMBER --repo $ORG/$REPO --json title,body,labels
 ```
 
 Then analyze issue content:
+
 1. Read issue title and body
 2. Identify product/component keywords mentioned
 3. Determine if multiple repositories are involved
@@ -286,14 +290,15 @@ Simply use the repository extracted from the Issue URL (`$ORG/$REPO`) and procee
 
 **Multi-repository scenario examples**:
 
-| Issue Location | Issue Content Keywords | Actual Repositories Involved |
-|----------------|------------------------|------------------------------|
-| `media-kit` | "Discuss Kit image upload triggers twice" | `media-kit` (uploader) + `discuss-kit` (caller) |
-| `discuss-kit` | "Image upload component onUploadSuccess exception" | `discuss-kit` + `media-kit` (component provider) |
-| `blocklet-server` | "DID Connect login failed" | `blocklet-server` + `did-connect` |
-| `did-spaces` | "PaymentKit payment callback issue" | `did-spaces` + `paymentkit` |
+| Issue Location    | Issue Content Keywords                             | Actual Repositories Involved                     |
+| ----------------- | -------------------------------------------------- | ------------------------------------------------ |
+| `media-kit`       | "Discuss Kit image upload triggers twice"          | `media-kit` (uploader) + `discuss-kit` (caller)  |
+| `discuss-kit`     | "Image upload component onUploadSuccess exception" | `discuss-kit` + `media-kit` (component provider) |
+| `blocklet-server` | "DID Connect login failed"                         | `blocklet-server` + `did-connect`                |
+| `did-spaces`      | "PaymentKit payment callback issue"                | `did-spaces` + `paymentkit`                      |
 
 **Decision logic**:
+
 - Repository where Issue is located is the **primary repository** (issue report location)
 - Other products mentioned in Issue content are **related repositories** (may need to view simultaneously)
 
@@ -335,13 +340,14 @@ Clone to `~/arcblock-repos/$REPO` (prefer SSH, fallback to HTTPS on failure).
 find . -name "blocklet.yml" -o -name "blocklet.yaml" | grep -v node_modules
 ```
 
-| Situation | Handling |
-|-----------|----------|
-| Not found | Prompt this is not a blocklet project |
-| Found 1 | Auto-select |
+| Situation      | Handling                               |
+| -------------- | -------------------------------------- |
+| Not found      | Prompt this is not a blocklet project  |
+| Found 1        | Auto-select                            |
 | Found multiple | Use AskUserQuestion for user selection |
 
 **Record variables**:
+
 - `REPO_ROOT`: Repository root directory (dependencies installed here)
 - `BLOCKLET_DIR`: Directory containing blocklet.yml (start here)
 
@@ -369,11 +375,13 @@ corepack enable && corepack prepare pnpm@latest --activate
 Must be installed but **must not auto-start** (Blocklet Server manages it).
 
 **macOS**:
+
 ```bash
 brew install nginx
 ```
 
 **Ubuntu/Debian**:
+
 ```bash
 # Must install nginx-extras, which includes ngx_stream_module and other required modules
 sudo apt install -y nginx-extras
@@ -382,6 +390,7 @@ sudo systemctl disable nginx
 ```
 
 **Verify nginx modules**:
+
 ```bash
 nginx -V 2>&1 | grep -o 'with-stream\|http_v2_module\|http_ssl_module'
 # Should show: with-stream, http_v2_module, http_ssl_module
@@ -394,11 +403,13 @@ nginx -V 2>&1 | grep -o 'with-stream\|http_v2_module\|http_ssl_module'
 If tmux is not available, help user install it for easier terminal process management.
 
 **macOS**:
+
 ```bash
 brew install tmux
 ```
 
 **Ubuntu/Debian**:
+
 ```bash
 sudo apt install -y tmux
 ```
@@ -426,10 +437,10 @@ ulimit -n 65536  # Temporary setting
 
 Blocklet Server has two modes of operation that **cannot run simultaneously**:
 
-| Mode | Start Command | Detection Method | Data Directory |
-|------|---------------|------------------|----------------|
-| Production version | `blocklet server start` | `blocklet server status` | `~/blocklet-server-data/` |
-| Source development | `bun run start` (in blocklet-server repo) | tmux session `blocklet` | `~/blocklet-server-dev-data/` |
+| Mode               | Start Command                             | Detection Method         | Data Directory                |
+| ------------------ | ----------------------------------------- | ------------------------ | ----------------------------- |
+| Production version | `blocklet server start`                   | `blocklet server status` | `~/blocklet-server-data/`     |
+| Source development | `bun run start` (in blocklet-server repo) | tmux session `blocklet`  | `~/blocklet-server-dev-data/` |
 
 #### 4.0 Check Blocklet Server Running Status
 
@@ -453,12 +464,12 @@ fi
 
 #### 4.1 Handle Based on Detection Results
 
-| Production Version | Source Development | Handling |
-|--------------------|-------------------|----------|
-| Running | Not running | ✅ Use directly, skip to Phase 5 |
-| Not running | Running | ⚠️ Ask user: stop source development and start production version, or continue using source development version |
-| Not running | Not running | Need to start production version, continue to 4.2 |
-| Running | Running | ❌ Abnormal state, ask user which to stop |
+| Production Version | Source Development | Handling                                                                                                        |
+| ------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Running            | Not running        | ✅ Use directly, skip to Phase 5                                                                                |
+| Not running        | Running            | ⚠️ Ask user: stop source development and start production version, or continue using source development version |
+| Not running        | Not running        | Need to start production version, continue to 4.2                                                               |
+| Running            | Running            | ❌ Abnormal state, ask user which to stop                                                                       |
 
 **Handling when source development version is running**:
 
@@ -491,11 +502,13 @@ sleep 3
 If user chooses to continue using source development version, ensure bn-dev command is available:
 
 **Check if bn-dev exists**:
+
 ```bash
 which bn-dev || echo "bn-dev not configured"
 ```
 
 **If not configured, create symlink**:
+
 ```bash
 # bn-dev points to dev.js in blocklet-server source
 BLOCKLET_SERVER_REPO="$HOME/arcblock-repos/blocklet-server"
@@ -508,6 +521,7 @@ fi
 ```
 
 **Record variables**:
+
 - `USE_DEV_SERVER`: Whether using source development version (true/false)
 - `DEV_CMD`: Start command (bn-dev or blocklet dev)
 
@@ -538,6 +552,7 @@ ulimit -n 65536 && blocklet server start --update-db
 ```
 
 **Startup failure checks**:
+
 1. `ulimit -n` cannot be `unlimited`
 2. Are ports 8080/8443
 3. Used `--update-db` after modifying ports
@@ -550,6 +565,7 @@ ulimit -n 65536 && blocklet server start --update-db
 **Detection methods**:
 
 1. **Check if first-time setup** (from 4.2):
+
 ```bash
 if [ "$FIRST_TIME_SETUP" = "true" ]; then
     echo "⚠️ First-time Blocklet Server setup detected"
@@ -557,6 +573,7 @@ fi
 ```
 
 2. **Check Server Admin URL response**:
+
 ```bash
 # Get Server Admin URL
 IP_DOMAIN=$(hostname -I | awk '{print $1}' | tr '.' '-').ip.abtnet.io
@@ -590,6 +607,7 @@ C. Cancel setup
 **Wait for user confirmation before proceeding to Phase 5**.
 
 **Why wallet binding is required**:
+
 - Blocklet Server uses DID-based authentication
 - The first bound wallet becomes the Server owner/admin
 - Without an owner, blocklets cannot be properly registered
@@ -621,20 +639,21 @@ fi
 
 **Start command selection** (based on Phase 4 choice):
 
-| Server Type | Start Command | Description |
-|-------------|---------------|-------------|
-| Production version | `blocklet dev` | Connect to Server started by `blocklet server start` |
-| Source development version | `bn-dev` | Connect to source development Server (tmux session: blocklet). **Run directly without arguments** |
+| Server Type                | Start Command  | Description                                                                                       |
+| -------------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| Production version         | `blocklet dev` | Connect to Server started by `blocklet server start`                                              |
+| Source development version | `bn-dev`       | Connect to source development Server (tmux session: blocklet). **Run directly without arguments** |
 
 **Record variables**:
+
 - `TMUX_SESSION`: Session name, format `blocklet-dev-{REPO}`
 - `HAS_TMUX`: Whether tmux environment available
 - `DEV_CMD`: Start command (`bn-dev` or `blocklet dev`)
 
-| tmux Status | Handling |
-|-------------|----------|
-| Available | Start in tmux session (clean up same-named session first) |
-| Not available | Start directly in current terminal |
+| tmux Status   | Handling                                                  |
+| ------------- | --------------------------------------------------------- |
+| Available     | Start in tmux session (clean up same-named session first) |
+| Not available | Start directly in current terminal                        |
 
 ```bash
 # Determine start command based on Phase 4 choice
@@ -673,27 +692,28 @@ tmux capture-pane -t "$TMUX_SESSION" -p | tail -50
 
 **Monitoring points**:
 
-| Check Item | Command | Exception Handling |
-|------------|---------|-------------------|
-| Process alive | `tmux has-session -t "$TMUX_SESSION"` | If process exits, analyze logs for cause |
-| Error output | Check logs for `error`, `failed`, `ENOENT` | Try to fix based on error type |
-| Stuck/frozen | Multiple log checks show no changes | May be missing dependencies or config issues |
-| Port conflict | `EADDRINUSE` | Find process using port and handle |
+| Check Item    | Command                                    | Exception Handling                           |
+| ------------- | ------------------------------------------ | -------------------------------------------- |
+| Process alive | `tmux has-session -t "$TMUX_SESSION"`      | If process exits, analyze logs for cause     |
+| Error output  | Check logs for `error`, `failed`, `ENOENT` | Try to fix based on error type               |
+| Stuck/frozen  | Multiple log checks show no changes        | May be missing dependencies or config issues |
+| Port conflict | `EADDRINUSE`                               | Find process using port and handle           |
 
 **Common startup issues and solutions**:
 
-| Log Keyword | Possible Cause | Solution |
-|-------------|----------------|----------|
-| `ENOENT` | Missing file or dependencies not installed | Re-run `pnpm install` or `make init` |
-| `EADDRINUSE` | Port in use | `lsof -i :PORT` to find process, decide whether to kill |
-| `Cannot find module` | Dependencies not installed or path error | Check node_modules, reinstall dependencies |
-| `Permission denied` | Permission issue | Check file permissions, may need sudo |
-| `command not found` | Tool not installed | Install corresponding tool (e.g., turbo, vite, etc.) |
-| `Blocklet Server is not running` | Server not started | Return to Phase 4 to start Server |
-| Process exits immediately with no output | Config error or environment issue | Check blocklet.yml and .env files |
-| `out of memory` | Insufficient memory | Close other processes, or increase swap |
+| Log Keyword                              | Possible Cause                             | Solution                                                |
+| ---------------------------------------- | ------------------------------------------ | ------------------------------------------------------- |
+| `ENOENT`                                 | Missing file or dependencies not installed | Re-run `pnpm install` or `make init`                    |
+| `EADDRINUSE`                             | Port in use                                | `lsof -i :PORT` to find process, decide whether to kill |
+| `Cannot find module`                     | Dependencies not installed or path error   | Check node_modules, reinstall dependencies              |
+| `Permission denied`                      | Permission issue                           | Check file permissions, may need sudo                   |
+| `command not found`                      | Tool not installed                         | Install corresponding tool (e.g., turbo, vite, etc.)    |
+| `Blocklet Server is not running`         | Server not started                         | Return to Phase 4 to start Server                       |
+| Process exits immediately with no output | Config error or environment issue          | Check blocklet.yml and .env files                       |
+| `out of memory`                          | Insufficient memory                        | Close other processes, or increase swap                 |
 
 **Important principles**:
+
 1. **Do not assume startup succeeded** - each blocklet has different startup time and behavior
 2. **Proactively view logs** - identify issues early and handle them, don't wait for user feedback
 3. **Try automatic fixes** - attempt to resolve common issues first, inform user if unable to resolve
@@ -743,10 +763,10 @@ curl -sI --connect-timeout 5 "$BLOCKLET_URL" 2>/dev/null | head -1
 curl -sI --connect-timeout 5 "https://{IP_DOMAIN}:8443" 2>/dev/null | head -1
 ```
 
-| Test Result | Output |
-|-------------|--------|
-| Both URLs return HTTP status code | ✅ Domain access normal |
-| Either URL inaccessible | ⚠️ Output DNS fix suggestions (see Error Handling) |
+| Test Result                       | Output                                             |
+| --------------------------------- | -------------------------------------------------- |
+| Both URLs return HTTP status code | ✅ Domain access normal                            |
+| Either URL inaccessible           | ⚠️ Output DNS fix suggestions (see Error Handling) |
 
 #### 6.3 Query Recent Commits
 
@@ -762,10 +782,10 @@ git log --oneline -10 --format="%h %s (by %an, %ar)"
 
 **URL Path Notes (Important, do not confuse)**:
 
-| Type | Path | Purpose |
-|------|------|---------|
-| **Server Admin** | `/.well-known/server/admin` | Management panel for entire Blocklet Server |
-| **Blocklet Service** | `/.well-known/service/admin` | Management page for individual blocklet |
+| Type                 | Path                         | Purpose                                     |
+| -------------------- | ---------------------------- | ------------------------------------------- |
+| **Server Admin**     | `/.well-known/server/admin`  | Management panel for entire Blocklet Server |
+| **Blocklet Service** | `/.well-known/service/admin` | Management page for individual blocklet     |
 
 ⚠️ **Note**: Server Admin uses IP domain (e.g., `192-168-1-80.ip.abtnet.io`), path is `/server/admin`, not `/service/admin`.
 
@@ -880,26 +900,28 @@ Use other skills to complete work:
 
 ## Error Handling
 
-| Error | Handling |
-|-------|----------|
-| Cannot identify repository | Display repository list for user selection |
-| Insufficient GitHub permissions | Prompt to contact administrator or fork |
-| Not a blocklet project | Prompt no blocklet.yml found |
-| Blocklet Server startup failed | Check ulimit, ports, --update-db |
-| nginx `worker_connections NaN` | Set `ulimit -n 65536` |
-| DID domain inaccessible | Configure DNS to 8.8.8.8 (see below) |
+| Error                           | Handling                                   |
+| ------------------------------- | ------------------------------------------ |
+| Cannot identify repository      | Display repository list for user selection |
+| Insufficient GitHub permissions | Prompt to contact administrator or fork    |
+| Not a blocklet project          | Prompt no blocklet.yml found               |
+| Blocklet Server startup failed  | Check ulimit, ports, --update-db           |
+| nginx `worker_connections NaN`  | Set `ulimit -n 65536`                      |
+| DID domain inaccessible         | Configure DNS to 8.8.8.8 (see below)       |
 
 ### DID Domain Inaccessible
 
 **Symptoms**: Browser cannot access `*.did.abtnet.io` or `*.ip.abtnet.io`
 
 **Diagnosis**:
+
 ```bash
 nslookup 192-168-1-80.ip.abtnet.io        # Local DNS
 nslookup 192-168-1-80.ip.abtnet.io 8.8.8.8  # Google DNS
 ```
 
 **Solution**: Change DNS
+
 ```bash
 # macOS
 sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
