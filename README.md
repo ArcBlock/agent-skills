@@ -43,7 +43,7 @@ claude
 | Plugin | Description |
 |--------|-------------|
 | **devflow** | Developer workflow automation: code review, pull requests, daily engineering tasks |
-| **blocklet** | Convert web projects to ArcBlock Blocklets and manage releases |
+| **blocklet** | Complete Blocklet development workflow: environment setup, branch management, PR submission, and release |
 | **thinking-framework** | Technical thinking framework and proposal review methodology (AFS/AINE) |
 | **plugin-development** | Scaffold, validate, and distribute Claude Code plugins |
 

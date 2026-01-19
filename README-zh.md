@@ -43,7 +43,7 @@ claude
 | 插件 | 描述 |
 |-----|------|
 | **devflow** | 开发者工作流自动化：代码审查、Pull Request、日常工程任务 |
-| **blocklet** | 将 Web 项目转换为 ArcBlock Blocklet 并管理发布 |
+| **blocklet** | Blocklet 完整开发工作流：环境配置、分支管理、PR 提交和版本发布 |
 | **thinking-framework** | 技术思考框架和提案评审方法论（AFS/AINE）|
 | **plugin-development** | 创建、验证和分发 Claude Code 插件 |
 

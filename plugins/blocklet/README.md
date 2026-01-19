@@ -1,6 +1,6 @@
 # Blocklet
 
-Agent skills for working with ArcBlock blocklets - convert web projects to blocklets and manage releases.
+Agent skills for complete Blocklet development workflow: environment setup, branch management, development, PR submission, and release management.
 
 ## Installation
 
@@ -9,6 +9,67 @@ Agent skills for working with ArcBlock blocklets - convert web projects to block
 ```
 
 ## Skills
+
+### blocklet-dev-setup
+
+Configure development environment for blocklet-type repositories.
+
+**Trigger phrases:**
+- `/blocklet-dev-setup`
+- "Help me fix the xxx blocklet issue"
+- "I want to develop xxx blocklet"
+- "I want to modify code related to this URL"
+
+**What it does:**
+1. Parses GitHub Issue URLs, Blocklet URLs, or problem descriptions
+2. Locates the corresponding repository
+3. Checks permissions and clones code
+4. Installs dependencies and starts development server
+
+### blocklet-server-dev-setup
+
+Clone blocklet-server repository and setup development environment.
+
+**Trigger phrases:**
+- `/blocklet-server-dev-setup`
+- "Help me configure blocklet-server environment"
+- "Setup blocklet-server"
+
+**What it does:**
+1. Clones blocklet-server repository
+2. Guides execution of the in-project setup skill
+
+### blocklet-branch
+
+Git branch management tool for blocklet projects.
+
+**What it does:**
+1. Detects main iteration branch and branch naming conventions
+2. Handles branch creation and switching
+3. Referenced by blocklet-dev-setup, blocklet-pr, and other skills
+
+### blocklet-url-analyzer
+
+Analyze Blocklet Server related URLs.
+
+**What it does:**
+1. Identifies URL type (daemon/service/blocklet)
+2. Locates the corresponding development repository
+3. Supports analysis of IP DNS domains and regular domains
+
+### blocklet-pr
+
+Create standardized Pull Requests for blocklet projects.
+
+**Trigger phrases:**
+- `/blocklet-pr`
+- "Help me submit a PR"
+- "Create pull request"
+
+**What it does:**
+1. Performs lint checks and unit tests
+2. Updates version
+3. Creates PRs following PR templates
 
 ### blocklet-converter
 
@@ -47,4 +108,5 @@ Creates a new release for an existing blocklet project.
 ## Requirements
 
 - [Blocklet CLI](https://www.blocklet.io/docs/cli) installed globally
+- [GitHub CLI](https://cli.github.com/) for PR operations
 - pnpm or bun for dependency management
