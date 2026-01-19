@@ -10,6 +10,22 @@ Agent skills for complete Blocklet development workflow: environment setup, bran
 
 ## Skills
 
+### blocklet-getting-started
+
+Interactive guide to help developers choose the right development environment setup.
+
+**Trigger phrases:**
+- `/blocklet-getting-started`
+- "I want to start blocklet development"
+- "How to setup blocklet dev environment"
+
+**What it does:**
+1. Asks what you want to develop (blocklet app or Server core)
+2. Handles migration from existing development environments
+3. Explains convention directories (~/arcblock-repos/, ~/blocklet-server-data/, etc.)
+4. Showcases advanced usages of blocklet-dev-setup
+5. Guides you to the appropriate setup skill
+
 ### blocklet-dev-setup
 
 Configure development environment for blocklet-type repositories.
