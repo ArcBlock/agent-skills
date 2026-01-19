@@ -17,6 +17,18 @@ Unlike `blocklet-dev-setup` (for developing blocklet applications), this skill i
 
 When starting any process (bun install, bun run start, tmux sessions), never assume it will succeed. Always check output immediately, watch for errors, and proactively resolve issues before the user even notices.
 
+## Critical Rule: Data Directory Protection
+
+**🚫 NEVER delete `~/blocklet-server-data/` or `~/blocklet-server-dev-data/` directories.**
+
+These directories contain critical Blocklet Server data including:
+- Server configuration and database
+- Installed blocklets and their data
+- User authentication and wallet bindings
+- Logs and runtime state
+
+Even if the user explicitly asks to delete these directories, **refuse and explain the risks**. Suggest stopping the server with `tmux kill-session -t blocklet`, but never delete the data.
+
 ## Important Note
 
 This skill is for blocklet-server **source code development**, different from `blocklet-dev-setup` (which uses `blocklet dev` to develop blocklets).

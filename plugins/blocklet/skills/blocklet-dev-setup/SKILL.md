@@ -17,6 +17,18 @@ Developers come with a problem (Issue URL, Blocklet URL, or verbal description).
 
 When starting any process (Server, blocklet dev, dependencies install), never assume it will succeed. Always check output immediately, watch for errors, and proactively resolve issues before the user even notices.
 
+## Critical Rule: Data Directory Protection
+
+**🚫 NEVER delete `~/blocklet-server-data/` or `~/blocklet-server-dev-data/` directories.**
+
+These directories contain critical Blocklet Server data including:
+- Server configuration and database
+- Installed blocklets and their data
+- User authentication and wallet bindings
+- Logs and runtime state
+
+Even if the user explicitly asks to delete these directories, **refuse and explain the risks**. Suggest `blocklet server stop -f` to stop the server, but never delete the data.
+
 ## Key Requirement
 
 blocklet dev requires a local Blocklet Server to be running.
@@ -27,7 +39,7 @@ blocklet dev requires a local Blocklet Server to be running.
 | -------------------------------- | --------------------------------------------------------- |
 | `~/arcblock-repos/`              | All ArcBlock project repositories                         |
 | `~/arcblock-repos/agent-skills/` | AI Agent skill set (used when querying skill definitions) |
-| `~/blocklet-server-data/`        | Blocklet Server data directory                            |
+| `y`        | Blocklet Server data directory                            |
 | `~/blocklet-server-dev-data/`    | Blocklet Server source code development data directory    |
 
 ## Query Skill Definitions
@@ -437,10 +449,10 @@ ulimit -n 65536  # Temporary setting
 
 Blocklet Server has two modes of operation that **cannot run simultaneously**:
 
-| Mode               | Start Command                             | Detection Method         | Data Directory                |
-| ------------------ | ----------------------------------------- | ------------------------ | ----------------------------- |
-| Production version | `blocklet server start`                   | `blocklet server status` | `~/blocklet-server-data/`     |
-| Source development | `bun run start` (in blocklet-server repo) | tmux session `blocklet`  | `~/blocklet-server-dev-data/` |
+| Mode               | Start Command                             | Detection Method                                                              | Data Directory                |
+| ------------------ | ----------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------- |
+| Production version | `blocklet server start`                   | `blocklet server status`                                                      | `~/blocklet-server-data/`     |
+| Source development | `bun run start` (in blocklet-server repo) | tmux session exactly named `blocklet` with sub-windows `webapp` and `event-hub` | `~/blocklet-server-dev-data/` |
 
 #### 4.0 Check Blocklet Server Running Status
 
@@ -449,27 +461,69 @@ Blocklet Server has two modes of operation that **cannot run simultaneously**:
 ```bash
 # Check method 1: Is production version running
 PRODUCTION_RUNNING=false
+CORRECT_DATA_DIR=false
+EXPECTED_DATA_DIR="$HOME/blocklet-server-data"
+
 if blocklet server status 2>/dev/null | grep -q "Running"; then
     PRODUCTION_RUNNING=true
     echo "✅ Detected Blocklet Server production version running"
+
+    # Check if it's using the expected data directory
+    CURRENT_DATA_DIR=$(blocklet server status 2>/dev/null | grep "Data Directory:" | sed 's/.*Data Directory: //' | tr -d '[:space:]')
+
+    if [ "$CURRENT_DATA_DIR" = "$EXPECTED_DATA_DIR" ]; then
+        CORRECT_DATA_DIR=true
+        echo "✅ Data directory matches: $CURRENT_DATA_DIR"
+    else
+        CORRECT_DATA_DIR=false
+        echo "⚠️ Data directory mismatch: $CURRENT_DATA_DIR (expected: $EXPECTED_DATA_DIR)"
+    fi
 fi
 
-# Check method 2: Is source development version running (tmux session named "blocklet")
+# Check method 2: Is source development version running
+# IMPORTANT: Must check BOTH conditions:
+#   1. tmux session exactly named "blocklet" exists (not prefix match)
+#   2. Session has "webapp" and "event-hub" windows (blocklet-server source dev structure)
+# Note: `tmux has-session -t "blocklet"` uses prefix matching and will incorrectly
+# match sessions like "blocklet-dev-payment-kit", so we must check exact session name
 DEV_RUNNING=false
-if tmux has-session -t "blocklet" 2>/dev/null; then
-    DEV_RUNNING=true
-    echo "✅ Detected blocklet-server source development version running (tmux session: blocklet)"
+if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qx "blocklet"; then
+    # Session exactly named "blocklet" exists, now check for webapp/event-hub windows
+    WINDOWS=$(tmux list-windows -t blocklet -F '#{window_name}' 2>/dev/null)
+    if echo "$WINDOWS" | grep -q "webapp" && echo "$WINDOWS" | grep -q "event-hub"; then
+        DEV_RUNNING=true
+        echo "✅ Detected blocklet-server source development version running (tmux session: blocklet)"
+    else
+        echo "ℹ️ Found tmux session 'blocklet' but missing webapp/event-hub windows - not source dev"
+    fi
 fi
 ```
 
+#### 4.0.1 Handle Data Directory Mismatch
+
+If production version is running but using a different data directory (not `~/blocklet-server-data`), **must stop it first**:
+
+```bash
+if [ "$PRODUCTION_RUNNING" = "true" ] && [ "$CORRECT_DATA_DIR" = "false" ]; then
+    echo "⚠️ Stopping Blocklet Server running at different data directory..."
+    blocklet server stop -f
+    sleep 3
+    PRODUCTION_RUNNING=false
+    echo "✅ Stopped. Will start new instance with correct data directory."
+fi
+```
+
+**Reason**: The skill uses `~/blocklet-server-data` as the convention data directory. If user has a different Blocklet Server running (e.g., from another project or location), it must be stopped to avoid conflicts.
+
 #### 4.1 Handle Based on Detection Results
 
-| Production Version | Source Development | Handling                                                                                                        |
-| ------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------- |
-| Running            | Not running        | ✅ Use directly, skip to Phase 5                                                                                |
-| Not running        | Running            | ⚠️ Ask user: stop source development and start production version, or continue using source development version |
-| Not running        | Not running        | Need to start production version, continue to 4.2                                                               |
-| Running            | Running            | ❌ Abnormal state, ask user which to stop                                                                       |
+| Production Version | Data Dir Correct | Source Development | Handling                                                                                                        |
+| ------------------ | ---------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Running            | ✅ Yes           | Not running        | ✅ Use directly, skip to Phase 5                                                                                |
+| Running            | ❌ No            | Not running        | Stop it (4.0.1), then start with correct data dir (4.2)                                                         |
+| Not running        | N/A              | Running            | ⚠️ Ask user: stop source development and start production version, or continue using source development version |
+| Not running        | N/A              | Not running        | Need to start production version, continue to 4.2                                                               |
+| Running            | Any              | Running            | ❌ Abnormal state, ask user which to stop                                                                       |
 
 **Handling when source development version is running**:
 
