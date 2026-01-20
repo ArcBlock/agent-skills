@@ -198,12 +198,39 @@ Run test script from `package.json` (e.g., `test`, `test:unit`, `test:ci`).
 
 ---
 
-### Phase 3: Version Update (Optional)
+### Phase 3: Version Update
 
-#### 3.1 Ask If Version Update Needed
+**Important**: If the project has a `CHANGELOG.md` file, version bump is **required** for every PR, not optional.
+
+#### 3.1 Check If Version Update Required
+
+First check if `CHANGELOG.md` exists in project root:
+
+```bash
+test -f CHANGELOG.md && echo "CHANGELOG exists - version bump required"
+```
+
+| Situation | Handling |
+|-----------|----------|
+| CHANGELOG.md exists | Version bump is **required**, skip option D |
+| No CHANGELOG.md | Version bump is optional |
+
+#### 3.2 Ask Version Update Type
 
 Use `AskUserQuestion` to ask:
 
+**If CHANGELOG.md exists**:
+```
+Project has CHANGELOG.md - version bump is required.
+
+Please select version update type:
+Options:
+A. Patch version (x.x.X) (Recommended for bug fixes)
+B. Minor version (x.X.0)
+C. Major version (X.0.0)
+```
+
+**If no CHANGELOG.md**:
 ```
 Do you need to update version and create release?
 
@@ -214,9 +241,9 @@ C. Yes, update major version (X.0.0)
 D. No, skip version update
 ```
 
-#### 3.2 Execute Version Update
+#### 3.3 Execute Version Update
 
-If user chooses to update version, **call blocklet-updater skill**:
+If user chooses to update version (or if required due to CHANGELOG.md), **call blocklet-updater skill**:
 
 **blocklet-updater skill location**: `blocklet-updater/SKILL.md`
 
@@ -404,7 +431,7 @@ If linking Issue, add to PR description:
 
 **PR Title**: Generate based on commit message or branch name, keep format concise and clear.
 
-**Important**: PR title must be **all lowercase**. Example: `fix: add lerna to devdependencies`
+**Important**: PR title must be **all lowercase**. When converting camelCase words, use hyphens between words (e.g., `devDependencies` → `dev-dependencies`). Example: `fix: add lerna to dev-dependencies`
 
 **PR Description** (according to template or default format):
 
