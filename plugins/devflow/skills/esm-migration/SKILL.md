@@ -544,5 +544,5 @@ bun run build
 
 - [ES Modules 规范](https://nodejs.org/api/esm.html)
 - [package.json exports 字段](https://nodejs.org/api/packages.html#exports)
-- [tsdown 文档](https://github.com/egoist/tsdown)
+- [tsdown 文档](https://tsdown.dev)
 - [树摇优化原理](https://developer.mozilla.org/en-US/docs/Glossary/Tree_shaking)
