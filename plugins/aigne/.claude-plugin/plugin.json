@@ -1,0 +1,11 @@
+{
+  "name": "aigne",
+  "version": "0.1.0",
+  "description": "Development tools and guides for building AI agents using the AIGNE Framework CLI",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["aigne", "ai-agent", "arcblock", "framework", "cli"]
+}
