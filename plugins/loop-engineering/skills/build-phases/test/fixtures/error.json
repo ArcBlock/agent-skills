@@ -1,0 +1,19 @@
+{
+  "planning_dir": "planning/test",
+  "started_at": "2026-04-15T11:00:00Z",
+  "total_phases": 3,
+  "current_phase": 1,
+  "completed_phases": [0],
+  "test_counts": {"phase_0": 100},
+  "commits": {"phase_0": ["abc"]},
+  "executor_status": "error",
+  "executor_started_at": "2026-04-15T11:30:00Z",
+  "executor_current_task": "phase 1 — verify",
+  "executor_last_heartbeat": "2026-04-15T11:45:00Z",
+  "executor_respawn_count": 1,
+  "executor_error": {
+    "reason": "spec_ambiguity",
+    "detail": "tasks.md phase 1 has two valid interpretations of error handling",
+    "attempt_count": 1
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "_comment": "Issue #328: Human replied at 11:23, sank below the UPDATED_AT scan window. Agent missed it because label+recency scan didn't cover it. Canonical reference: issue-sweep SKILL.md Step 1 'Why a windowed scan is NOT enough'.",
+  "issue": {
+    "number": 328,
+    "labels": ["doc-audit"],
+    "body": "Audit finding: this doc needs update.",
+    "comments": [
+      {
+        "body": "> 🤖 AI Agent — audit result: doc is drifted. Recommend update.",
+        "created_at": "2026-06-01T09:00:00Z"
+      },
+      {
+        "body": "Yes please update the doc, the section on X is outdated.",
+        "created_at": "2026-06-01T11:23:00Z"
+      }
+    ]
+  },
+  "expected": {
+    "step2_keep": true,
+    "reason": "Last comment is human (non-AI). Agent must not miss early replies just because the issue sank in the UPDATED_AT window — fix is in Step 1 scan (label coverage), but Step 2 still returns true here."
+  },
+  "forbidden_actions": []
+}

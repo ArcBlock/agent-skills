@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #367: Feature/design request with ZERO labels and ZERO comments — the whole directive is in the body. Pure label scan would never see it. Fix: unlabeled catch-all in Step 1 + body-only issue treatment in Step 2. Reference: issue-sweep SKILL.md Step 1 'unlabeled catch-all' and Step 2 'actionable signal can be the issue BODY'.",
+  "issue": {
+    "number": 367,
+    "labels": [],
+    "body": "Analyze this feature and discuss any unclear points, then write an executable TDD plan; implement after I confirm.\n\nWe need a new `/stats` endpoint that returns the current provider mount counts.",
+    "comments": []
+  },
+  "expected": {
+    "step2_keep": true,
+    "reason": "Zero comments and body has no '> 🤖 AI Agent' response yet. Body-only issue with no labels should be captured by unlabeled catch-all and treated as unprocessed (the feature directive lives in the body itself)."
+  },
+  "forbidden_actions": []
+}

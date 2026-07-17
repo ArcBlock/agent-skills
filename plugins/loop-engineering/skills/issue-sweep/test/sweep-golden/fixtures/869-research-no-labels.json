@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #869: Research request '[research] perkeep and did space' created without labels. The unlabeled catch-all in Step 1 should pick it up; should be labeled 'research' and processed. Reference: issue-sweep SKILL.md Step 1 'unlabeled catch-all' section.",
+  "issue": {
+    "number": 869,
+    "labels": [],
+    "body": "[research] 研究 perkeep 和 did space 的结合点\n\n想了解 perkeep 的数据模型是否能与我们的 DID Space 协议对接，重点看：\n1. 内容寻址机制对比\n2. 权限模型兼容性\n3. 迁移路径可行性",
+    "comments": []
+  },
+  "expected": {
+    "step2_keep": true,
+    "reason": "Zero comments, no labels, body-only research request. Step 1 catch-all should catch this (title has [research] prefix), add 'research' label, and Step 2 should keep it because there is no AI response yet."
+  },
+  "forbidden_actions": []
+}

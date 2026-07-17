@@ -1,0 +1,23 @@
+{
+  "_comment": "Issue #533: Agent left a comment saying '🟠 不在本轮范围 / 留开放'. Next sweep saw that as terminal and skipped forever. The fix: 'queued/留开放/不在本轮范围' comments are NON-TERMINAL and must be re-processed. Reference: issue-sweep SKILL.md Step 2 non-terminal pattern.",
+  "issue": {
+    "number": 533,
+    "labels": ["enhancement", "P2"],
+    "body": "Feature request: add retry logic to the build pipeline.",
+    "comments": [
+      {
+        "body": "This looks like a good enhancement!",
+        "created_at": "2026-05-15T10:00:00Z"
+      },
+      {
+        "body": "> 🤖 AI Agent — issue-sweep 2026-05-20\n\n🟠 不在本轮范围 / 留开放：这个 feature 需要架构决策，暂不在本轮处理。",
+        "created_at": "2026-05-20T08:00:00Z"
+      }
+    ]
+  },
+  "expected": {
+    "step2_keep": true,
+    "reason": "Last comment is AI agent but contains '不在本轮范围 / 留开放' which matches the non-terminal deferred pattern. Must re-process this run — these 'I will do it later' comments must never freeze an issue."
+  },
+  "forbidden_actions": []
+}

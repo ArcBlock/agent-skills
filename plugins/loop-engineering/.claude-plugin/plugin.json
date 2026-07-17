@@ -1,0 +1,11 @@
+{
+  "name": "loop-engineering",
+  "version": "0.0.1",
+  "description": "Repo-agnostic engineering loop engine: config-driven verification gate, sticky PR-comment delivery, and the review/sweep skill contracts. Repo specifics live in each repo's .claude/verify/config.ts, not here.",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["verification", "workflow", "engineering", "gate", "loop"]
+}

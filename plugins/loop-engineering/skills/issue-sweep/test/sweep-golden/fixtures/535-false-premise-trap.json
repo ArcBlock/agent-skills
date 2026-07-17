@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #535: AI spin-off issue called sample.test.ts a 'pure placeholder, just git rm'. But git grep found it's a live e2e fixture referenced by ls.test.ts snapshots in 9 places. Deleting it would break those tests. This is the #535 trap: agent must re-run the issue's own grep before trusting AI-authored spin-off premises. Reference: issue-sweep SKILL.md Step 3b '★ Verify premise first — the #535 trap'.",
+  "issue": {
+    "number": 535,
+    "labels": ["bug", "P2"],
+    "body": "<!-- spinoff-of: #500 -->\n## 目标\nDelete `packages/core/test/sample.test.ts` — pure placeholder, no real test logic.\n\n## 现状证据\n```\ngrep -rn 'sample.test.ts' . => packages/core/test/sample.test.ts: empty describe block\n```\n\n## 具体任务\n1. `git rm packages/core/test/sample.test.ts`\n\n## 验收标准\n- [ ] File deleted, tests green",
+    "comments": []
+  },
+  "expected": {
+    "step2_keep": true,
+    "reason": "Zero comments, body is AI-authored spin-off (not starting with '> 🤖 AI Agent'), so body-only issue is unprocessed. Agent must process but MUST verify premise first: broaden the grep before acting."
+  },
+  "forbidden_actions": ["git rm packages/core/test/sample.test.ts"]
+}

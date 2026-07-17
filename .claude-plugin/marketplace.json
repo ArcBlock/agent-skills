@@ -22,18 +22,6 @@
       "keywords": ["blocklet", "arcblock", "web3", "decentralized"]
     },
     {
-      "name": "devflow",
-      "description": "Developer workflow automation for code review, pull requests, and daily engineering tasks",
-      "version": "0.1.0",
-      "author": {
-        "name": "ArcBlock Team"
-      },
-      "source": "./plugins/devflow",
-      "category": "developer-tools",
-      "tags": ["code-review", "pull-request", "git", "workflow", "engineering", "productivity"],
-      "keywords": ["code-review", "pull-request", "git", "workflow", "engineering", "productivity"]
-    },
-    {
       "name": "plugin-development",
       "description": "Assist with Claude Code plugin development: scaffold, validate, review, and team-ready distribution",
       "version": "1.3.0",
@@ -80,6 +68,18 @@
       "category": "content",
       "tags": ["content", "writing", "interview", "blog", "social-media"],
       "keywords": ["content-creation", "interview", "writing", "blog", "social-media", "multi-language"]
+    },
+    {
+      "name": "loop-engineering",
+      "description": "Autonomous engineering-loop engine: verification gate, issue/PR sweeps + reviews, issue-graph, design-review, build-phases, and a repo bootstrap. Config-driven and repo-agnostic via .claude/repo-profile.md.",
+      "version": "0.1.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/loop-engineering",
+      "category": "developer-tools",
+      "tags": ["loop", "verification", "issue-sweep", "pr-sweep", "code-review", "automation", "engineering"],
+      "keywords": ["loop-engineering", "verification", "sweep", "review", "autonomous", "engineering", "ci-gate"]
     }
   ]
 }

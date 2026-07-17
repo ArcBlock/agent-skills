@@ -1,0 +1,13 @@
+▸ IMPLEMENT — phase 1
+Reading tasks.md...
+Writing test fixtures...
+Tests failing as expected (8 cases).
+▸ VERIFY L1 — static checks
+pnpm build: ok
+pnpm check-types: ok
+pnpm test: 1782 pass
+▸ VERIFY L2 — dynamic
+starting service...
+afs_read returned 42 bytes
+▸ VERIFY L3 — adversarial
+path traversal blocked

@@ -1,0 +1,12 @@
+{
+  "planning_dir": "planning/test",
+  "started_at": "2026-04-15T11:59:00Z",
+  "total_phases": 3,
+  "current_phase": 0,
+  "completed_phases": [],
+  "test_counts": {},
+  "commits": {},
+  "executor_status": null,
+  "executor_respawn_count": 0,
+  "executor_error": null
+}

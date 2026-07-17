@@ -42,7 +42,7 @@ claude
 
 | Plugin | Description |
 |--------|-------------|
-| **devflow** | Developer workflow automation: code review, pull requests, daily engineering tasks |
+| **loop-engineering** | Autonomous engineering loop: verification gate, issue/PR sweeps + reviews, design-review, build-phases, and repo bootstrap (config-driven, repo-agnostic) |
 | **blocklet** | Complete Blocklet development workflow: environment setup, branch management, PR submission, and release |
 | **thinking-framework** | Technical thinking framework and proposal review methodology (AFS/AINE) |
 | **plugin-development** | Scaffold, validate, and distribute Claude Code plugins |
