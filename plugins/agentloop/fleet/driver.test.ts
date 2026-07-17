@@ -6,8 +6,10 @@ import {
   cadenceDue,
   checkoutDir,
   type DeploymentConfig,
+  defaultLogDir,
   expandHome,
   loadEnvFile,
+  logPaths,
   permissionFlags,
   planRuns,
   type RepoEntry,
@@ -15,6 +17,7 @@ import {
   resolveCovered,
   runEnv,
   stateKey,
+  summaryLine,
 } from "./driver.ts";
 
 const CATALOG: RepoEntry[] = [
@@ -306,6 +309,44 @@ describe("cadenceDue (make cadenceMinutes real: one frequent cron, per-repo freq
     expect(cadenceDue(run({ skillLocal: "pr-sweep" }), state, T0).due).toBe(true);
     // different repo, same skill → independent, still due
     expect(cadenceDue(run({ slug: "ArcBlock/did" }), state, T0).due).toBe(true);
+  });
+});
+
+describe("logging (observability — a per-(repo,skill) file, not one blob per cron line)", () => {
+  it("derives an isolated log file per repo AND skill, plus a shared jsonl summary", () => {
+    const a = logPaths("/co/logs", "ArcBlock/arc", "issue-sweep");
+    const b = logPaths("/co/logs", "ArcBlock/did", "issue-sweep");
+    const c = logPaths("/co/logs", "ArcBlock/arc", "pr-sweep");
+    expect(a.runLog).toBe("/co/logs/ArcBlock__arc__issue-sweep.log");
+    // different repo, same skill → different file (no cross-repo mixing)
+    expect(b.runLog).not.toBe(a.runLog);
+    // same repo, different skill → different file
+    expect(c.runLog).not.toBe(a.runLog);
+    // one shared structured summary
+    expect(a.summary).toBe("/co/logs/fleet.jsonl");
+    expect(b.summary).toBe(a.summary);
+  });
+
+  it("defaults the log dir beside the checkouts, and expands ~", () => {
+    expect(defaultLogDir("/co")).toBe("/co/logs");
+    expect(defaultLogDir("~/.fleet")).toBe(`${homedir()}/.fleet/logs`);
+  });
+
+  it("summaryLine is one parseable JSON object per run (tail | jq)", () => {
+    const line = summaryLine({
+      ts: "2026-07-18T00:00:00.000Z",
+      runner: "wangshijun",
+      slug: "ArcBlock/arc",
+      skill: "issue-sweep",
+      outcome: "ok",
+      exitCode: 0,
+      ms: 1234,
+      detail: "checkout reset; claude exit 0",
+    });
+    const parsed = JSON.parse(line);
+    expect(parsed.outcome).toBe("ok");
+    expect(parsed.slug).toBe("ArcBlock/arc");
+    expect(parsed.ms).toBe(1234);
   });
 });
 

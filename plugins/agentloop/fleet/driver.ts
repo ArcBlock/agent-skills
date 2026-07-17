@@ -15,7 +15,16 @@
  *     --only   : one repo;  --skill : one skill (so cron can give each routine its own cadence)
  *     --run    : ensure a fresh checkout, install deps (setupCommand), then run headless
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { type CheckoutPolicy, ensureCheckout, type Sh } from "./checkout.ts";
 
@@ -112,6 +121,8 @@ export interface DeploymentConfig {
   skillEnv?: Record<string, Record<string, string>>;
   /** Model for the headless run, e.g. `claude-opus-4-8`. Omit to use the CLI default. */
   model?: string;
+  /** Where run logs go (per-(repo,skill) .log + fleet.jsonl). Default <checkoutBase>/logs. */
+  logDir?: string;
   /**
    * Give each (repo × skill) its own checkout — `<base>/<owner>__<name>__<skill>` — instead
    * of one shared tree per repo. Prefer this whenever a repo runs more than one skill on a
@@ -279,6 +290,40 @@ export function cadenceDue(
 const statePath = (checkoutBase: string): string =>
   `${expandHome(checkoutBase).replace(/\/+$/, "")}/.fleet-state.json`;
 
+// ── observability ─────────────────────────────────────────────────────────────
+// Two layers, because a single `--skill issue-sweep` covers many repos and the old
+// "one redirect per cron line" mixes them into one undifferentiated file:
+//   - a per-(repo,skill) .log  → the full run output, isolated, greppable, appended;
+//   - fleet.jsonl              → one structured line per run, so `tail`/`jq` gives
+//                                health across every repo and round at a glance.
+export interface LogPaths {
+  runLog: string;
+  summary: string;
+}
+export function logPaths(logDir: string, slug: string, skill: string): LogPaths {
+  const base = expandHome(logDir).replace(/\/+$/, "");
+  return {
+    runLog: `${base}/${slug.replace("/", "__")}__${skill}.log`,
+    summary: `${base}/fleet.jsonl`,
+  };
+}
+
+/** Default log dir sits beside the checkouts, mirroring ~/.arc-routines/logs. */
+export const defaultLogDir = (checkoutBase: string): string =>
+  `${expandHome(checkoutBase).replace(/\/+$/, "")}/logs`;
+
+export interface RunRecord {
+  ts: string; // ISO
+  runner: string;
+  slug: string;
+  skill: string;
+  outcome: "ok" | "failed" | "checkout-failed" | "setup-failed";
+  exitCode: number | null;
+  ms: number;
+  detail: string;
+}
+export const summaryLine = (r: RunRecord): string => JSON.stringify(r);
+
 function readState(path: string): RunState {
   try {
     if (!existsSync(path)) return {};
@@ -354,7 +399,26 @@ export async function executeRun(
   run: PlannedRun,
   cfg: DeploymentConfig,
   sh: Sh = realSh,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; detail: string; logPath: string; exitCode: number | null; ms: number }> {
+  const started = Date.now();
+  const { runLog } = logPaths(
+    cfg.logDir ?? defaultLogDir(cfg.checkoutBase),
+    run.slug,
+    run.skillLocal,
+  );
+  mkdirSync(runLog.slice(0, runLog.lastIndexOf("/")), { recursive: true });
+  const fd = openSync(runLog, "a");
+  const write = (s: string) => writeSync(fd, s);
+  write(
+    `\n==== ${new Date(started).toISOString()} · ${run.slug} · ${run.skill} · runner=${run.runner} ====\n`,
+  );
+  const finish = (r: { ok: boolean; detail: string; exitCode: number | null }) => {
+    const ms = Date.now() - started;
+    write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail} · ${ms}ms ----\n`);
+    closeSync(fd);
+    return { ...r, logPath: runLog, ms };
+  };
+
   const co = ensureCheckout({
     path: run.checkoutPath,
     slug: run.slug,
@@ -364,13 +428,16 @@ export async function executeRun(
     exists: existsSync,
     sh,
   });
-  if (!co.ok) return { ok: false, detail: `checkout ${co.action}: ${co.detail}` };
+  if (!co.ok)
+    return finish({ ok: false, detail: `checkout ${co.action}: ${co.detail}`, exitCode: null });
+  write(`# checkout ${co.action}\n`);
   // Dependencies BEFORE the skill: a fresh tree has none, and a sweep that dies on a missing
   // module reads as "the gate is broken" rather than "nobody installed anything".
   if (run.setupCommand) {
     const st = sh(`cd ${run.checkoutPath} && ${run.setupCommand}`);
+    write(`# setup: ${run.setupCommand}\n${st.out}`);
     if (st.code !== 0) {
-      return { ok: false, detail: `setup failed (${run.setupCommand}): ${tailOf(st.out)}` };
+      return finish({ ok: false, detail: `setup failed: ${tailOf(st.out)}`, exitCode: st.code });
     }
   }
   const prompt = await renderPrompt(run.promptPath, run.runner);
@@ -386,7 +453,10 @@ export async function executeRun(
   //                              to accept is the deployment's call, not the driver's.
   //  ARC_UNATTENDED=1            arms the repo hook that hard-denies AskUserQuestion /
   //                              Workflow / EnterPlanMode (which would hang the run).
-  const proc = Bun.spawnSync(
+  // Bun.spawn (streaming), not spawnSync, so output is TEE'd live to stdout AND captured to
+  // the per-run log. A single --skill invocation covers many repos; without a per-(repo,skill)
+  // file their output is one undifferentiated blob and you cannot tell which repo did what.
+  const proc = Bun.spawn(
     [
       "claude",
       "-p",
@@ -402,11 +472,24 @@ export async function executeRun(
       cwd: run.checkoutPath,
       env: runEnv(run, cfg, process.env, sh),
       stdin: "ignore", // cron has no stdin; a read would block the round forever
-      stdout: "inherit",
-      stderr: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
     },
   );
-  return { ok: proc.exitCode === 0, detail: `checkout ${co.action}; claude exit ${proc.exitCode}` };
+  const tee = async (stream: ReadableStream<Uint8Array> | undefined) => {
+    if (!stream) return;
+    for await (const chunk of stream) {
+      process.stdout.write(chunk); // live (cron's own redirect still captures this)
+      writeSync(fd, chunk); // the isolated per-run log
+    }
+  };
+  await Promise.all([tee(proc.stdout), tee(proc.stderr)]);
+  const exitCode = await proc.exited;
+  return finish({
+    ok: exitCode === 0,
+    detail: `checkout ${co.action}; claude exit ${exitCode}`,
+    exitCode,
+  });
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -482,20 +565,49 @@ if (import.meta.main) {
     }
   }
 
+  const logDir = expandHome(cfg.logDir ?? defaultLogDir(cfg.checkoutBase));
+  const { summary } = logPaths(logDir, "x/y", "z");
+  console.log(`# logs → ${logDir}/  (per-(repo,skill) .log + fleet.jsonl)`);
+
+  const outcomeOf = (detail: string, ok: boolean): RunRecord["outcome"] =>
+    ok
+      ? "ok"
+      : detail.startsWith("checkout")
+        ? "checkout-failed"
+        : detail.startsWith("setup")
+          ? "setup-failed"
+          : "failed";
+
   const stagger = (cfg.staggerSeconds ?? 30) * 1000;
   let failed = 0;
   for (let i = 0; i < dueRuns.length; i++) {
     const p = dueRuns[i];
     console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${dueRuns.length})`);
     const res = await executeRun(p, cfg);
-    console.log(`  ${res.ok ? "✓" : "✗"} ${res.detail}`);
+    console.log(
+      `  ${res.ok ? "✓" : "✗"} ${res.detail}  (${Math.round(res.ms / 1000)}s → ${res.logPath})`,
+    );
+    // Structured summary line, always — this is the layer you tail/jq for fleet health.
+    appendFileSync(
+      summary,
+      `${summaryLine({
+        ts: new Date(now).toISOString(),
+        runner: cfg.runner,
+        slug: p.slug,
+        skill: p.skillLocal,
+        outcome: outcomeOf(res.detail, res.ok),
+        exitCode: res.exitCode,
+        ms: res.ms,
+        detail: res.detail,
+      })}\n`,
+    );
     if (res.ok)
       recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
     else failed++;
     if (i < dueRuns.length - 1 && stagger > 0) await Bun.sleep(stagger);
   }
   console.log(
-    `\nDone: ${dueRuns.length - failed}/${dueRuns.length} ok, ${failed} failed${skipped ? `, ${skipped} skipped (cadence)` : ""}.`,
+    `\nDone: ${dueRuns.length - failed}/${dueRuns.length} ok, ${failed} failed${skipped ? `, ${skipped} skipped (cadence)` : ""}. Summary: ${summary}`,
   );
   process.exit(failed ? 1 : 0);
 }
