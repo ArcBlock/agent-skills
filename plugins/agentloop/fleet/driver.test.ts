@@ -4,6 +4,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import {
   cadenceDue,
+  checkoutBaseStatus,
   checkoutDir,
   type DeploymentConfig,
   defaultLogDir,
@@ -347,6 +348,29 @@ describe("logging (observability — a per-(repo,skill) file, not one blob per c
     expect(parsed.outcome).toBe("ok");
     expect(parsed.slug).toBe("ArcBlock/arc");
     expect(parsed.ms).toBe(1234);
+  });
+});
+
+describe("checkoutBaseStatus (mount guard — fail loud when an external disk is gone)", () => {
+  it("an internal path is always available (guard is a no-op there)", () => {
+    expect(checkoutBaseStatus("/Users/me/.agentloop-fleet/checkouts", () => true).ok).toBe(true);
+  });
+
+  it("an unmounted /Volumes/<name> is reported by name, not a cryptic mkdir error", () => {
+    // The volume dir does not exist → disk not mounted.
+    const r = checkoutBaseStatus("/Volumes/Fleet/agentloop-fleet/checkouts", () => false);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("/Volumes/Fleet");
+    expect(r.reason).toContain("not mounted");
+  });
+
+  it("a MOUNTED /Volumes/<name> is available (only the volume root needs to exist yet)", () => {
+    const mounted = (p: string) => p === "/Volumes/Fleet"; // checkouts subdir not created yet
+    expect(checkoutBaseStatus("/Volumes/Fleet/agentloop-fleet/checkouts", mounted).ok).toBe(true);
+  });
+
+  it("expands ~ before checking (a literal ~ would never be a /Volumes path)", () => {
+    expect(checkoutBaseStatus("~/.agentloop-fleet", (p) => p === homedir()).ok).toBe(true);
   });
 });
 

@@ -22,6 +22,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -312,6 +313,35 @@ export function logPaths(logDir: string, slug: string, skill: string): LogPaths 
 export const defaultLogDir = (checkoutBase: string): string =>
   `${expandHome(checkoutBase).replace(/\/+$/, "")}/logs`;
 
+/**
+ * Mount guard (pure part): is checkoutBase reachable at all?
+ *
+ * When checkoutBase lives on an external disk (`/Volumes/<name>/…`) and that disk is not
+ * mounted (unplugged / asleep), a scheduled round otherwise dies deep inside with a cryptic
+ * `Permission denied` from `mkdir` under root-owned /Volumes — looking like a permissions
+ * bug, not "your disk isn't here", and repeating cryptically every hour. This turns that
+ * into one plain-English reason. It is a NO-OP for an internal path (always reachable), so
+ * it costs nothing until you actually move the fleet to an external volume.
+ */
+export function checkoutBaseStatus(
+  checkoutBase: string,
+  exists: (p: string) => boolean,
+): { ok: boolean; reason?: string } {
+  const base = expandHome(checkoutBase).replace(/\/+$/, "");
+  const vol = base.match(/^(\/Volumes\/[^/]+)/);
+  if (vol && !exists(vol[1])) {
+    return {
+      ok: false,
+      reason: `external volume ${vol[1]} is not mounted (disk unplugged or asleep?)`,
+    };
+  }
+  // General: some existing ancestor must exist for `mkdir -p` to have somewhere to attach.
+  let p = base;
+  while (p && p !== "/" && !exists(p)) p = p.slice(0, p.lastIndexOf("/")) || "/";
+  if (!exists(p)) return { ok: false, reason: `no existing parent directory for ${base}` };
+  return { ok: true };
+}
+
 export interface RunRecord {
   ts: string; // ISO
   runner: string;
@@ -532,16 +562,37 @@ if (import.meta.main) {
   const state = readState(sPath);
   const gated = plan.map((p) => ({ p, ...cadenceDue(p, force ? {} : state, now) }));
 
+  const baseStatus = checkoutBaseStatus(cfg.checkoutBase, existsSync);
+
   if (!run) {
     for (const { p, due, remainingMin } of gated) {
       const tag = due ? "" : `  [cadence: skip, due in ${remainingMin}m]`;
       console.log(`\n[${p.slug} · ${p.skill}]${tag}\n${p.command}`);
     }
     const due = gated.filter((g) => g.due).length;
+    if (!baseStatus.ok) console.log(`\n# ⚠ checkoutBase unavailable: ${baseStatus.reason}`);
     console.log(
       `\n(dry-run — ${due}/${plan.length} due now. Pass --run to execute; --force ignores cadence.)`,
     );
     process.exit(0);
+  }
+
+  // Mount guard: fail LOUD and early, before any checkout, if checkoutBase's disk is gone.
+  // A distinct exit code (3) lets cron tell "disk not mounted" apart from "sweep failed".
+  if (!baseStatus.ok) {
+    console.error(`✗ checkoutBase not available — ${baseStatus.reason}. Skipping round.`);
+    process.exit(3);
+  }
+  try {
+    mkdirSync(expandHome(cfg.checkoutBase), { recursive: true });
+    const probe = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.fleet-write-probe`;
+    writeFileSync(probe, "");
+    unlinkSync(probe);
+  } catch (e) {
+    console.error(
+      `✗ checkoutBase ${cfg.checkoutBase} exists but is not writable — ${(e as Error).message}. Skipping round.`,
+    );
+    process.exit(3);
   }
 
   // Fail fast, LOUD, before touching a checkout: a scheduled round that ran without its
