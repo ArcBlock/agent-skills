@@ -388,27 +388,31 @@ const parseEnv0 = (s: string): Record<string, string> => {
 };
 
 /**
- * Source a shell env file and return ONLY the variables it changed.
+ * Source a shell env file and return the variables the file ASSIGNS, with their post-source
+ * values.
  *
- * Sourced in bash rather than parsed, so `export`, quoting and `PATH=$PATH:…` all behave;
- * diffed against the same shell's baseline so we import the file's intent and not bash's
- * own noise (PWD, SHLVL, _). Throws on a missing/unreadable file: a scheduled deployment
- * that silently ran without its credentials would look like a working sweep that decided
- * there was nothing to do.
+ * NOT a diff against the current environment. A diff breaks when the file was already sourced
+ * upstream — e.g. a cron line that does `. env` before invoking the driver: the vars are then
+ * already present, the before/after diff is empty, and the "0 vars" guard wrongly aborts a
+ * round that actually HAS credentials (observed live: the first fleet cron fire). We instead
+ * read the names the file assigns (parsed from its `export FOO=` / `FOO=` lines) and report
+ * each name's value after sourcing — idempotent regardless of the parent env. Sourcing happens
+ * in the CURRENT env, so `PATH=$PATH:…`-style appends still resolve correctly.
  */
 export function loadEnvFile(path: string, sh: Sh = realSh): Record<string, string> {
   const p = expandHome(path);
   const q = `'${p.replace(/'/g, `'\\''`)}'`;
   const probe = sh(`[ -r ${q} ] && echo yes || echo no`);
   if (probe.out.trim() !== "yes") throw new Error(`envFile not readable: ${p}`);
-  const before = parseEnv0(sh(`env -0`).out);
-  const after = sh(`set -a; . ${q} >/dev/null 2>&1 || exit 9; env -0`);
-  if (after.code !== 0) throw new Error(`envFile could not be sourced: ${p}`);
-  const delta: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parseEnv0(after.out))) {
-    if (before[k] !== v && k !== "_") delta[k] = v;
-  }
-  return delta;
+  // names the file assigns → NUL-delimited `name=value` after sourcing (bash indirect ${!n})
+  const r = sh(
+    `set -a; . ${q} >/dev/null 2>&1 || exit 9; ` +
+      `for n in $(grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' ${q} | ` +
+      `sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=.*//' | sort -u); do ` +
+      `printf '%s=%s\\0' "$n" "\${!n}"; done`,
+  );
+  if (r.code !== 0) throw new Error(`envFile could not be sourced: ${p}`);
+  return parseEnv0(r.out);
 }
 
 /** Env for one run: process env < envFile < deployment env < per-skill env. */

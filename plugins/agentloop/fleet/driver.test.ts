@@ -172,10 +172,25 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     expect(e.PATH).toContain("/added/bin");
   });
 
-  it("does NOT import the shell's own noise (only what the file changed)", () => {
+  it("does NOT import the shell's own noise (only the vars the file assigns)", () => {
     const e = loadEnvFile(file);
     expect(e.SHLVL).toBeUndefined();
     expect(e._).toBeUndefined();
+    expect(e.PWD).toBeUndefined();
+  });
+
+  it("returns the file's var even when it is ALREADY in the environment with the SAME value", () => {
+    // Reproduces the live cron bug: the cron line did `. env` first, so GH_TOKEN was already
+    // set to the same value; a before/after diff was empty and the guard aborted. The
+    // assignment-based read must still return it. realSh inherits process.env, so pre-set it.
+    const f = `${T}/env-preset`;
+    writeFileSync(f, "export ALREADY=fromfile\n");
+    process.env.ALREADY = "fromfile"; // identical to the file → old diff would be empty
+    try {
+      expect(loadEnvFile(f).ALREADY).toBe("fromfile");
+    } finally {
+      delete process.env.ALREADY;
+    }
   });
 
   it("throws on a missing envFile — a nightly run without credentials must not look like a quiet no-op", () => {
