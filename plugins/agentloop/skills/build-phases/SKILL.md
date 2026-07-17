@@ -27,14 +27,14 @@ Execute a planning document's phases sequentially, with mandatory three-layer ve
 
 **Recommended (with watchdog):**
 ```
-/loop /build-phases <planning-dir> [--start-phase <N>] [--review-target <score>]
+/loop /agentloop:build-phases <planning-dir> [--start-phase <N>] [--review-target <score>]
 ```
 
 `/loop` without an interval puts the skill in self-pacing mode. Progress is primarily **notification-driven** (executor sub-agents push a task-notification when they finish); `ScheduleWakeup` provides a 30-minute fallback tick so a hung executor can never stall the chain silently. See Rule 4 for the watchdog state machine.
 
 **Direct (single dispatch, no watchdog):**
 ```
-/build-phases <planning-dir> [--start-phase <N>] [--review-target <score>]
+/agentloop:build-phases <planning-dir> [--start-phase <N>] [--review-target <score>]
 ```
 
 Direct invocation still spawns one phase and writes `.build-progress.json`, but there is no automatic watchdog — you'll need to re-invoke the skill manually to advance, respawn, or finish. Prefer the `/loop` form unless you know what you're doing.
@@ -46,9 +46,9 @@ Direct invocation still spawns one phase and writes `.build-progress.json`, but 
 ### Examples
 
 ```
-/loop /build-phases planning/provider-architecture-rethink/
-/loop /build-phases planning/provider-architecture-rethink/ --start-phase 2
-/loop /build-phases planning/aup-builder/ --review-target 90
+/loop /agentloop:build-phases planning/provider-architecture-rethink/
+/loop /agentloop:build-phases planning/provider-architecture-rethink/ --start-phase 2
+/loop /agentloop:build-phases planning/aup-builder/ --review-target 90
 ```
 
 ### Issue-driven plans (no `planning/` file — manage in GitHub)
@@ -65,7 +65,7 @@ a `planning/` doc — the issue is the source of truth. Bridge mechanically:
    put the phases/tasks as a **checkbox task-list** in the issue body (or a pinned
    tracking comment), and/or split into **sub-issues**. That is the durable,
    browsable tracker.
-3. Run `/build-phases <scratch-dir>` normally. **Per phase = one commit**
+3. Run `/agentloop:build-phases <scratch-dir>` normally. **Per phase = one commit**
    (TDD + 3-layer verification land together so history is bisectable), **tick
    that phase's checkbox**, and post a one-line progress comment.
 4. Durable record = issue thread + checkboxes / sub-issues + merged PR(s) + git
@@ -176,7 +176,7 @@ For each phase in `tasks.md`:
 
 ### Rule 4: Watchdog 调度 — Parent Session 是唯一的 spawn 发起方
 
-**`/build-phases` 每次被调用都可能落在两种模式之一：**
+**`/agentloop:build-phases` 每次被调用都可能落在两种模式之一：**
 
 - **Init 模式**：`.build-progress.json` 不存在 → 做 pre-flight、写 checkpoint、spawn 第一个 phase、schedule 下一次 wake
 - **Watchdog 模式**：`.build-progress.json` 已存在 → 读状态、按状态机采取一个动作、schedule 下一次 wake（或停止 loop）
@@ -198,13 +198,13 @@ For each phase in `tasks.md`:
 2. **Context 隔离** — 每个 phase 是一个 fresh subagent；parent 只做调度 + 守门 + review 派发；parent 自身的 compaction 不丢状态（`.build-progress.json` 是真正的记忆）
 3. **失败可见** — 异常最多沉默一个兜底周期（30 分钟），通常即时可见
 
-**推荐调用方式：** `/loop /build-phases <planning-dir>`（不带 interval，self-pacing）。直接调用也能工作，但没有兜底 tick。
+**推荐调用方式：** `/loop /agentloop:build-phases <planning-dir>`（不带 interval，self-pacing）。直接调用也能工作，但没有兜底 tick。
 
 #### Parent session 行为（每次进入 skill 都适用）
 
 1. 读 `.build-progress.json` → 不存在走 Init 分支，存在走 Watchdog 分支
 2. 执行对应分支的**一个**动作（spawn / 守门+review / respawn / 停止）
-3. 如果任务没结束 → 调用 `ScheduleWakeup(delaySeconds=1800, prompt="/loop /build-phases <planning-dir>", reason="fallback watchdog tick for phase N")`——这是**兜底**，正常推进靠 executor 完成时的 task-notification
+3. 如果任务没结束 → 调用 `ScheduleWakeup(delaySeconds=1800, prompt="/loop /agentloop:build-phases <planning-dir>", reason="fallback watchdog tick for phase N")`——这是**兜底**，正常推进靠 executor 完成时的 task-notification
 4. 如果全部完成 → 输出 final report、删除 progress 文件、**不 reschedule**（loop 自然结束）
 
 #### Watchdog 状态机
@@ -397,7 +397,7 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 **0a. Design Review Gate:**
 - Check if the planning directory has a recent design review result
-- If no review on record, or last review was < 95% → **STOP. Run `/design-review` first.**
+- If no review on record, or last review was < 95% → **STOP. Run `/agentloop:design-review` first.**
 
 **0b. Parse `tasks.md`** to determine `total_phases` and the phase list.
 
@@ -419,7 +419,7 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 **0d. Spawn the first phase** using the Agent template in Rule 4; write `executor_task_id` into the progress file.
 
-**0e. Call `ScheduleWakeup`** with `delaySeconds: 1800` and `prompt: "/loop /build-phases <planning-dir>"` as the fallback watchdog (primary advancement is the executor's task-notification).
+**0e. Call `ScheduleWakeup`** with `delaySeconds: 1800` and `prompt: "/loop /agentloop:build-phases <planning-dir>"` as the fallback watchdog (primary advancement is the executor's task-notification).
 
 **0f. Output the Init variant of the Watchdog Tick Report** (see Rule 4) including the log path. Tell the user how to tail it: `tail -f <executor_log>`.
 
@@ -431,7 +431,7 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 **0b. Take at most ONE action:** spawn / gate+review / respawn (`TaskStop` the stale executor first) / stop. Do not run the phase implementation in the current session — the only "work" the parent does directly is the E2E log gate check (bash) and dispatching the clean-context review agent.
 
-**0c. If task not complete** → call `ScheduleWakeup(delaySeconds: 1800, prompt: "/loop /build-phases <planning-dir>", reason: "fallback watchdog tick for phase <N>")`.
+**0c. If task not complete** → call `ScheduleWakeup(delaySeconds: 1800, prompt: "/loop /agentloop:build-phases <planning-dir>", reason: "fallback watchdog tick for phase <N>")`.
 
 **0d. If task complete** → output the Final Report (Section 3), delete `.build-progress.json`, **do not reschedule**.
 
@@ -478,7 +478,7 @@ For each phase:
 5. If partially implemented → adjust scope to only the missing parts
 ```
 
-This prevents re-implementing work that was done outside of /build-phases (manual coding, other sessions, etc.).
+This prevents re-implementing work that was done outside of /agentloop:build-phases (manual coding, other sessions, etc.).
 
 ### Step 2: Execute phases
 
@@ -650,7 +650,7 @@ git commit -m "phase N: simplify"
 
 #### 2.6 DESIGN REVIEW（parent 负责，不在 executor 内）
 
-收到 executor 完成通知并通过 E2E log gate 后，**parent** launch 一个 clean-context review agent（与 /design-review 同模式）。审查者与实现者是不同的 agent——独立性是设计要求：NOT APPROVED 时 parent 把 review 发现写进 respawn prompt 重派 executor 修复，而不是 reviewer 自己修。Review prompt:
+收到 executor 完成通知并通过 E2E log gate 后，**parent** launch 一个 clean-context review agent（与 /agentloop:design-review 同模式）。审查者与实现者是不同的 agent——独立性是设计要求：NOT APPROVED 时 parent 把 review 发现写进 respawn prompt 重派 executor 修复，而不是 reviewer 自己修。Review prompt:
 
 ```
 你是一个独立的代码审查者。检查 Phase {N} 的实现是否符合 spec。

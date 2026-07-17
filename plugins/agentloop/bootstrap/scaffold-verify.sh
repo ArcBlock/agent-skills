@@ -22,6 +22,17 @@ fi
 DEFB="$(prof_val default_branch)"; [ -z "$DEFB" ] && DEFB="main"
 mkdir -p .claude/verify
 
+# The gate writes its report cache to .verify/<sha>.md, so .verify/ MUST be ignored — and
+# this is not cosmetic. An untracked .verify/ makes `git status` permanently dirty, and a
+# dirty tree silently disarms the gate itself: pre-pr only writes the cache when the tree is
+# clean, and a pre-push hook that requires the cache then refuses every push. The repo ends
+# up unable to land the work its own gate just verified. (Measured on did, which had an
+# untracked .verify/; same failure class as an in-tree fleet marker.)
+if ! grep -qE '^/?\.verify/?$' .gitignore 2>/dev/null; then
+  printf '\n# agentloop verification cache (the gate writes .verify/<sha>.md)\n.verify/\n' >> .gitignore
+  echo "  + .verify/ → .gitignore (an untracked one dirties the tree and disarms the gate)"
+fi
+
 guard() { [ -f "$1" ] && [ "$FORCE" -eq 0 ] && { echo "  skip $1 (exists; --force to replace)"; return 1; }; return 0; }
 
 if guard .claude/verify/engine.ts; then

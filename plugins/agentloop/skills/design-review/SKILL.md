@@ -12,7 +12,7 @@ Automate design document review using clean-context subagents. Each round gets a
 ## Usage
 
 ```
-/design-review <path> [--target <score>] [--max-rounds <n>]
+/agentloop:design-review <path> [--target <score>] [--max-rounds <n>]
 ```
 
 - `<path>` — Path to a design document file, or a directory containing `design.md` + `tasks.md`
@@ -22,9 +22,9 @@ Automate design document review using clean-context subagents. Each round gets a
 ### Examples
 
 ```
-/design-review planning/provider-architecture-rethink/
-/design-review intent/my-feature/INTENT.md --target 90
-/design-review planning/my-plan/ --target 95 --max-rounds 3
+/agentloop:design-review planning/provider-architecture-rethink/
+/agentloop:design-review intent/my-feature/INTENT.md --target 90
+/agentloop:design-review planning/my-plan/ --target 95 --max-rounds 3
 ```
 
 ### Issue-driven plans (no `planning/` file — issue is the source of truth)
@@ -36,7 +36,7 @@ of truth; the file is throwaway:
 
 1. **Render an ephemeral working copy** of the confirmed plan (a `design.md` /
    `tasks.md`) into a **scratch / gitignored** dir (e.g. the session scratchpad)
-   from the issue. Run `/design-review <scratch-dir>` on it. The rounds are
+   from the issue. Run `/agentloop:design-review <scratch-dir>` on it. The rounds are
    disposable iterations on a disposable file.
 2. When it hits the target score, **post the final optimized plan back to the
    issue as a comment** — that comment is the durable artifact.
@@ -59,7 +59,7 @@ interacting in this session.
 **Carve-out:** this issue-native path is only for *transient* feature /
 implementation plans. *Durable* specs that already live as files —
 `docs/architecture/*`, protocol specs, behaviour-contract `intent/*/INTENT.md`,
-conformance targets — are reviewed in place as a normal `/design-review <path>`
+conformance targets — are reviewed in place as a normal `/agentloop:design-review <path>`
 run; don't issue-ify those.
 
 (`issue-sweep`'s feature/design work-type drives this handoff automatically.)
@@ -133,7 +133,7 @@ Before reviewing, classify the document to apply the right review strategy:
 | **API Specification** | Are new interfaces, methods, protocol messages fully defined? | No |
 | **Migration Path** | Is backward compatibility addressed? Is there a clear transition strategy? | No |
 
-**Test Coverage is a central hard gate for implementation plans** (alongside E2E Verification + 事实/数字 grounding). Its primary purpose is to ensure that `tasks.md` contains sufficient test specifications for `/build-phases` to produce well-tested code.
+**Test Coverage is a central hard gate for implementation plans** (alongside E2E Verification + 事实/数字 grounding). Its primary purpose is to ensure that `tasks.md` contains sufficient test specifications for `/agentloop:build-phases` to produce well-tested code.
 
 #### Design / Architecture (no `tasks.md`)
 
@@ -230,7 +230,7 @@ Ask the user using AskUserQuestion:
 是否需要我从设计文档中提取并生成 tasks.md？这会：
 - 将待做工作分解为有序的 phases
 - 每个 phase 包含具体 tasks + 测试 spec（6 类覆盖）
-- 生成的 tasks.md 可直接用于 /build-phases
+- 生成的 tasks.md 可直接用于 /agentloop:build-phases
 
 选项：
 1. 是，生成 tasks.md 后再做 review

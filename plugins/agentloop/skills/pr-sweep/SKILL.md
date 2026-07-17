@@ -1,6 +1,6 @@
 ---
 name: pr-sweep
-description: Batch-review every open GitHub PR and drive it to a terminal state autonomously — fan out a clean-context pr-review per PR (verify claims against live code, run the verification gate), cluster PRs by shared issue + shared files, DEDUP-CLOSE same-issue duplicates (keep the best one, comment + close the twin), and GATED auto-merge every verified non-breaking PR (docs/tests/fixes AND features) while escalating only security / breaking changes / architecture-direction decisions to a human. Designed to run on a schedule on an independent machine so PRs get reviewed + merged without a human in the loop. Run /pr-sweep (review+comment+dedup-close only), /pr-sweep --merge (also auto-merge gated PRs), or /pr-sweep --dry-run (report only).
+description: Batch-review every open GitHub PR and drive it to a terminal state autonomously — fan out a clean-context pr-review per PR (verify claims against live code, run the verification gate), cluster PRs by shared issue + shared files, DEDUP-CLOSE same-issue duplicates (keep the best one, comment + close the twin), and GATED auto-merge every verified non-breaking PR (docs/tests/fixes AND features) while escalating only security / breaking changes / architecture-direction decisions to a human. Designed to run on a schedule on an independent machine so PRs get reviewed + merged without a human in the loop. Run /agentloop:pr-sweep (review+comment+dedup-close only), /agentloop:pr-sweep --merge (also auto-merge gated PRs), or /agentloop:pr-sweep --dry-run (report only).
 ---
 
 # PR Sweep — batch-review + dedup-close + gated auto-merge
@@ -37,10 +37,10 @@ human in the loop — escalating only the genuinely human-only decisions.
 ## Usage
 
 ```
-/pr-sweep              # 全量 review + 评论 + 去重关闭(不自动 merge)
-/pr-sweep --merge      # 以上 + 对通过「合并闸」的低风险 PR 自动 merge
-/pr-sweep --dry-run    # 只报告 WOULD-DO,不发 comment / 不关 / 不合
-/pr-sweep <pr#…>       # 限定到指定 PR
+/agentloop:pr-sweep              # 全量 review + 评论 + 去重关闭(不自动 merge)
+/agentloop:pr-sweep --merge      # 以上 + 对通过「合并闸」的低风险 PR 自动 merge
+/agentloop:pr-sweep --dry-run    # 只报告 WOULD-DO,不发 comment / 不关 / 不合
+/agentloop:pr-sweep <pr#…>       # 限定到指定 PR
 ```
 
 `--dry-run` 语义与所有 loop skill 一致 —— 见插件 README 的 **Dry-run contract**。

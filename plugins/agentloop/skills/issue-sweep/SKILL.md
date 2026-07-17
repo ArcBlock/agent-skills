@@ -1,6 +1,6 @@
 ---
 name: issue-sweep
-description: Sweep open GitHub issues for unprocessed human input and act on each via the issue-review skill — delete-PRs for human-approved deprecated docs, doc-update PRs for approved drifted docs, fix-PRs for approved bugs, analysis+TDD-plan comments for feature/design requests (then implement after confirmation), close issues whose PR merged, comment-only on conditional/security/needs-decision ones. The actionable signal may be a comment OR the issue body. With --autofix-green, also auto-fixes "green" issues that have no human reply yet (unambiguous + verifiable-here + low-risk + non-security) — reproduce→fix→test→PR, never auto-merge. Run manually (/issue-sweep) or on a schedule. Designed for a doc-audit + spin-off + feature workflow.
+description: Sweep open GitHub issues for unprocessed human input and act on each via the issue-review skill — delete-PRs for human-approved deprecated docs, doc-update PRs for approved drifted docs, fix-PRs for approved bugs, analysis+TDD-plan comments for feature/design requests (then implement after confirmation), close issues whose PR merged, comment-only on conditional/security/needs-decision ones. The actionable signal may be a comment OR the issue body. With --autofix-green, also auto-fixes "green" issues that have no human reply yet (unambiguous + verifiable-here + low-risk + non-security) — reproduce→fix→test→PR, never auto-merge. Run manually (/agentloop:issue-sweep) or on a schedule. Designed for a doc-audit + spin-off + feature workflow.
 ---
 
 # Issue Sweep — batch-process issues with new human replies
@@ -18,7 +18,7 @@ issues need handling right now — the ones whose **latest comment is a human re
 the agent hasn't acted on yet** — and runs the per-issue engine on each.
 
 This is the thing a cron should schedule: one run = scan + process a batch. In
-environments without a working scheduler, run it by hand: `/issue-sweep`.
+environments without a working scheduler, run it by hand: `/agentloop:issue-sweep`.
 
 > **★ 无人值守铁律(cron routine / /loop——本 skill 的默认运行形态):绝不调用任何会等待用户的工具——`AskUserQuestion`、`Workflow`(需交互式 opt-in 确认)、`EnterPlanMode`(退出需用户批准)。** 无人应答 → 整条 routine 永久挂死(实测:sweep routine 整夜卡在「是否运行 workflow」的提问上)。需要人拍板的问题,照 [`design-review` Autonomous escalation](../design-review/SKILL.md) 范式处理:把选项 + 你的推荐 + 被 block 的内容作为 comment(挂 `needs-human-confirm`)落到对应 issue,**然后继续处理下一项**;编排一律串行 inline(同 [`pr-sweep` Step 3 铁律](../pr-sweep/SKILL.md))。repo hook(`.claude/hooks/deny-interactive-unattended.py`)会在无人值守 session 硬 deny 这三个工具兜底——被 deny 即说明你在无人值守环境,按本条纪律走,不要重试。
 
@@ -27,10 +27,10 @@ environments without a working scheduler, run it by hand: `/issue-sweep`.
 ## Usage
 
 ```
-/issue-sweep            # scan all candidate labels, process every unprocessed human reply
-/issue-sweep --dry-run  # report what WOULD be processed; do not post/PR/close
-/issue-sweep <label…>   # restrict the candidate set to specific labels
-/issue-sweep --autofix-green   # ALSO auto-fix "green" issues that have NO human reply yet (Step 3b)
+/agentloop:issue-sweep            # scan all candidate labels, process every unprocessed human reply
+/agentloop:issue-sweep --dry-run  # report what WOULD be processed; do not post/PR/close
+/agentloop:issue-sweep <label…>   # restrict the candidate set to specific labels
+/agentloop:issue-sweep --autofix-green   # ALSO auto-fix "green" issues that have NO human reply yet (Step 3b)
 ```
 
 Repo is `<repo_slug>`. Use the `gh` CLI when it's available (as the `gh …`
@@ -146,7 +146,7 @@ De-dup by issue number. Optional args override this default label list.
 **Unlabeled / off-label catch-all(每轮必扫——label 并集对它们天然失明):**
 founder/人随手开的 issue 常常 **0 label、0 comment**,actionable 信号全在 body。
 真实 miss:一条 feature issue(无 label)、一条 research issue(无 label——创建后
-2 小时内 hourly sweep 照常跑了,但 label 扫描永远看不见它,只能靠人手工 `/issue-review`
+2 小时内 hourly sweep 照常跑了,但 label 扫描永远看不见它,只能靠人手工 `/agentloop:issue-review`
 点名)。上面 research/idea 行写的「扫到就补 label」在纯 label 扫描下是**循环依赖**
 (没 label 就扫不到,扫不到就没人补 label)——这条 catch-all 通道打破它。**别依赖
 人打 label**,每轮追加一次全量 open 列表,把「不带任何候选 label」的捞出来:
@@ -270,9 +270,9 @@ human's latest comment — this is `issue-review`'s resolve phase:
 | Agrees to **delete** a `deprecated` doc-audit ("可以删除"/"同意删除") | **Delete PR**, but **safe-delete only** — `git grep` for live refs first. Live code/test/doc dependency, a still-needed sub-package, a pending third-party confirm, or a blocking precondition → **do NOT delete; leave a comment** explaining the blocker. Relabel `status:*`→`status:deprecated` if needed. |
 | Asks to **update** a `drifted` doc ("update 文档"/"补齐发 pr") | First decide **doc-drift vs code-drift** (verify the shipped surface). If doc-drift: edit the doc to match shipped reality, each addition checked against `path:line`. **Doc-update PR**, no code change. If another human is already drafting a PR for the same cluster, **skip to avoid collision**. |
 | Approves a **bug fix** ("同意"/"easy fix") | Implement the fix; verify locally where possible (typecheck / targeted test). **One PR per bug.** |
-| **Feature / design request**(multi-phase / 架构 / feature) | **评估 → 能做就做,绝不冻结。** 旧的「(1) 只发计划、不写码 →(2) 等 human 确认才执行」是 bug:卡在等确认,而那个确认基本会变成「你先评估试试」,于是永远不动。改为:**(a) 评估(必做)** —— 读 issue + 引用代码,判「本环境能否自主起步」:issue 自带 spec/验收标准 + 代码可触达 = 能起步(绝大多数 feature 属此)。**(b) 能起步就直接跑 pipeline,不等确认**:`/design-review` 定/优化方案(精炼计划 post 回 issue;**post 的设计必须 grounded:现状断言 `path:line` 坐实、代码权威优先于文档并指出文档过时、数字实测或显式标注估计——design-review 的事实+数字 grounding 是 HARD GATE,别手 post 未审的设计**)→ `/build-phases` 分阶段实现(phase = issue checkbox;每 phase 一 commit + 进度评论;PR 按耦合切——见 design-review/build-phases「Issue-driven plans」)。issue 即 source of truth;**drive 能做的 phase 到完成**;跨 hourly run 的用 **in-progress** 续做(round-aware 接力 phase N→N+1,不重做、不冻结)。**(c) 只有真正 human-only fork 才停**(无法判定的架构 A-vs-B、安全、不可逆),且停时给**评估结论 + 具体待决项 + 你的推荐 + 已完成的 phase**,**绝不写「不在本轮范围 / 留开放」**那种冻结性 disposition。**(d) 撞墙 → 给详细问题**:实现中卡住,贴**具体 blocker(试了什么、什么失败、确切缺哪个决定/信息)**作为 in-progress 续做点,不是含糊的「需人定方向」。Never skip 评估;never freeze。 |
-| **Research 请求**(`research` label / `[research]` 标题,如「研究 perkeep 和 did space 的结合点」;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Research](../issue-review/SKILL.md):**绝不改 repo 代码、不开 PR**。并行 fan-out 两个 subagent 双侧代码级调研(外部 repo shallow clone 到 scratchpad + 本 repo `path:line`)→ 综合成一条证据化 comment(TL;DR 逐条答 issue 问题 + 对照表 + 冲突面 + 结合点分档 ⭐/◐/✗ + 待拍板选项 + 外部链接)→ 挂 `research,needs-human-confirm`。**默认只留 comment + 链接,不下载保存数据**;仅当 issue 明确要求收集数据入库时才在 `research/<task-slug>/` 开目录(走人签名 PR)。**不自动开 spin-off**(research 结论天然 needs-decision);人选定方向后下一轮按选项拆自足 feature issue 或转 `/design-review`→`/build-phases`。 |
-| **Idea 提案**(`idea` label / `idea:` 标题;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Idea](../issue-review/SKILL.md):**不当指令,当提案——绝不改 repo 代码、不开 PR、不开 spin-off**。理解复述(价值主张分解)→ 对照代码找「地基已有/真实缺口/与现有矛盾」(每条 `path:line`)→ 价值分档 ⭐/◐/✗ → **具体到能拍板的澄清问题** + 下一步选项(不预设)→ 挂 `idea,needs-human-confirm`。信息不足就请人下一轮补 context,多轮收敛;人拍板方向后才拆自足 feature issue 或转 `/design-review`。**拿不准「指令还是想法」就按 idea 处理**(clarify 的代价远低于执行错方向)。 |
+| **Feature / design request**(multi-phase / 架构 / feature) | **评估 → 能做就做,绝不冻结。** 旧的「(1) 只发计划、不写码 →(2) 等 human 确认才执行」是 bug:卡在等确认,而那个确认基本会变成「你先评估试试」,于是永远不动。改为:**(a) 评估(必做)** —— 读 issue + 引用代码,判「本环境能否自主起步」:issue 自带 spec/验收标准 + 代码可触达 = 能起步(绝大多数 feature 属此)。**(b) 能起步就直接跑 pipeline,不等确认**:`/agentloop:design-review` 定/优化方案(精炼计划 post 回 issue;**post 的设计必须 grounded:现状断言 `path:line` 坐实、代码权威优先于文档并指出文档过时、数字实测或显式标注估计——design-review 的事实+数字 grounding 是 HARD GATE,别手 post 未审的设计**)→ `/agentloop:build-phases` 分阶段实现(phase = issue checkbox;每 phase 一 commit + 进度评论;PR 按耦合切——见 design-review/build-phases「Issue-driven plans」)。issue 即 source of truth;**drive 能做的 phase 到完成**;跨 hourly run 的用 **in-progress** 续做(round-aware 接力 phase N→N+1,不重做、不冻结)。**(c) 只有真正 human-only fork 才停**(无法判定的架构 A-vs-B、安全、不可逆),且停时给**评估结论 + 具体待决项 + 你的推荐 + 已完成的 phase**,**绝不写「不在本轮范围 / 留开放」**那种冻结性 disposition。**(d) 撞墙 → 给详细问题**:实现中卡住,贴**具体 blocker(试了什么、什么失败、确切缺哪个决定/信息)**作为 in-progress 续做点,不是含糊的「需人定方向」。Never skip 评估;never freeze。 |
+| **Research 请求**(`research` label / `[research]` 标题,如「研究 perkeep 和 did space 的结合点」;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Research](../issue-review/SKILL.md):**绝不改 repo 代码、不开 PR**。并行 fan-out 两个 subagent 双侧代码级调研(外部 repo shallow clone 到 scratchpad + 本 repo `path:line`)→ 综合成一条证据化 comment(TL;DR 逐条答 issue 问题 + 对照表 + 冲突面 + 结合点分档 ⭐/◐/✗ + 待拍板选项 + 外部链接)→ 挂 `research,needs-human-confirm`。**默认只留 comment + 链接,不下载保存数据**;仅当 issue 明确要求收集数据入库时才在 `research/<task-slug>/` 开目录(走人签名 PR)。**不自动开 spin-off**(research 结论天然 needs-decision);人选定方向后下一轮按选项拆自足 feature issue 或转 `/agentloop:design-review`→`/agentloop:build-phases`。 |
+| **Idea 提案**(`idea` label / `idea:` 标题;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Idea](../issue-review/SKILL.md):**不当指令,当提案——绝不改 repo 代码、不开 PR、不开 spin-off**。理解复述(价值主张分解)→ 对照代码找「地基已有/真实缺口/与现有矛盾」(每条 `path:line`)→ 价值分档 ⭐/◐/✗ → **具体到能拍板的澄清问题** + 下一步选项(不预设)→ 挂 `idea,needs-human-confirm`。信息不足就请人下一轮补 context,多轮收敛;人拍板方向后才拆自足 feature issue 或转 `/agentloop:design-review`。**拿不准「指令还是想法」就按 idea 处理**(clarify 的代价远低于执行错方向)。 |
 | PR already **merged** but issue still open | **Close** it (`completed`). `Fixes #N` usually auto-closes; close manually if it didn't. |
 | **父级 rollup**（Step 0.5 `rollupCandidates`：open 父 issue 的孩子已全部关闭） | 走 [`issue-review` ★父级 rollup](../issue-review/SKILL.md)：`claim.ts` fencing 抢到才做 → 核对父 issue 验收标准/问题清单（逐条对应到子 issue/PR 证据）→ 综合 comment（带 rollup marker）→ **全覆盖则 close**（这是「自动 close」的显式例外，但 **`agent:hold` 一票否决 close**：hold 禁止一切终态动作，优先级高于本例外——照常综合 comment，但留开等人摘 label），有残留 gap 列出并留开。research/idea 类父 issue 同样综合后 close——结论已在子 issue 落地，父级只是收口。 |
 | Conditional / asks a third party to confirm / **security-sensitive** (e.g. P0 security) / needs an A-vs-B decision / "要人类 review 不要完全用 ai" | **Comment only** — surface the finding + the decision needed; do not act. |
@@ -372,7 +372,7 @@ Per spin-off issue:
 3. **Triage by environment, then by the four gates.** In a TS-only sandbox the realistic green set is: TS/pure-function fixes, test-file fixes, wire-format/conformance mismatches, doc/type/lint, env-gate cleanups. The rest of the standard backlog clusters stay non-green *here*:
    - **Native parity** (`[parity]`, Swift/Kotlin) → 🟡 (can't build/test in TS sandbox; becomes 🟢 only on a full-platform host).
    - **`security` / `P0,security`** → 🔴 always (crypto/vault/ACL/const-time/path-traversal), comment-only even when "obvious".
-   - **Multi-phase feature/arch plans** (`feature`, `enhancement` with Phase N) → 不是单 PR,但**也要尝试自动推进,不是冻结**。走 Step 3 feature 行的「评估 → 能起步就 `/design-review` → `/build-phases`」管道,**一 issue 一条 in-progress 接力线**:每个 hourly run 推进它能推进的 phase(round-aware 续做),撞到真正 human-only fork 才停并给具体待决项。**绝不发「🟠 不在本轮范围 / 留开放」把它冻死**——那一类正是曾经真实出现过『永不被处理』的根因。`design-review`/`build-phases` 本身就是自动流程,feature issue 该用它们跑,而不是甩回给人。
+   - **Multi-phase feature/arch plans** (`feature`, `enhancement` with Phase N) → 不是单 PR,但**也要尝试自动推进,不是冻结**。走 Step 3 feature 行的「评估 → 能起步就 `/agentloop:design-review` → `/agentloop:build-phases`」管道,**一 issue 一条 in-progress 接力线**:每个 hourly run 推进它能推进的 phase(round-aware 续做),撞到真正 human-only fork 才停并给具体待决项。**绝不发「🟠 不在本轮范围 / 留开放」把它冻死**——那一类正是曾经真实出现过『永不被处理』的根因。`design-review`/`build-phases` 本身就是自动流程,feature issue 该用它们跑,而不是甩回给人。
 4. **可做即做,不排队 —— `🟢 candidate-queued` 这个 class 删除(它是自锁死循环的根源)。** 一个 issue 判成 🟢(过四关 + **在本环境可验证**)就**当场认领 + 当场做**:cut 确定性分支 `claude/issue-<N>`(Step 4 的认领检查)→ reproduce→fix→test→PR。disposition = **PR 链接**(终态)。
    - **绝不发"🟢 排队中 / 本轮未做 / 留开放 / candidate-queued"这类注释。** 它是**未完成的活穿了终态的衣服**:下一轮轮次感知看到"最后一条是 AI 评论、人没回",就判"已处理、跳过",这条活**永远不做**。用户实测:大量 issue 被这种注释冻死、只剩一堆"我会晚点做"却再不推进。**判得可做,就此刻做完;不要承诺未来。**
    - **本轮容量不够、没轮到的 🟢:不留任何注释**,保持"未处理"——下一轮自然被重新发现、再认领去做。这是**唯一正确的"沉默"**(没有 AI 注释的 🟢 不会被冻结)。
