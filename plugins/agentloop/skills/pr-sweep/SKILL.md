@@ -53,12 +53,17 @@ Repo 是 `<repo_slug>`。本地有 `gh` CLI 时直接用;无则用 `mcp__github_
 `<default_branch>`**(全篇「main」指 `<default_branch>`;部分仓库用 `master`)上,不是容器碰巧
 clone 的陈旧树。上一轮 sweep 可能已 merge 了 PR、移动了 `<default_branch>`。
 
+当作**朴素命令**逐条跑、读结果——**你就是控制流**,别包成 shell 循环/条件/`$(…)`(沙箱的
+Bash guard 会拒,这一步会在 sweep 开始前就硬失败——实盘踩过)。
+
 ```bash
-git checkout <default_branch>
-for i in 1 2 3 4; do git fetch origin <default_branch> && break || sleep $((2**i)); done
+git fetch origin <default_branch>   # 偶发失败就再跑一次(你自己就是重试循环)
 git reset --hard origin/<default_branch>
 git log --oneline -1                # 确认在真正的 tip
 ```
+
+**别用 `git checkout <default_branch>`**:在 git worktree(如 fleet checkout)里该分支被
+主 worktree 占着,checkout 必失败;上面的 fetch + reset 在分支上或 detached 都能用。
 工作树有上一轮残留 → `git reset --hard` + `git clean -fd`。一次 sweep 从干净、最新的树开始。
 
 ## Step 1 — 枚举所有开放 PR + 元数据
@@ -83,7 +88,7 @@ gh pr list --state open --limit 100 \
 
 **不做这一步,每小时会把同一批"已 review、没人回、又自动合不了"的 PR 重新起 agent + 重复刷 comment——烧 token、刷屏、可能 race。** 规则:**默认信任上一轮结论,只在「有新输入」或「外部阻塞已解除」时才动手。** 这是 [`issue-review`](../issue-review/SKILL.md) "轮次感知"在 PR 侧的对偶。
 
-**先用 gh 元数据廉价分流(不起 agent)。** agent 评论 = body 以 `> 🤖 AI Agent PR Review` 开头;其余 = 人类。给每个**未终结**的 PR 打一个受控 disposition label,下一轮靠它分流:
+**先用 gh 元数据廉价分流(不起 agent)。** agent 评论 = **首行**(跳过空行/HTML marker 后)以 `🤖`/`📡` 标记开头,允许其前有 `##` 标题符或 `>` 引用符;其余 = 人类。**判定只用这一个谓词,human = 它的否定**(见下方 needsReview 代码块)——各仓库的评论首行格式不一(arc `> 🤖 AI Agent…`、did `## 🤖 pr-review`),写死某一种字面量会在别的仓库上全盘误判。给每个**未终结**的 PR 打一个受控 disposition label,下一轮靠它分流:
 
 | disposition label | 含义 | 下一轮动作 |
 |---|---|---|
@@ -104,7 +109,7 @@ gh pr list --state open --limit 100 \
 
 **判定"需要重新 full review"(起 agent)—— 满足任一:**
 
-1. 从没 review 过(无 `🤖 AI Agent PR Review` 评论);或
+1. 从没 review 过(无 agent 评论 —— 按下方谓词判,不是按某个字面前缀);或
 2. **head commit 时间 > 最后一条 agent 评论时间**(代码改了 → 旧结论作废,重判);或
 3. 最后一条 agent 评论**之后有人类评论**(新反馈 → 进 resolve 阶段)。
 
@@ -117,8 +122,17 @@ head=$(gh pr view <n> --json commits --jq '.commits|last|.committedDate')
 all=$( gh api repos/{owner}/{repo}/issues/<n>/comments --paginate --jq '.[]|{t:.created_at, body}'
        gh api repos/{owner}/{repo}/pulls/<n>/comments  --paginate --jq '.[]|{t:.created_at, body}'
        gh api repos/{owner}/{repo}/pulls/<n>/reviews   --paginate --jq '.[]|select(.body!="")|{t:.submitted_at, body}' )
-ai=$(jq -rs '[.[]|select(.body|startswith("> 🤖 AI Agent PR Review"))]|max_by(.t)|.t // empty' <<<"$all")
-hu=$(jq -rs '[.[]|select(.body|startswith("> 🤖")|not)]|max_by(.t)|.t // empty' <<<"$all")
+# 「是 agent 评论」只用**一个**谓词,human = 它的否定 —— 两个独立字面量必然打架:
+# 实测 did:评论首行是 `## 🤖 pr-review`,旧 ai(startswith "> 🤖 AI Agent PR Review")命中
+# 0/14 → 判「从没 review 过」,而旧 hu(not startswith "> 🤖")把同一条算成「人类新意见」。
+# 双重误判 ⇒ 每轮对每个 PR 无条件重 review + 重复刷评论,正是本步骤要防的东西。
+# 只认**第一条有意义的行**(跳过空行与 sticky HTML marker),行首容忍 `##` 标题符和 `>` 引用符。
+# 不要扫全文:人类「引用 agent 评论」来回复时正文里就有 `> 🤖`,扫全文会把人类判成 agent
+# → 判定「无人类回复」→ 不再 review ⇒ 人类反馈被静默吞掉(比原 bug 更坏)。
+FL='def firstline: .body|split("\n")|map(select((test("^[ \t\r]*$")|not) and (test("^[ \t]*<!--")|not)))|first // "";'
+AGENT_RE='^[ \t]*(#{1,6}[ \t]*)?(>[ \t]*)?(🤖|📡)'
+ai=$(jq -rs --arg re "$AGENT_RE" "$FL"'[.[]|select(firstline|test($re))]      |max_by(.t)|.t // empty' <<<"$all")
+hu=$(jq -rs --arg re "$AGENT_RE" "$FL"'[.[]|select(firstline|test($re)|not)]|max_by(.t)|.t // empty' <<<"$all")
 # needsReview = ai 为空(从没 review 过)/ head > ai(新 commit)/ hu > ai(人类新意见)
 if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) ]]; then echo needsReview; fi
 ```
@@ -313,7 +327,7 @@ arc `gate_mode=scripts`:PR 上无 CI,`pre-merge` 脚本是唯一门控(`ci`/`bot
 
 1. **GitHub「内容创建」硬约束**:≤500/h、≤80/min。每 PR 最多 1 条 verdict comment;去重关闭每 twin 1 条 + 1 close;`gh` 遇 403 secondary limit → 退避重试(≤3)、仍失败标 `RATE-LIMITED` 不整批报错(可 resume 补)。
 2. **并发**:~10–14 × 每 agent ~2–3min ≈ ~250–300 POST/h,稳在限速下。别盲目拉高触发 80/min burst。
-3. **幂等**:重复跑 sweep 不应重复评论/重复关。发 comment 前看 PR 上是否已有本轮 `> 🤖 AI Agent PR Review`(同结论就 `--edit-last` 不新发);已关的跳过;已合的从候选移除。
+3. **幂等**:重复跑 sweep 不应重复评论/重复关。发 comment 前看 PR 上是否已有本轮 agent 评论(同上谓词;同结论就 `--edit-last` 不新发);已关的跳过;已合的从候选移除。
 4. **Resumable**:**仅交互式**用 Workflow 编排可续(`resumeFromRunId`)。**无人值守 routine 不用 Workflow**(见 Step 3 铁律)——靠幂等(第 3 条)实现"可续":挂了/限速了,下一轮 cron 凭 disposition label + 既有 verdict comment 自然接着干,不重复、不挂死。
 
 ## 源头治理:别再产生重复 PR(指回 issue-sweep)

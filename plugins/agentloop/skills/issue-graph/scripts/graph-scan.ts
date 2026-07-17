@@ -13,7 +13,7 @@
  * /parent / /dependencies/*）。spinoff HTML 标记不在此读取——它们由
  * backfill.ts 一次性迁成原生边，之后 link.ts 保证新边原生化。
  */
-import { apiPaged, hostRotate, parseArgs, resolveRepo } from "./lib";
+import { apiPaged, hostRotate, isRollupAlreadyReviewed, parseArgs, resolveRepo } from "./lib";
 
 const args = parseArgs(Bun.argv.slice(2));
 const repo = resolveRepo(args.get("repo") as string | undefined);
@@ -54,9 +54,36 @@ const ready = hostRotate(
 );
 
 // ---------- 4. 父级 rollup 候选：open ∧ 有孩子 ∧ 全部孩子已关 ----------
-const rollupCandidates = open
-  .filter((i) => i.subTotal > 0 && i.subCompleted === i.subTotal)
-  .map((i) => ({ number: i.number, title: i.title, labels: i.labels, children: i.subTotal }));
+// 结构筛选之后再过一遍"是否已复核、无新信号"——否则同一个 partial-rollup
+// issue（子 issue 全关但父故意保持 open）会被每轮 sweep 重新核对一遍，纯浪费
+// （#378 实测：15 条重复"父级 rollup 核对"评论，跨 3 台机器、近 3 周）。
+const rollupStructural = open.filter((i) => i.subTotal > 0 && i.subCompleted === i.subTotal);
+const rollupCandidates = rollupStructural
+  .map((i) => {
+    const comments = apiPaged(`repos/${repo}/issues/${i.number}/comments`);
+    const lastComment = comments.length > 0 ? comments[comments.length - 1] : null;
+    const subIssues = apiPaged(`repos/${repo}/issues/${i.number}/sub_issues`);
+    const closedAts = subIssues
+      .map((s: any) => s.closed_at as string | null)
+      .filter((d: unknown): d is string => typeof d === "string");
+    const sortedClosedAts = closedAts.sort();
+    const maxChildClosedAt =
+      sortedClosedAts.length > 0 ? sortedClosedAts[sortedClosedAts.length - 1] : null;
+    const alreadyReviewed = isRollupAlreadyReviewed(
+      lastComment?.body ?? null,
+      lastComment?.created_at ?? null,
+      maxChildClosedAt,
+    );
+    return {
+      number: i.number,
+      title: i.title,
+      labels: i.labels,
+      children: i.subTotal,
+      alreadyReviewed,
+    };
+  })
+  .filter((i) => !i.alreadyReviewed)
+  .map(({ alreadyReviewed, ...rest }) => rest);
 
 // ---------- 5. close-kick：近窗口关闭的 issue → 反查 open 的 parent / dependents ----------
 const cutoff = new Date(Date.now() - windowHours * 3600_000).toISOString();
@@ -115,6 +142,7 @@ const report = {
     ready: ready.length,
     blocked: blocked.length,
     rollupCandidates: rollupCandidates.length,
+    rollupSkippedAlreadyReviewed: rollupStructural.length - rollupCandidates.length,
     recentlyClosed: recentlyClosed.length,
     kicks: kicks.length,
   },

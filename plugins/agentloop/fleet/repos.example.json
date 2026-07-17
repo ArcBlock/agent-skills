@@ -1,0 +1,23 @@
+[
+  {
+    "slug": "ArcBlock/arc",
+    "defaultBranch": "main",
+    "skills": ["issue-sweep", "pr-sweep"],
+    "cloneUrl": "git@github.com:ArcBlock/arc.git",
+    "cadenceMinutes": 60
+  },
+  {
+    "slug": "ArcBlock/did",
+    "defaultBranch": "main",
+    "skills": ["issue-sweep", "pr-sweep"],
+    "cloneUrl": "git@github.com:ArcBlock/did.git",
+    "cadenceMinutes": 120
+  },
+  {
+    "slug": "ArcBlock/arcblock-site",
+    "defaultBranch": "main",
+    "skills": ["issue-sweep"],
+    "cloneUrl": "git@github.com:ArcBlock/arcblock-site.git",
+    "cadenceMinutes": 240
+  }
+]

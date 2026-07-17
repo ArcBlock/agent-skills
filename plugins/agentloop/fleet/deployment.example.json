@@ -1,0 +1,10 @@
+{
+  "runner": "wangshijun-mac-studio",
+  "checkoutBase": "~/.agentloop-fleet",
+  "checkout": { "mode": "worktree", "baseDir": "/Users/wangshijun/Develop/arcblock" },
+  "cover": ["ArcBlock/arc", "ArcBlock/did"],
+  "staggerSeconds": 30,
+  "overrides": {
+    "ArcBlock/did": { "skills": ["issue-sweep"] }
+  }
+}

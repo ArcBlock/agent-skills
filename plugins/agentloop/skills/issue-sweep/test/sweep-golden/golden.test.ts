@@ -73,6 +73,16 @@ describe("isAiAgentComment", () => {
     expect(isAiAgentComment("> 🤖 AI Agent — issue-sweep 2026-07-01\nsome body")).toBe(true);
   });
 
+  // Measured on ArcBlock/did#22: 10 of 14 comments open with a `##` header, not a
+  // blockquote. A blockquote-only predicate scored 0 of 14 there — every PR then looks
+  // "never reviewed", and the same comment ALSO counts as a fresh human reply, so the
+  // sweep re-reviews and re-comments every round. Cross-repo reuse means the opener
+  // style is not ours to assume.
+  it("detects a `##`-header opener (did's format), not just the blockquote form", () => {
+    expect(isAiAgentComment("## 🤖 pr-review\n\n> AI Agent PR Review\n\nverdict")).toBe(true);
+    expect(isAiAgentComment("## 🤖 pr-sweep\n\nbody")).toBe(true);
+  });
+
   it("detects `@ vm` header + `> 🤖 AI Agent` pattern (CLAUDE.md hostname convention)", () => {
     expect(isAiAgentComment("@ vm\n\n> 🤖 AI Agent — pr-sweep 2026-07-01\nbody text")).toBe(true);
   });
@@ -334,5 +344,60 @@ describe("extractSweepTraces", () => {
     const body = '<!--  sweep-trace:  {"ver":1,"gate":"test","val":"ok","run":"r"}  -->';
     const traces = extractSweepTraces(body);
     expect(traces.length).toBe(1);
+  });
+});
+
+/**
+ * Regressions from the first live arc sweep (fleet dry-run smoke). Each case below
+ * is a REAL misclassification observed against arc's open issues, not a hypothetical.
+ */
+describe("live-sweep regressions", () => {
+  it("a deferral word inside a CODE BLOCK is not a deferral (`cancel-in-progress: false`, #1698)", () => {
+    const body = [
+      "> 🤖 AI Agent — issue-sweep",
+      "分析完成。CI 并发配置如下:",
+      "```yaml",
+      "concurrency:",
+      "  cancel-in-progress: false",
+      "```",
+      "结论已给出。",
+    ].join("\n");
+    expect(isNonTerminalAiComment(body)).toBe(false); // `in-progress` only lives in the fence
+  });
+
+  it("prose about Actions queueing is not a 排队中 freeze marker (#1698)", () => {
+    const body = "> 🤖 AI Agent\n该 workflow 会在 runner 上排队等待执行,属正常现象,结论如上。";
+    expect(isNonTerminalAiComment(body)).toBe(false); // bare 排队 no longer matches
+  });
+
+  it("a TERMINAL security escalation is NOT re-picked because its prose says 不在本轮自动修 (#1521)", () => {
+    const body = "> 🤖 AI Agent\n🔴 security-sensitive:证据不充分,不在本轮自动修,交人类判断。";
+    expect(isTerminalAiComment(body)).toBe(true);
+    expect(shouldProcess({ number: 1521, comments: [{ body }] })).toBe(false); // terminal wins
+  });
+
+  it("terminal beats an incidental deferral word (ordering was inverted)", () => {
+    const body = "> 🤖 AI Agent\n已开 PR #1699 修复;其余 TODO 留待后续。";
+    expect(shouldProcess({ number: 1, comments: [{ body }] })).toBe(false);
+  });
+
+  it("the presence board's `> 📡` heartbeat is agent-authored, not fresh human input (#1361)", () => {
+    const body = "> 📡 presence heartbeat — issue-sweep hourly · no-op";
+    expect(isAiAgentComment(body)).toBe(true);
+    expect(shouldProcess({ number: 1361, comments: [{ body }] })).toBe(false);
+  });
+
+  it("an identity-line suffix alone marks a comment as agent-authored (#1347)", () => {
+    expect(isAiAgentComment("报告正文。\n\n@ vm · runner:robert · skills@a2298a3b")).toBe(true);
+  });
+
+  it("an HTML-ESCAPED marker is still extracted (#1278 double-escape, seen live)", () => {
+    const body = '&lt;!-- sweep-trace: {"ver":1,"gate":"g","val":"v","run":"r"} --&gt;';
+    expect(extractSweepTraces(body).length).toBe(1);
+  });
+
+  it("a real human comment is still kept (no false agent-marker)", () => {
+    expect(isAiAgentComment("这个我看了,按方案 B 来吧。")).toBe(false);
+    expect(shouldProcess({ number: 2, comments: [{ body: "按方案 B 来吧。" }] })).toBe(true);
   });
 });

@@ -24,17 +24,69 @@ mkdir -p .claude/verify
 
 guard() { [ -f "$1" ] && [ "$FORCE" -eq 0 ] && { echo "  skip $1 (exists; --force to replace)"; return 1; }; return 0; }
 
+if guard .claude/verify/engine.ts; then
+cat > .claude/verify/engine.ts <<'EOF'
+#!/usr/bin/env bun
+/**
+ * engine — locate the agentloop verification engine (the repo-agnostic lib/).
+ *
+ * The root is resolved at RUNTIME from the first candidate that ACTUALLY holds the
+ * engine, so no machine-specific path is committed and the common case (a normal
+ * global plugin install) needs no env var at all. Every entry imports from here, so
+ * there is exactly one resolution and one error message.
+ */
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+
+/** In priority order; the first one holding lib/scenario.ts wins. */
+function candidates(): string[] {
+  return [
+    // 1. explicit override (fleet driver / CI / a non-standard checkout)
+    process.env.AGENTLOOP_ROOT,
+    // 2. global plugin install via the ArcBlock marketplace
+    `${homedir()}/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop`,
+    // 3. vendored fallback, if this repo chooses to vendor the plugin
+    new URL("../plugins/agentloop", import.meta.url).pathname,
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
+}
+
+/** Absolute path to the engine root, or a hard error explaining how to fix it. */
+export function engineRoot(): string {
+  const tried = candidates();
+  for (const root of tried) {
+    if (existsSync(`${root}/lib/scenario.ts`)) return root;
+  }
+  throw new Error(
+    [
+      "agentloop engine not found — the verification gate cannot run.",
+      "",
+      "Tried (in order):",
+      ...tried.map((p) => `  - ${p}`),
+      "",
+      "Fix: install the agentloop plugin globally (marketplace ArcBlock/agent-skills),",
+      "or point $AGENTLOOP_ROOT at a checkout, e.g.:",
+      "  AGENTLOOP_ROOT=/path/to/agentloop bun .claude/verify/pre-pr.ts",
+    ].join("\n"),
+  );
+}
+
+const ROOT = engineRoot();
+
+// Resolved once here so every entry shares one resolution (and one error message).
+export const { cmd, runScenario } = await import(`${ROOT}/lib/scenario.ts`);
+EOF
+echo "  + wrote .claude/verify/engine.ts"
+fi
+
 if guard .claude/verify/config.ts; then
 cat > .claude/verify/config.ts <<EOF
 #!/usr/bin/env bun
 /**
  * <repo> verification config — the check list the agentloop engine runs.
- * Engine root is resolved at RUNTIME so NO machine-specific path is committed:
- *   \$AGENTLOOP_ROOT (fleet / central clone) ?? ../plugins/agentloop (vendored fallback).
+ * The engine root is resolved at runtime by ./engine.ts (no committed absolute path).
  * Replace the starter checks with your real build/lint/type/test commands.
  */
-const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
-const { cmd } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
+import { cmd } from "./engine.ts";
 
 // STARTER checks (detected package_manager + default_branch) — replace with this
 // repo's REAL build / lint / type-check / test commands.
@@ -58,28 +110,26 @@ echo "  + wrote .claude/verify/config.ts"
 fi
 
 if guard .claude/verify/pre-pr.ts; then
-cat > .claude/verify/pre-pr.ts <<EOF
+cat > .claude/verify/pre-pr.ts <<'EOF'
 #!/usr/bin/env bun
-const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
-const { runScenario } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
-const { prePr } = await import("./config.ts");
+import { runScenario } from "./engine.ts";
+import { prePr } from "./config.ts";
 runScenario(prePr, process.argv);
 EOF
 echo "  + wrote .claude/verify/pre-pr.ts"
 fi
 
 if guard .claude/verify/pre-merge.ts; then
-cat > .claude/verify/pre-merge.ts <<EOF
+cat > .claude/verify/pre-merge.ts <<'EOF'
 #!/usr/bin/env bun
-const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
-const { runScenario } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
-const { preMerge } = await import("./config.ts");
+import { runScenario } from "./engine.ts";
+import { preMerge } from "./config.ts";
 runScenario(preMerge, process.argv);
 EOF
 echo "  + wrote .claude/verify/pre-merge.ts"
 fi
 
 echo "✓ verify scaffold done (runtime-resolved engine; pm=${PM}, base=origin/${DEFB})."
-echo "  Engine root at runtime: \$AGENTLOOP_ROOT, else vendored ../plugins/agentloop — set one before running."
+echo "  Engine resolution (engine.ts, first hit wins): \$AGENTLOOP_ROOT → global marketplace install → vendored."
 echo "  Next (agent): replace the STARTER checks in .claude/verify/config.ts with this repo's real"
-echo "  build / lint / type-check / test, then: AGENTLOOP_ROOT=${PLUGIN_ROOT} bun .claude/verify/pre-pr.ts --only build"
+echo "  build / lint / type-check / test, then: bun .claude/verify/pre-pr.ts --only build"
