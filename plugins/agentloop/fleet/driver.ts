@@ -273,6 +273,13 @@ const realSh: Sh = (cmd) => {
 export type RunState = Record<string, number>; // "<slug>::<skill>" -> last successful run, epoch ms
 export const stateKey = (slug: string, skill: string): string => `${slug}::${skill}`;
 
+// A run is stamped at its START (the cron-fire time), and consecutive hourly fires are ~60min
+// apart — but cron scheduling, load, and bun startup add seconds of jitter, so elapsed can be
+// 59:58 at the next fire. Without slack, `cadence 60` + an hourly cron would read 59.97 < 60 →
+// "not due" → skip to every OTHER hour (arc 60 silently becomes 120). A few minutes of slack
+// absorbs the jitter without meaningfully shifting the cadence (arc runs at ~58min, still hourly).
+export const CADENCE_SLACK_MIN = 3;
+
 /** Due now, or how many minutes remain until this (repo,skill) is due again. */
 export function cadenceDue(
   run: Pick<PlannedRun, "slug" | "skillLocal" | "cadenceMinutes">,
@@ -283,7 +290,7 @@ export function cadenceDue(
   const last = state[stateKey(run.slug, run.skillLocal)];
   if (last === undefined) return { due: true, remainingMin: 0 }; // never run → run now
   const remaining = run.cadenceMinutes - (nowMs - last) / 60_000;
-  return remaining <= 0
+  return remaining <= CADENCE_SLACK_MIN
     ? { due: true, remainingMin: 0 }
     : { due: false, remainingMin: Math.ceil(remaining) };
 }

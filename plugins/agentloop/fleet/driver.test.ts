@@ -304,6 +304,17 @@ describe("cadenceDue (make cadenceMinutes real: one frequent cron, per-repo freq
     expect(cadenceDue(run(), state, T0).due).toBe(true);
   });
 
+  it("ran 58m ago with a 60m cadence → DUE (slack absorbs cron jitter; else 60 → every 2h)", () => {
+    // The hourly cron fires ~59–60m after the last start; without slack this reads "not due".
+    const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 - 58 * 60_000 };
+    expect(cadenceDue(run(), state, T0).due).toBe(true);
+  });
+
+  it("ran 40m ago with a 60m cadence → still NOT due (slack is small, not a free pass)", () => {
+    const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 - 40 * 60_000 };
+    expect(cadenceDue(run(), state, T0).due).toBe(false);
+  });
+
   it("keys by BOTH repo and skill — a quiet repo's cadence doesn't gate a busy one", () => {
     const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 };
     // same repo, different skill → independent, still due
