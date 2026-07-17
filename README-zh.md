@@ -42,7 +42,7 @@ claude
 
 | 插件 | 描述 |
 |-----|------|
-| **loop-engineering** | 自主工程循环引擎：verification gate、issue/PR 巡检+评审、design-review、build-phases、仓库 bootstrap（配置驱动、仓库无关）|
+| **agentloop** | 自主工程循环引擎：verification gate、issue/PR 巡检+评审、design-review、build-phases、仓库 bootstrap（配置驱动、仓库无关）|
 | **blocklet** | Blocklet 完整开发工作流：环境配置、分支管理、PR 提交和版本发布 |
 | **thinking-framework** | 技术思考框架和提案评审方法论（AFS/AINE）|
 | **plugin-development** | 创建、验证和分发 Claude Code 插件 |

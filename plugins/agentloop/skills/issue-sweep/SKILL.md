@@ -354,7 +354,7 @@ Per spin-off issue:
      N=<issue>
      existing=$(gh pr list --state open --json number,headRefName,body --jq \
        '.[] | select((.headRefName|test("(^|[-/])issue-'"$N"'([-/]|$)|-'"$N"'-"))
-                  or (.body|test("(Fixes|Part of) #'"$N"'\\b"))) | .number')
+		  or (.body|test("(Fixes|Part of) #'"$N"'\\b"))) | .number')
      [ -n "$existing" ] && { echo "issue #$N 已有开放 PR: $existing — SKIP"; exit 0; }
      git checkout -B "claude/issue-$N" origin/<default_branch>
      ```

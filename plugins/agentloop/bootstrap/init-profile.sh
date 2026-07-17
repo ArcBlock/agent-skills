@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-engineering — scaffold a repo-profile for a repo adopting the plugin.
+# agentloop — scaffold a repo-profile for a repo adopting the plugin.
 # Writes .claude/repo-profile.md with the required keys + <FILL: …> placeholders.
 # Refuses to overwrite an existing profile (pass --force to replace).
 #   bash <plugin_root>/bootstrap/init-profile.sh [--force]
@@ -29,7 +29,7 @@ else PM="<FILL: npm / pnpm / yarn / bun>"; fi
 cat > "$OUT" <<EOF
 # Repo Profile — ${SLUG}
 
-One source of truth for the values the loop-engineering plugin skills read instead of hardcoding
+One source of truth for the values the agentloop plugin skills read instead of hardcoding
 another repo's facts. Fill in the <FILL: …> values below; arc's own profile (in ArcBlock/arc) is the
 reference implementation to copy patterns from.
 
@@ -40,7 +40,7 @@ reference implementation to copy patterns from.
 | \`repo_slug\` | \`${SLUG}\` |
 | \`default_branch\` | \`${DEFB}\` — auto-detected; skills read this for every fetch / reset / merge-base. Verify it matches your repo's real default. |
 | \`cli_binary\` | <FILL: your repo's CLI, or remove if none> |
-| \`plugin_root\` | \`${PLUGIN_ROOT}\` — where the loop-engineering plugin is checked out. Skills reference their runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. Pin this to a stable checkout (a submodule / vendored clone) for reproducibility. |
+| \`plugin_root\` | \`${PLUGIN_ROOT}\` — where the agentloop plugin is checked out. Skills reference their runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. Pin this to a stable checkout (a submodule / vendored clone) for reproducibility. |
 
 ## Gate & Verification
 

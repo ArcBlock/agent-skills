@@ -70,16 +70,16 @@
       "keywords": ["content-creation", "interview", "writing", "blog", "social-media", "multi-language"]
     },
     {
-      "name": "loop-engineering",
+      "name": "agentloop",
       "description": "Autonomous engineering-loop engine: verification gate, issue/PR sweeps + reviews, issue-graph, design-review, build-phases, and a repo bootstrap. Config-driven and repo-agnostic via .claude/repo-profile.md.",
       "version": "0.1.0",
       "author": {
         "name": "ArcBlock Team"
       },
-      "source": "./plugins/loop-engineering",
+      "source": "./plugins/agentloop",
       "category": "developer-tools",
       "tags": ["loop", "verification", "issue-sweep", "pr-sweep", "code-review", "automation", "engineering"],
-      "keywords": ["loop-engineering", "verification", "sweep", "review", "autonomous", "engineering", "ci-gate"]
+      "keywords": ["agentloop", "verification", "sweep", "review", "autonomous", "engineering", "ci-gate"]
     }
   ]
 }

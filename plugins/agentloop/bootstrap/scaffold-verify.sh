@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-engineering — scaffold a repo's own .claude/verify/ that drives the plugin engine.
+# agentloop — scaffold a repo's own .claude/verify/ that drives the plugin engine.
 # Generates config.ts (the check list — YOU fill in the real checks) + thin pre-pr /
 # pre-merge entries that import runScenario from the plugin. Refuses to overwrite
 # existing files (pass --force).
@@ -28,7 +28,7 @@ if guard .claude/verify/config.ts; then
 cat > .claude/verify/config.ts <<EOF
 #!/usr/bin/env bun
 /**
- * <repo> verification config — the check list the loop-engineering engine runs.
+ * <repo> verification config — the check list the agentloop engine runs.
  * Engine is imported from the plugin checkout (plugin_root); the DATA below is yours.
  * Replace the starter checks with your real build/lint/type/test commands.
  */

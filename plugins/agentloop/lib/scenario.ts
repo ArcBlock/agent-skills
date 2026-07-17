@@ -135,7 +135,7 @@ function parseSelect(argv: string[], flag: string): Set<string> | undefined {
 }
 
 function writeNa(scenario: string, reason: string, sha: string, identity: string): string {
-  const naBody = `## Verification Report — \`${scenario}\` N/A\n\n**Reason**: ${reason}\n\n*This PR is exempt from automated TS verification.*\n\n<sub>Exemption written by the loop-engineering verification engine via \`--na\`.</sub>`;
+  const naBody = `## Verification Report — \`${scenario}\` N/A\n\n**Reason**: ${reason}\n\n*This PR is exempt from automated TS verification.*\n\n<sub>Exemption written by the agentloop verification engine via \`--na\`.</sub>`;
   // Identity header (#1347/#1776), same placement as renderReport's normal path —
   // prepended into the report body so it lands after the sticky marker line,
   // keeping the marker on line 1 for merge-gate.ts's startswith lookup.

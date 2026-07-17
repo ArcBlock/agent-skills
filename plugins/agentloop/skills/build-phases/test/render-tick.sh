@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference implementation of the Watchdog Tick Report format.
-# Mirrors the template in .claude/plugins/loop-engineering/skills/build-phases/SKILL.md Rule 4.
+# Mirrors the template in .claude/plugins/agentloop/skills/build-phases/SKILL.md Rule 4.
 #
 # Usage: render-tick.sh <progress-file>
 # Output: markdown tick report block

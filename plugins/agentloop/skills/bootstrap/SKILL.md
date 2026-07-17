@@ -1,9 +1,9 @@
 ---
 name: bootstrap
-description: One-time setup for a repo adopting the loop-engineering plugin — scaffold repo-profile, create the controlled GitHub labels, scaffold the verification gate, and preflight the environment. Run this once when onboarding a new repo to the loop-engine skills. Does NOT schedule routines (that's the repo's own infra).
+description: One-time setup for a repo adopting the agentloop plugin — scaffold repo-profile, create the controlled GitHub labels, scaffold the verification gate, and preflight the environment. Run this once when onboarding a new repo to the loop-engine skills. Does NOT schedule routines (that's the repo's own infra).
 ---
 
-# Bootstrap — adopt the loop-engineering plugin in a repo
+# Bootstrap — adopt the agentloop plugin in a repo
 
 Run once per repo to go from "plugin installed" to "loop skills can actually run here".
 The supporting environment the sweep/review skills assume (a repo-profile, the coordination

@@ -58,7 +58,7 @@ Based on analysis of high-quality PRs, use this template:
 | `ci` | CI/CD configuration |
 | `build` | Build system changes |
 
-**Scope**: Optional, indicates affected module (e.g., `loop-engineering`, `blocklet`, `auth`)
+**Scope**: Optional, indicates affected module (e.g., `agentloop`, `blocklet`, `auth`)
 
 **Description**:
 - Imperative mood ("add" not "added")
@@ -271,7 +271,7 @@ Display the PR URL and summary to the user.
 
 ### Title
 ```
-feat(loop-engineering): add PR generation skill
+feat(agentloop): add PR generation skill
 ```
 
 ### Body

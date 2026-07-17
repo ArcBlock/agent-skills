@@ -141,8 +141,8 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) ]]; then echo
    ```bash
    gh pr list --state open --json number,headRefName,body --jq '
      .[] | {n:.number, br:.headRefName,
-             issue:(.headRefName|capture("-(?<i>[0-9]+)-")?.i
-                    // (.body|capture("(?:Fixes|Part of) #(?<i>[0-9]+)")?.i))}' \
+	     issue:(.headRefName|capture("-(?<i>[0-9]+)-")?.i
+		    // (.body|capture("(?:Fixes|Part of) #(?<i>[0-9]+)")?.i))}' \
    | python3 -c "import json,sys,collections; \
        d=[json.loads(l) for l in sys.stdin]; \
        m=collections.defaultdict(list); [m[x['issue']].append(x['n']) for x in d if x['issue']]; \

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-engineering preflight — verify a repo has what the loop-engine skills need.
+# agentloop preflight — verify a repo has what the loop-engine skills need.
 # Turns silent half-failures ("label won't apply", "token unresolved") into clear,
 # up-front "missing X" errors. Run from the CONSUMING repo root:
 #   bash <plugin_root>/bootstrap/check-env.sh
@@ -10,7 +10,7 @@ ok()  { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; fail=1; }
 wn()  { printf '  \033[33m⚠\033[0m %s\n' "$1"; warn=1; }
 
-echo "== loop-engineering check-env =="
+echo "== agentloop check-env =="
 
 # 1. Required CLIs (skills shell out to all of these). On a miss we SUGGEST a platform
 #    install command but never run it — repairing the env is the agent's job (it can judge

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference implementation of build-phases watchdog state machine.
-# Mirrors the logic in .claude/plugins/loop-engineering/skills/build-phases/SKILL.md Rule 4.
+# Mirrors the logic in .claude/plugins/agentloop/skills/build-phases/SKILL.md Rule 4.
 #
 # Usage: watchdog.sh <progress-file>
 # Output: one of [INIT, SPAWN_NEXT, WAIT, RESPAWN, ESCALATE, COMPLETE, SPAWN_CURRENT]
@@ -61,7 +61,7 @@ if [[ "$executor_status" == "running" ]]; then
     exit 0
   fi
   heartbeat_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$heartbeat_iso" +%s 2>/dev/null || \
-                    date -u -d "$heartbeat_iso" +%s 2>/dev/null || echo 0)
+		    date -u -d "$heartbeat_iso" +%s 2>/dev/null || echo 0)
   age=$((NOW_EPOCH - heartbeat_epoch))
   if [[ "$age" -lt "$STALE_SECONDS" ]]; then
     echo "WAIT"

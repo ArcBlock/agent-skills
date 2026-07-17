@@ -3,7 +3,7 @@
  * These are extracted from the SKILL.md prose so they can be unit-tested
  * without LLM calls — the "驱动层" (L1 Option B) of the golden-scenario harness.
  *
- * See: .claude/plugins/loop-engineering/skills/issue-sweep/SKILL.md Step 2
+ * See: .claude/plugins/agentloop/skills/issue-sweep/SKILL.md Step 2
  *      ArcBlock/arc#1207 (L1 golden-scenario eval harness)
  *      ArcBlock/arc#1211 (L0/L1/L2/L3 framework discussion)
  */

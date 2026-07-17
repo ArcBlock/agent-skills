@@ -45,12 +45,12 @@ Based on project history analysis, use the following types:
 Scope indicates the affected module or area, enclosed in parentheses:
 
 ```
-feat(loop-engineering): add verification skill
+feat(agentloop): add verification skill
 fix(auth): resolve token refresh issue
 ```
 
 Common scopes in this project:
-- Plugin names: `loop-engineering`, `blocklet`, `arcblock-context`
+- Plugin names: `agentloop`, `blocklet`, `arcblock-context`
 - Skill names: `blocklet-dev-setup`, `blocklet-pr`
 - Module names: specific functional modules
 
@@ -192,7 +192,7 @@ git log -1 --oneline
 feat: parse blocklet urls from dev output instead of constructing from did
 feat: add blocklet-branch skill for branch management
 feat: enhance blocklet-server-dev-setup skill with GitHub CLI authentication guidance
-feat(loop-engineering): add verification skill (#1)
+feat(agentloop): add verification skill (#1)
 fix: gh move top
 docs: prefer git URL format for marketplace installation
 chore: initial commit

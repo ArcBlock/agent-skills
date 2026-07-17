@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-engineering — materialize the controlled labels the sweep/review skills rely on.
+# agentloop — materialize the controlled labels the sweep/review skills rely on.
 # Idempotent: creates missing labels, syncs colour/description of existing ones.
 # Run from the CONSUMING repo root (uses that repo's origin):
 #   bash <plugin_root>/bootstrap/sync-labels.sh [--dry-run]

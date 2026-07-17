@@ -1,4 +1,4 @@
-# loop-engineering
+# agentloop
 
 Repo-agnostic engineering-loop engine, extracted from `ArcBlock/arc`'s
 `.claude/skills/`. The engine holds the mechanics; each repo keeps its specifics
@@ -11,7 +11,7 @@ issue-sweep / issue-review / pr-sweep / pr-review / impact-check).
 ## What's in the plugin
 
 ```
-.claude-plugin/plugin.json     # manifest (name: loop-engineering)
+.claude-plugin/plugin.json     # manifest (name: agentloop)
 lib/report.ts                  # CheckResult contract + deterministic run/render helpers
 lib/comment.ts                 # sticky PR-comment upsert (marker-keyed, gh REST)
 lib/gate.ts                    # requireStickyGate — the merge-gate primitive
@@ -29,7 +29,7 @@ loaded into any repo via `--plugin-dir`.
 
 A moved skill only loads when the plugin is loaded. Marketplace auto-install does
 **not** run under `claude -p` (verified), so every routine invocation must pass
-`--plugin-dir .claude/plugins/loop-engineering`. arc's `setup-routines` bakes this
+`--plugin-dir .claude/plugins/agentloop`. arc's `setup-routines` bakes this
 into the generated crontab. A bad `--plugin-dir` path fails **silently** (exit 0,
 skill just absent) — guard it with an existence check on `.claude-plugin/plugin.json`.
 
@@ -48,7 +48,7 @@ skill just absent) — guard it with an existence check on `.claude-plugin/plugi
 - **Deterministic runner** — a repo's thin `.claude/verify/pre-pr.ts` imports
   `runScenario` from this engine and calls `runScenario(config, process.argv)`.
   During in-repo development the import is a relative path into
-  `.claude/plugins/loop-engineering/`; once this engine moves to its own repo the
+  `.claude/plugins/agentloop/`; once this engine moves to its own repo the
   import points at a pinned checkout.
 - **Prompt skills** — the `skills/` here load into Claude Code. For headless /
   cron use the reliable path is `claude -p --plugin-dir <this-dir> …` (a committed

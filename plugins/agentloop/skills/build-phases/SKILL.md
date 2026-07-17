@@ -340,7 +340,7 @@ Agent(
     You are a build-phases EXECUTOR for exactly ONE phase. Repo root: {abs-repo-root}.
 
     Read {planning-dir}/tasks.md and execute ONLY Phase {N}, following
-    .claude/plugins/loop-engineering/skills/build-phases/SKILL.md sections 2.1-2.5 (implement → 3-layer
+    .claude/plugins/agentloop/skills/build-phases/SKILL.md sections 2.1-2.5 (implement → 3-layer
     verify → commit → simplify → re-verify → commit). Do NOT run the design
     review — the parent session dispatches an independent reviewer.
 
@@ -380,7 +380,7 @@ Agent 工具的 launch 是同步确认的（返回 agentId 即受理），不需
 状态机 + tick 渲染有参考实现和 fixture 测试在 `test/`。每次改 Watchdog 状态机或 tick 报告格式时先改 `test/watchdog.sh` / `test/render-tick.sh` + fixtures，确认全部 pass 再改本文档：
 
 ```bash
-.claude/plugins/loop-engineering/skills/build-phases/test/run-tests.sh
+.claude/plugins/agentloop/skills/build-phases/test/run-tests.sh
 ```
 
 Fixture 覆盖：init / fresh / running-fresh / running-stale / phase-done / all-done / error / crashed / respawn-limit。Render 测试还覆盖 "Recent output" 面板（有 log 时 tail 文件，无 log 时显示占位符）。sub-agent 重写后 stale 阈值从 10 分钟改为 30 分钟，脚本默认值与 fixture 已同步更新（`STALE_SECONDS` 默认 1800）。

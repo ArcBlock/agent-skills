@@ -9,7 +9,7 @@ import { describe, expect, it } from "bun:test";
  * References:
  *   ArcBlock/arc#1207 — L1 golden-scenario eval harness acceptance criteria
  *   ArcBlock/arc#1211 — L0/L1/L2/L3 framework discussion
- *   .claude/plugins/loop-engineering/skills/issue-sweep/SKILL.md Step 2
+ *   .claude/plugins/agentloop/skills/issue-sweep/SKILL.md Step 2
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";

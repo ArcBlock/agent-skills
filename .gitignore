@@ -4,7 +4,7 @@
 .claude/temp/
 *.log
 # …but keep the build-phases test fixture (a .log that IS a committed fixture)
-!plugins/loop-engineering/skills/build-phases/test/fixtures/*.log
+!plugins/agentloop/skills/build-phases/test/fixtures/*.log
 
 # OS Files
 .DS_Store

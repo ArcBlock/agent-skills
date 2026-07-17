@@ -3,7 +3,7 @@ name: verification
 description: Run a repo's deterministic verification gate (build/lint/types/tests/etc.) and post one measured report to the PR. Use before opening or merging a PR. The engine is repo-agnostic; the check list comes from the repo's own .claude/verify/config.ts.
 ---
 
-# verification (loop-engineering engine)
+# verification (agentloop engine)
 
 > **Repo-agnostic.** The check list and gate commands come from the consuming repo:
 > `.claude/repo-profile.md` (`gate_mode`, `verification_entry`, `pre_merge_entry`) and
