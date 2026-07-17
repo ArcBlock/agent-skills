@@ -50,9 +50,20 @@ version_of() { # read plugin.json's version without needing jq
 # A marketplace install lives in a version-pinned cache dir with NO .git, so a git fingerprint
 # is impossible there — and unnecessary, since the version IS the identity. Only a checked-out
 # plugin (vendored, or the dev source) gets the sharper commit hash.
+#
+# `rev-parse --git-dir` is NOT a sufficient test: git walks UP, so a cache install under a
+# versioned ~/.claude reports that unrelated repo, and its dirty state then leaks into every
+# identity line as a permanent "-dirty" (measured: ~/.claude had 62 dirty entries, so every
+# repo consuming the marketplace install claimed its skills were locally modified). A tree
+# only counts if it actually TRACKS the plugin manifest.
+in_own_git_tree() {
+  git -C "$1" rev-parse --git-dir >/dev/null 2>&1 &&
+    git -C "$1" ls-files --error-unmatch ".claude-plugin/plugin.json" >/dev/null 2>&1
+}
+
 skills_hash=""
 dirty=""
-if git -C "${plugin_root}" rev-parse --git-dir >/dev/null 2>&1; then
+if in_own_git_tree "${plugin_root}"; then
   repo_root=$(git -C "${plugin_root}" rev-parse --show-toplevel 2>/dev/null || echo "${plugin_root}")
   # Fingerprint the plugin, plus this repo's own skills tree when it has one (arc does).
   paths="${plugin_root}"
