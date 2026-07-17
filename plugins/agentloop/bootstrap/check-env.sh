@@ -54,16 +54,21 @@ if [ -f "$PROFILE" ]; then
     grep -q "\`$k\`" "$PROFILE" && ok "profile key: $k" \
       || bad "profile MISSING key: $k (add it, or run init-profile.sh for a template)"
   done
-  # 5. plugin_root resolves to a real plugin checkout.
-  PR=$(grep '`plugin_root`' "$PROFILE" | grep -oE '`[^`]+`' | sed -n '2p' | tr -d '`')
+  # 5. plugin root resolves to a real plugin checkout. Runtime resolution order is
+  #    $AGENTLOOP_ROOT (central / fleet clone) → the profile's plugin_root (vendored
+  #    path, usually .claude/plugins/agentloop). A bad path fails SILENTLY at load
+  #    time (bad --plugin-dir / missing import), so hard-verify it here.
+  PROF_PR=$(grep '`plugin_root`' "$PROFILE" | grep -oE '`[^`]+`' | sed -n '2p' | tr -d '`')
+  PR="${AGENTLOOP_ROOT:-$PROF_PR}"
+  SRC="${AGENTLOOP_ROOT:+\$AGENTLOOP_ROOT}"; SRC="${SRC:-profile plugin_root}"
   if [ -n "$PR" ]; then
     if [ -f "$PR/lib/report.ts" ] && [ -d "$PR/skills" ]; then
-      ok "plugin_root resolves: $PR (engine + skills present)"
+      ok "plugin root resolves ($SRC → $PR): engine + skills present"
     else
-      bad "plugin_root '$PR' has no lib/report.ts + skills/ — is the plugin checked out there?"
+      bad "plugin root '$PR' (from $SRC) has no lib/report.ts + skills/ — vendor the plugin at .claude/plugins/agentloop or set \$AGENTLOOP_ROOT to a checkout"
     fi
   else
-    wn "could not parse a plugin_root value from the profile"
+    bad "no plugin root resolved — set \$AGENTLOOP_ROOT or a profile plugin_root (vendor at .claude/plugins/agentloop)"
   fi
 else
   bad "$PROFILE MISSING — run: bash <plugin_root>/bootstrap/init-profile.sh"

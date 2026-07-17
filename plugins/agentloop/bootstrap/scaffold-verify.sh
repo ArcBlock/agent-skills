@@ -29,24 +29,26 @@ cat > .claude/verify/config.ts <<EOF
 #!/usr/bin/env bun
 /**
  * <repo> verification config — the check list the agentloop engine runs.
- * Engine is imported from the plugin checkout (plugin_root); the DATA below is yours.
+ * Engine root is resolved at RUNTIME so NO machine-specific path is committed:
+ *   \$AGENTLOOP_ROOT (fleet / central clone) ?? ../plugins/agentloop (vendored fallback).
  * Replace the starter checks with your real build/lint/type/test commands.
  */
-import { cmd, type ScenarioConfig } from "${PLUGIN_ROOT}/lib/scenario.ts";
+const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
+const { cmd } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
 
 // STARTER checks (detected package_manager + default_branch) — replace with this
 // repo's REAL build / lint / type-check / test commands.
-export const prePr: ScenarioConfig = {
+export const prePr = {
   scenario: "pre-pr",
   baseBranch: "origin/${DEFB}",
   checks: [
     cmd({ id: "build", title: "Build", command: "${PM} run build" }),
     cmd({ id: "test",  title: "Test",  command: "${PM} run test" }),
-    // add: lint / type-check / your repo-specific logic-checks (import them here)
+    // add: lint / type-check / your repo-specific logic-checks
   ],
 };
 
-export const preMerge: ScenarioConfig = {
+export const preMerge = {
   scenario: "pre-merge",
   resolveBase: () => "origin/${DEFB}", // default-branch TIP as affected base
   checks: prePr.checks,
@@ -58,8 +60,9 @@ fi
 if guard .claude/verify/pre-pr.ts; then
 cat > .claude/verify/pre-pr.ts <<EOF
 #!/usr/bin/env bun
-import { runScenario } from "${PLUGIN_ROOT}/lib/scenario.ts";
-import { prePr } from "./config.ts";
+const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
+const { runScenario } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
+const { prePr } = await import("./config.ts");
 runScenario(prePr, process.argv);
 EOF
 echo "  + wrote .claude/verify/pre-pr.ts"
@@ -68,13 +71,15 @@ fi
 if guard .claude/verify/pre-merge.ts; then
 cat > .claude/verify/pre-merge.ts <<EOF
 #!/usr/bin/env bun
-import { runScenario } from "${PLUGIN_ROOT}/lib/scenario.ts";
-import { preMerge } from "./config.ts";
+const AGENTLOOP_ROOT = process.env.AGENTLOOP_ROOT ?? new URL("../plugins/agentloop", import.meta.url).pathname;
+const { runScenario } = await import(AGENTLOOP_ROOT + "/lib/scenario.ts");
+const { preMerge } = await import("./config.ts");
 runScenario(preMerge, process.argv);
 EOF
 echo "  + wrote .claude/verify/pre-merge.ts"
 fi
 
-echo "✓ verify scaffold done (engine from ${PLUGIN_ROOT}; pm=${PM}, base=origin/${DEFB})."
+echo "✓ verify scaffold done (runtime-resolved engine; pm=${PM}, base=origin/${DEFB})."
+echo "  Engine root at runtime: \$AGENTLOOP_ROOT, else vendored ../plugins/agentloop — set one before running."
 echo "  Next (agent): replace the STARTER checks in .claude/verify/config.ts with this repo's real"
-echo "  build / lint / type-check / test (add arch/logic checks), then: bun .claude/verify/pre-pr.ts --only build"
+echo "  build / lint / type-check / test, then: AGENTLOOP_ROOT=${PLUGIN_ROOT} bun .claude/verify/pre-pr.ts --only build"

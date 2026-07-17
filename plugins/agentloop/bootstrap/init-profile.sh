@@ -40,7 +40,7 @@ reference implementation to copy patterns from.
 | \`repo_slug\` | \`${SLUG}\` |
 | \`default_branch\` | \`${DEFB}\` — auto-detected; skills read this for every fetch / reset / merge-base. Verify it matches your repo's real default. |
 | \`cli_binary\` | <FILL: your repo's CLI, or remove if none> |
-| \`plugin_root\` | \`${PLUGIN_ROOT}\` — where the agentloop plugin is checked out. Skills reference their runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. Pin this to a stable checkout (a submodule / vendored clone) for reproducibility. |
+| \`plugin_root\` | \`.claude/plugins/agentloop\` — where the plugin is vendored (recommended: a submodule / vendored clone kept fresh with \`publish-agentloop.sh\`). Resolved at runtime as \`\$AGENTLOOP_ROOT\` (central / fleet clone) → this vendored path — **no machine-specific absolute path is committed**. Skills reference runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. |
 
 ## Gate & Verification
 
@@ -128,6 +128,6 @@ Your repo's own lessons (the loop skills carry the generic lesson, not issue num
 case narratives under \`.claude/case-law/\` if you grow an appendix.
 EOF
 
-echo "✓ wrote $OUT (repo_slug=${SLUG}, default_branch=${DEFB}, package_manager=${PM}, plugin_root=${PLUGIN_ROOT})."
+echo "✓ wrote $OUT (repo_slug=${SLUG}, default_branch=${DEFB}, package_manager=${PM}, plugin_root=.claude/plugins/agentloop; \$AGENTLOOP_ROOT overrides at runtime)."
 echo "  Auto-detected the above. The remaining <FILL: …> (toolchain commands, face paths, gate_mode,"
 echo "  conventions) need judgement — the bootstrap skill fills them by reading the repo, or fill by hand."
