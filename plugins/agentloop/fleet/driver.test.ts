@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import {
+  cadenceDue,
   checkoutDir,
   type DeploymentConfig,
   expandHome,
@@ -13,6 +14,7 @@ import {
   renderPrompt,
   resolveCovered,
   runEnv,
+  stateKey,
 } from "./driver.ts";
 
 const CATALOG: RepoEntry[] = [
@@ -266,6 +268,44 @@ describe("setupCommand", () => {
 
   it("is absent when the catalog declares none", () => {
     expect(planRuns(CATALOG, base({ cover: ["ArcBlock/did"] }))[0].setupCommand).toBeUndefined();
+  });
+});
+
+describe("cadenceDue (make cadenceMinutes real: one frequent cron, per-repo frequencies)", () => {
+  const run = (over = {}) => ({
+    slug: "ArcBlock/arc",
+    skillLocal: "issue-sweep",
+    cadenceMinutes: 60,
+    ...over,
+  });
+  const T0 = 1_000_000_000_000;
+
+  it("no cadence declared → always due", () => {
+    expect(cadenceDue(run({ cadenceMinutes: undefined }), {}, T0).due).toBe(true);
+  });
+
+  it("never run before → due now (empty state)", () => {
+    expect(cadenceDue(run(), {}, T0).due).toBe(true);
+  });
+
+  it("ran 30m ago with a 60m cadence → NOT due, ~30m remaining", () => {
+    const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 - 30 * 60_000 };
+    const r = cadenceDue(run(), state, T0);
+    expect(r.due).toBe(false);
+    expect(r.remainingMin).toBe(30);
+  });
+
+  it("ran 61m ago with a 60m cadence → due again", () => {
+    const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 - 61 * 60_000 };
+    expect(cadenceDue(run(), state, T0).due).toBe(true);
+  });
+
+  it("keys by BOTH repo and skill — a quiet repo's cadence doesn't gate a busy one", () => {
+    const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 };
+    // same repo, different skill → independent, still due
+    expect(cadenceDue(run({ skillLocal: "pr-sweep" }), state, T0).due).toBe(true);
+    // different repo, same skill → independent, still due
+    expect(cadenceDue(run({ slug: "ArcBlock/did" }), state, T0).due).toBe(true);
   });
 });
 

@@ -15,7 +15,7 @@
  *     --only   : one repo;  --skill : one skill (so cron can give each routine its own cadence)
  *     --run    : ensure a fresh checkout, install deps (setupCommand), then run headless
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { type CheckoutPolicy, ensureCheckout, type Sh } from "./checkout.ts";
 
@@ -34,7 +34,9 @@ export interface RepoEntry {
   skills: string[];
   /** clone URL (clone-on-demand); optional if the checkout already exists */
   cloneUrl?: string;
-  /** advisory sweep-frequency hint (minutes); the scheduler / P6 enforces it, not the driver */
+  /** Effective sweep frequency for THIS repo. One frequent cron can cover many repos at
+   *  different rates: the driver skips a (repo,skill) that ran within cadenceMinutes, tracked
+   *  in <checkoutBase>/.fleet-state.json (stamped on success). `--force` ignores it. */
   cadenceMinutes?: number;
   /**
    * Command run inside the checkout after it is materialized, before the skill starts —
@@ -135,6 +137,7 @@ export interface PlannedRun {
   permFlags: string[];
   modelFlags: string[];
   setupCommand?: string;
+  cadenceMinutes?: number;
   command: string; // readable dry-run representation
 }
 
@@ -220,6 +223,7 @@ export function planRuns(
         permFlags,
         modelFlags,
         setupCommand: r.setupCommand,
+        cadenceMinutes: r.cadenceMinutes,
         slug: r.slug,
         skill: `${NS}:${s}`,
         skillLocal: s,
@@ -248,6 +252,47 @@ const realSh: Sh = (cmd) => {
   const out = new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
   return { code: p.exitCode ?? 1, out };
 };
+
+// ── cadence ─────────────────────────────────────────────────────────────────
+// cadenceMinutes lets ONE cron cover many repos at DIFFERENT effective frequencies
+// (arc every 60, a quiet repo every 240). The cron fires often; the driver decides per
+// (repo,skill) whether enough time has passed. Without this the field was decorative and a
+// single hourly cron swept every repo every hour regardless of what the catalog declared.
+export type RunState = Record<string, number>; // "<slug>::<skill>" -> last successful run, epoch ms
+export const stateKey = (slug: string, skill: string): string => `${slug}::${skill}`;
+
+/** Due now, or how many minutes remain until this (repo,skill) is due again. */
+export function cadenceDue(
+  run: Pick<PlannedRun, "slug" | "skillLocal" | "cadenceMinutes">,
+  state: RunState,
+  nowMs: number,
+): { due: boolean; remainingMin: number } {
+  if (!run.cadenceMinutes || run.cadenceMinutes <= 0) return { due: true, remainingMin: 0 };
+  const last = state[stateKey(run.slug, run.skillLocal)];
+  if (last === undefined) return { due: true, remainingMin: 0 }; // never run → run now
+  const remaining = run.cadenceMinutes - (nowMs - last) / 60_000;
+  return remaining <= 0
+    ? { due: true, remainingMin: 0 }
+    : { due: false, remainingMin: Math.ceil(remaining) };
+}
+
+const statePath = (checkoutBase: string): string =>
+  `${expandHome(checkoutBase).replace(/\/+$/, "")}/.fleet-state.json`;
+
+function readState(path: string): RunState {
+  try {
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, "utf8")) as RunState;
+  } catch {
+    return {}; // a corrupt state file must not wedge the fleet — treat as "everything due"
+  }
+}
+
+function recordRun(path: string, slug: string, skill: string, nowMs: number): void {
+  const s = readState(path);
+  s[stateKey(slug, skill)] = nowMs;
+  writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
+}
 
 const tailOf = (s: string, n = 400): string => (s.length > n ? `…${s.slice(-n)}` : s).trim();
 
@@ -396,9 +441,23 @@ if (import.meta.main) {
     `# ${plan.length} run(s) across ${new Set(plan.map((p) => p.slug)).size} repo(s). Claiming is per-item via GitHub labels.`,
   );
 
+  // Cadence gate: a repo declaring cadenceMinutes is skipped if it ran too recently, so one
+  // frequent cron can cover many repos at their own frequencies. `--force` overrides (manual run).
+  const force = argv.includes("--force");
+  const now = Number(process.env.FLEET_NOW_MS) || Date.now();
+  const sPath = statePath(cfg.checkoutBase);
+  const state = readState(sPath);
+  const gated = plan.map((p) => ({ p, ...cadenceDue(p, force ? {} : state, now) }));
+
   if (!run) {
-    for (const p of plan) console.log(`\n[${p.slug} · ${p.skill}]\n${p.command}`);
-    console.log("\n(dry-run — pass --run to execute serially with a stagger.)");
+    for (const { p, due, remainingMin } of gated) {
+      const tag = due ? "" : `  [cadence: skip, due in ${remainingMin}m]`;
+      console.log(`\n[${p.slug} · ${p.skill}]${tag}\n${p.command}`);
+    }
+    const due = gated.filter((g) => g.due).length;
+    console.log(
+      `\n(dry-run — ${due}/${plan.length} due now. Pass --run to execute; --force ignores cadence.)`,
+    );
     process.exit(0);
   }
 
@@ -413,16 +472,30 @@ if (import.meta.main) {
     if (!names.length) throw new Error(`envFile set no variables: ${cfg.envFile}`);
   }
 
+  const dueRuns = gated.filter((g) => g.due).map((g) => g.p);
+  const skipped = gated.length - dueRuns.length;
+  if (skipped) {
+    for (const g of gated.filter((g) => !g.due)) {
+      console.log(
+        `# skip [${g.p.slug} · ${g.p.skill}] — within cadence, due in ${g.remainingMin}m`,
+      );
+    }
+  }
+
   const stagger = (cfg.staggerSeconds ?? 30) * 1000;
   let failed = 0;
-  for (let i = 0; i < plan.length; i++) {
-    const p = plan[i];
-    console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${plan.length})`);
+  for (let i = 0; i < dueRuns.length; i++) {
+    const p = dueRuns[i];
+    console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${dueRuns.length})`);
     const res = await executeRun(p, cfg);
     console.log(`  ${res.ok ? "✓" : "✗"} ${res.detail}`);
-    if (!res.ok) failed++;
-    if (i < plan.length - 1 && stagger > 0) await Bun.sleep(stagger);
+    if (res.ok)
+      recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
+    else failed++;
+    if (i < dueRuns.length - 1 && stagger > 0) await Bun.sleep(stagger);
   }
-  console.log(`\nDone: ${plan.length - failed}/${plan.length} ok, ${failed} failed.`);
+  console.log(
+    `\nDone: ${dueRuns.length - failed}/${dueRuns.length} ok, ${failed} failed${skipped ? `, ${skipped} skipped (cadence)` : ""}.`,
+  );
   process.exit(failed ? 1 : 0);
 }
