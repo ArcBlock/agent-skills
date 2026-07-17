@@ -1,15 +1,18 @@
 #!/usr/bin/env bun
-import { describe, expect, it } from "bun:test";
-import { homedir } from "node:os";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import {
   checkoutDir,
   type DeploymentConfig,
   expandHome,
+  loadEnvFile,
   permissionFlags,
   planRuns,
   type RepoEntry,
   renderPrompt,
   resolveCovered,
+  runEnv,
 } from "./driver.ts";
 
 const CATALOG: RepoEntry[] = [
@@ -140,6 +143,141 @@ describe("renderPrompt", () => {
     expect(out).not.toContain("{{RUNNER}}");
     expect(out).toContain("agentloop:issue-sweep"); // namespaced, per the namespace fix
     expect(out.toLowerCase()).toContain("unattended");
+  });
+});
+
+describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no environment)", () => {
+  const T = `${tmpdir()}/agentloop-envfile-test`;
+  const file = `${T}/env`;
+  beforeAll(() => {
+    mkdirSync(T, { recursive: true });
+    // The shape the live cron block uses: a sourced file holding the credentials.
+    writeFileSync(
+      file,
+      'export GH_TOKEN=gho_faketoken\nexport CLAUDE_CODE_OAUTH_TOKEN=sk-ant-fake\nexport PATH="$PATH:/added/bin"\n',
+    );
+  });
+  afterAll(() => rmSync(T, { recursive: true, force: true }));
+
+  it("returns the vars the file sets, and resolves $PATH-style appends against the real shell", () => {
+    const e = loadEnvFile(file);
+    expect(e.GH_TOKEN).toBe("gho_faketoken");
+    expect(e.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-fake");
+    expect(e.PATH).toContain("/added/bin");
+  });
+
+  it("does NOT import the shell's own noise (only what the file changed)", () => {
+    const e = loadEnvFile(file);
+    expect(e.SHLVL).toBeUndefined();
+    expect(e._).toBeUndefined();
+  });
+
+  it("throws on a missing envFile — a nightly run without credentials must not look like a quiet no-op", () => {
+    expect(() => loadEnvFile(`${T}/nope`)).toThrow(/not readable/);
+  });
+
+  it("layers process env < envFile < env < skillEnv, and expands {{CHECKOUT}}", () => {
+    const cfg = base({
+      envFile: file,
+      env: { ARC_HOME: "{{CHECKOUT}}/.arc-home", SHARED: "deployment" },
+      skillEnv: { "issue-sweep": { ARC_SERVICE_PORT: "4910", SHARED: "skill-wins" } },
+    });
+    const run = {
+      skillLocal: "issue-sweep",
+      checkoutPath: "/co/x",
+      root: "/plugins",
+      runner: "r1",
+    };
+    const e = runEnv(run, cfg, { PRE_EXISTING: "kept", SHARED: "process" });
+    expect(e.PRE_EXISTING).toBe("kept");
+    expect(e.GH_TOKEN).toBe("gho_faketoken"); // envFile beats process env
+    expect(e.ARC_HOME).toBe("/co/x/.arc-home"); // {{CHECKOUT}} expanded
+    expect(e.ARC_SERVICE_PORT).toBe("4910");
+    expect(e.SHARED).toBe("skill-wins"); // per-skill has the last word
+    // Driver-owned identity must not be overridable by config.
+    expect(e.ARC_UNATTENDED).toBe("1");
+    expect(e.ARC_AGENT_RUNNER).toBe("r1");
+  });
+
+  it("gives each routine its own ports — the collision the hand-written cron block avoided", () => {
+    const cfg = base({
+      skillEnv: {
+        "issue-sweep": { ARC_SERVICE_PORT: "4910", ARC_WORKER_PORT: "8797" },
+        "pr-sweep": { ARC_SERVICE_PORT: "4920", ARC_WORKER_PORT: "8807" },
+      },
+    });
+    const mk = (s: string) => ({ skillLocal: s, checkoutPath: "/co/x", root: "/p", runner: "r" });
+    expect(runEnv(mk("issue-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4910");
+    expect(runEnv(mk("pr-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4920");
+  });
+
+  it("NEVER prints secret values in the plan — only that the file is sourced", () => {
+    const plan = planRuns(
+      CATALOG,
+      base({ cover: ["ArcBlock/arc"], envFile: file, env: { TOKENISH: "s3cret" } }),
+    );
+    expect(plan[0].command).toContain(`. ${file}`);
+    expect(plan[0].command).toContain("TOKENISH=…");
+    expect(plan[0].command).not.toContain("s3cret");
+    expect(plan[0].command).not.toContain("gho_faketoken");
+  });
+});
+
+describe("checkoutPerSkill + --skill (independent cadences, the shape the cron block had)", () => {
+  it("defaults to ONE tree per repo (skills share it, so they must run serially)", () => {
+    const plan = planRuns(CATALOG, base({ cover: ["ArcBlock/arc"] }));
+    expect(plan.map((p) => p.checkoutPath)).toEqual(["/co/ArcBlock__arc", "/co/ArcBlock__arc"]);
+  });
+
+  it("checkoutPerSkill gives each routine its own tree — so cron can run them concurrently", () => {
+    const plan = planRuns(CATALOG, base({ cover: ["ArcBlock/arc"], checkoutPerSkill: true }));
+    expect(plan.map((p) => p.checkoutPath)).toEqual([
+      "/co/ArcBlock__arc__issue-sweep",
+      "/co/ArcBlock__arc__pr-sweep",
+    ]);
+  });
+
+  it("--skill narrows to one routine (cron: :09 issue-sweep, :39 pr-sweep)", () => {
+    const plan = planRuns(CATALOG, base(), undefined, "pr-sweep");
+    expect(plan.every((p) => p.skillLocal === "pr-sweep")).toBe(true);
+    expect(plan.map((p) => p.slug)).toEqual(["ArcBlock/arc", "ArcBlock/did"]); // arcblock-site has no pr-sweep
+  });
+
+  it("--only + --skill compose to exactly one run", () => {
+    const plan = planRuns(CATALOG, base(), "ArcBlock/did", "issue-sweep");
+    expect(plan.length).toBe(1);
+    expect(plan[0].skill).toBe("agentloop:issue-sweep");
+  });
+
+  it("an unknown --skill plans nothing rather than silently running everything", () => {
+    expect(planRuns(CATALOG, base(), undefined, "no-such-skill")).toEqual([]);
+  });
+});
+
+describe("setupCommand", () => {
+  it("carries the catalog's install command into the run (a fresh tree has no node_modules)", () => {
+    const cat: RepoEntry[] = [
+      { ...CATALOG[0], skills: ["issue-sweep"], setupCommand: "pnpm install --frozen-lockfile" },
+    ];
+    expect(planRuns(cat, base({ cover: ["ArcBlock/arc"] }))[0].setupCommand).toBe(
+      "pnpm install --frozen-lockfile",
+    );
+  });
+
+  it("is absent when the catalog declares none", () => {
+    expect(planRuns(CATALOG, base({ cover: ["ArcBlock/did"] }))[0].setupCommand).toBeUndefined();
+  });
+});
+
+describe("model", () => {
+  it("passes --model through to the plan and the run", () => {
+    const plan = planRuns(CATALOG, base({ cover: ["ArcBlock/arc"], model: "claude-opus-4-8" }));
+    expect(plan[0].modelFlags).toEqual(["--model", "claude-opus-4-8"]);
+    expect(plan[0].command).toContain("--model claude-opus-4-8");
+  });
+
+  it("omits the flag entirely when unset (CLI default)", () => {
+    expect(planRuns(CATALOG, base({ cover: ["ArcBlock/arc"] }))[0].modelFlags).toEqual([]);
   });
 });
 

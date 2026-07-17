@@ -10,9 +10,10 @@
  * an item first processes it and the rest skip. GitHub is the shared claim substrate —
  * there is no central coordinator.
  *
- *   bun fleet/driver.ts --config <deployment.json> [--catalog <repos.json>] [--only <slug>] [--run]
+ *   bun fleet/driver.ts --config <deployment.json> [--catalog <repos.json>] [--only <slug>] [--skill <name>] [--run]
  *     (default) dry-run: print the plan (which repos × skills, and the exact command)
- *     --run    : ensure a fresh checkout per repo, then run each skill headless, staggered
+ *     --only   : one repo;  --skill : one skill (so cron can give each routine its own cadence)
+ *     --run    : ensure a fresh checkout, install deps (setupCommand), then run headless
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -35,6 +36,15 @@ export interface RepoEntry {
   cloneUrl?: string;
   /** advisory sweep-frequency hint (minutes); the scheduler / P6 enforces it, not the driver */
   cadenceMinutes?: number;
+  /**
+   * Command run inside the checkout after it is materialized, before the skill starts —
+   * dependency install, almost always. A fresh checkout has no `node_modules`, and nothing
+   * else installs them: the hand-written routines only worked because their clones had been
+   * installed once, by hand, long ago. Skip this and the first actionable item dies on a
+   * missing dependency instead of a real finding. Cheap on a warm tree (seconds), so it
+   * runs every round rather than only on create.
+   */
+  setupCommand?: string;
 }
 
 export interface DeploymentConfig {
@@ -81,6 +91,34 @@ export interface DeploymentConfig {
   checkout?: CheckoutPolicy;
   /** per-slug overrides applied on top of the catalog entry (skills, defaultBranch, …) */
   overrides?: Record<string, Partial<RepoEntry>>;
+  /**
+   * A shell file sourced before every run — this is where CREDENTIALS live
+   * (`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, …). NOT optional in practice for a scheduled
+   * deployment: cron hands a job a nearly-empty environment, so without this a nightly run
+   * has no auth at all and every `gh` call fails. The file is sourced in bash and only the
+   * variables it CHANGES are taken, so `PATH=$PATH:…`-style lines work.
+   */
+  envFile?: string;
+  /** Extra env applied to every run of this deployment. */
+  env?: Record<string, string>;
+  /**
+   * Per-skill env, keyed by skill local name (`issue-sweep`). This is how two concurrent
+   * routines avoid colliding: give each its own daemon ports and state dir, exactly as the
+   * hand-written cron block did (issue-sweep :4910/:8797, pr-sweep :4920/:8807). `{{CHECKOUT}}`
+   * expands to that run's checkout path.
+   */
+  skillEnv?: Record<string, Record<string, string>>;
+  /** Model for the headless run, e.g. `claude-opus-4-8`. Omit to use the CLI default. */
+  model?: string;
+  /**
+   * Give each (repo × skill) its own checkout — `<base>/<owner>__<name>__<skill>` — instead
+   * of one shared tree per repo. Prefer this whenever a repo runs more than one skill on a
+   * schedule: with a shared tree the skills must run serially in one driver invocation, and
+   * two 30-minute sweeps chained past an hourly cadence lock out the next round. Separate
+   * trees let cron schedule them independently (`--skill`), which is what the hand-written
+   * block did with its own per-routine clones. Costs one working tree per skill.
+   */
+  checkoutPerSkill?: boolean;
 }
 
 export interface PlannedRun {
@@ -95,6 +133,8 @@ export interface PlannedRun {
   promptPath: string;
   policy: CheckoutPolicy;
   permFlags: string[];
+  modelFlags: string[];
+  setupCommand?: string;
   command: string; // readable dry-run representation
 }
 
@@ -107,9 +147,10 @@ export function permissionFlags(mode: DeploymentConfig["permissionMode"]): strin
   return ["--permission-mode", "acceptEdits"]; // default
 }
 
-/** owner/name → a filesystem-safe checkout dir name. */
-export function checkoutDir(base: string, slug: string): string {
-  return `${base.replace(/\/+$/, "")}/${slug.replace("/", "__")}`;
+/** owner/name (× skill, if the deployment wants a tree per routine) → a safe checkout dir. */
+export function checkoutDir(base: string, slug: string, skill?: string): string {
+  const leaf = slug.replace("/", "__") + (skill ? `__${skill}` : "");
+  return `${base.replace(/\/+$/, "")}/${leaf}`;
 }
 
 /** Resolve which catalog repos this deployment covers, applying overrides. */
@@ -131,7 +172,12 @@ function pluginRoot(cfg: DeploymentConfig): string {
 }
 
 /** Build the invocation plan: one entry per (repo × skill). */
-export function planRuns(catalog: RepoEntry[], cfg: DeploymentConfig, only?: string): PlannedRun[] {
+export function planRuns(
+  catalog: RepoEntry[],
+  cfg: DeploymentConfig,
+  only?: string,
+  onlySkill?: string,
+): PlannedRun[] {
   const root = pluginRoot(cfg);
   const permFlags = permissionFlags(cfg.permissionMode);
   const raw = cfg.checkout ?? { mode: "clone" };
@@ -140,21 +186,40 @@ export function planRuns(catalog: RepoEntry[], cfg: DeploymentConfig, only?: str
   const promptDir = (
     cfg.promptDir ? expandHome(cfg.promptDir) : new URL("prompts", import.meta.url).pathname
   ).replace(/\/+$/, "");
-  const repos = resolveCovered(catalog, cfg).filter((r) => !only || r.slug === only);
+  const repos = resolveCovered(catalog, cfg)
+    .filter((r) => !only || r.slug === only)
+    .map((r) => ({ ...r, skills: r.skills.filter((s) => !onlySkill || s === onlySkill) }))
+    .filter((r) => r.skills.length);
   const plan: PlannedRun[] = [];
   for (const r of repos) {
-    const checkoutPath = checkoutDir(expandHome(cfg.checkoutBase), r.slug);
     for (const s of r.skills) {
+      const checkoutPath = checkoutDir(
+        expandHome(cfg.checkoutBase),
+        r.slug,
+        cfg.checkoutPerSkill ? s : undefined,
+      );
       const promptPath = `${promptDir}/${s}.md`;
+      const modelFlags = cfg.model ? ["--model", cfg.model] : [];
+      // Shown in the dry-run so the plan is auditable, but NEVER the values: envFile is
+      // where the tokens are.
+      const envNote = [
+        cfg.envFile ? `. ${cfg.envFile}` : "",
+        ...Object.keys(cfg.env ?? {}).map((k) => `${k}=…`),
+        ...Object.keys(cfg.skillEnv?.[s] ?? {}).map((k) => `${k}=…`),
+      ]
+        .filter(Boolean)
+        .join(" ");
       // --add-dir <root> is REQUIRED, not cosmetic: Bash/Read are sandboxed to the
       // worktree, so without it the skills' own runtime scripts (which live at
       // <root>/skills/**/scripts/*.ts, outside the checkout) are unreachable and any
       // step that shells out to them hard-fails. Found by the first live arc smoke.
       const command =
-        `cd ${checkoutPath} && ARC_UNATTENDED=1 AGENTLOOP_ROOT=${root} ARC_AGENT_RUNNER=${cfg.runner} ` +
-        `claude -p --plugin-dir ${root} --add-dir ${root} ${permFlags.join(" ")} @${s}.md`;
+        `cd ${checkoutPath} && ${envNote ? `${envNote} ` : ""}ARC_UNATTENDED=1 AGENTLOOP_ROOT=${root} ARC_AGENT_RUNNER=${cfg.runner} ` +
+        `claude -p --plugin-dir ${root} --add-dir ${root} ${[...permFlags, ...modelFlags].join(" ")} @${s}.md`;
       plan.push({
         permFlags,
+        modelFlags,
+        setupCommand: r.setupCommand,
         slug: r.slug,
         skill: `${NS}:${s}`,
         skillLocal: s,
@@ -184,9 +249,65 @@ const realSh: Sh = (cmd) => {
   return { code: p.exitCode ?? 1, out };
 };
 
+const tailOf = (s: string, n = 400): string => (s.length > n ? `…${s.slice(-n)}` : s).trim();
+
+const parseEnv0 = (s: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const kv of s.split("\0")) {
+    const i = kv.indexOf("=");
+    if (i > 0) out[kv.slice(0, i)] = kv.slice(i + 1);
+  }
+  return out;
+};
+
+/**
+ * Source a shell env file and return ONLY the variables it changed.
+ *
+ * Sourced in bash rather than parsed, so `export`, quoting and `PATH=$PATH:…` all behave;
+ * diffed against the same shell's baseline so we import the file's intent and not bash's
+ * own noise (PWD, SHLVL, _). Throws on a missing/unreadable file: a scheduled deployment
+ * that silently ran without its credentials would look like a working sweep that decided
+ * there was nothing to do.
+ */
+export function loadEnvFile(path: string, sh: Sh = realSh): Record<string, string> {
+  const p = expandHome(path);
+  const q = `'${p.replace(/'/g, `'\\''`)}'`;
+  const probe = sh(`[ -r ${q} ] && echo yes || echo no`);
+  if (probe.out.trim() !== "yes") throw new Error(`envFile not readable: ${p}`);
+  const before = parseEnv0(sh(`env -0`).out);
+  const after = sh(`set -a; . ${q} >/dev/null 2>&1 || exit 9; env -0`);
+  if (after.code !== 0) throw new Error(`envFile could not be sourced: ${p}`);
+  const delta: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parseEnv0(after.out))) {
+    if (before[k] !== v && k !== "_") delta[k] = v;
+  }
+  return delta;
+}
+
+/** Env for one run: process env < envFile < deployment env < per-skill env. */
+export function runEnv(
+  run: Pick<PlannedRun, "skillLocal" | "checkoutPath" | "root" | "runner">,
+  cfg: DeploymentConfig,
+  base: Record<string, string | undefined> = process.env,
+  sh: Sh = realSh,
+): Record<string, string> {
+  const expand = (v: string) => v.replaceAll("{{CHECKOUT}}", run.checkoutPath);
+  const merged: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) if (v !== undefined) merged[k] = v;
+  if (cfg.envFile) Object.assign(merged, loadEnvFile(cfg.envFile, sh));
+  for (const [k, v] of Object.entries(cfg.env ?? {})) merged[k] = expand(v);
+  for (const [k, v] of Object.entries(cfg.skillEnv?.[run.skillLocal] ?? {})) merged[k] = expand(v);
+  // Driver-owned, last word: identity + the unattended hook arming.
+  merged.ARC_UNATTENDED = "1";
+  merged.AGENTLOOP_ROOT = run.root;
+  merged.ARC_AGENT_RUNNER = run.runner;
+  return merged;
+}
+
 /** Live-run one planned invocation: fresh checkout, then the skill headless. */
 export async function executeRun(
   run: PlannedRun,
+  cfg: DeploymentConfig,
   sh: Sh = realSh,
 ): Promise<{ ok: boolean; detail: string }> {
   const co = ensureCheckout({
@@ -199,6 +320,14 @@ export async function executeRun(
     sh,
   });
   if (!co.ok) return { ok: false, detail: `checkout ${co.action}: ${co.detail}` };
+  // Dependencies BEFORE the skill: a fresh tree has none, and a sweep that dies on a missing
+  // module reads as "the gate is broken" rather than "nobody installed anything".
+  if (run.setupCommand) {
+    const st = sh(`cd ${run.checkoutPath} && ${run.setupCommand}`);
+    if (st.code !== 0) {
+      return { ok: false, detail: `setup failed (${run.setupCommand}): ${tailOf(st.out)}` };
+    }
+  }
   const prompt = await renderPrompt(run.promptPath, run.runner);
   // Flags that are REQUIRED for an unattended run (all three found the hard way):
   //  --add-dir <root>            Bash/Read are sandboxed to the checkout; without it the
@@ -213,15 +342,21 @@ export async function executeRun(
   //  ARC_UNATTENDED=1            arms the repo hook that hard-denies AskUserQuestion /
   //                              Workflow / EnterPlanMode (which would hang the run).
   const proc = Bun.spawnSync(
-    ["claude", "-p", prompt, "--plugin-dir", run.root, "--add-dir", run.root, ...run.permFlags],
+    [
+      "claude",
+      "-p",
+      prompt,
+      "--plugin-dir",
+      run.root,
+      "--add-dir",
+      run.root,
+      ...run.permFlags,
+      ...run.modelFlags,
+    ],
     {
       cwd: run.checkoutPath,
-      env: {
-        ...process.env,
-        ARC_UNATTENDED: "1",
-        AGENTLOOP_ROOT: run.root,
-        ARC_AGENT_RUNNER: run.runner,
-      },
+      env: runEnv(run, cfg, process.env, sh),
+      stdin: "ignore", // cron has no stdin; a read would block the round forever
       stdout: "inherit",
       stderr: "inherit",
     },
@@ -239,17 +374,20 @@ if (import.meta.main) {
   const cfgPath = arg("--config");
   if (!cfgPath) {
     console.error(
-      "usage: bun fleet/driver.ts --config <deployment.json> [--catalog <repos.json>] [--only <slug>] [--run]",
+      "usage: bun fleet/driver.ts --config <deployment.json> [--catalog <repos.json>] [--only <slug>] [--skill <name>] [--run]",
     );
     process.exit(2);
   }
   const catalogPath = arg("--catalog") ?? new URL("repos.json", import.meta.url).pathname;
   const only = arg("--only");
+  // --skill lets cron schedule each routine on its own cadence (:09 issue-sweep, :39 pr-sweep)
+  // instead of chaining every skill of a repo into one invocation.
+  const onlySkill = arg("--skill");
   const run = argv.includes("--run");
 
   const cfg: DeploymentConfig = JSON.parse(await Bun.file(cfgPath).text());
   const catalog: RepoEntry[] = JSON.parse(await Bun.file(catalogPath).text());
-  const plan = planRuns(catalog, cfg, only);
+  const plan = planRuns(catalog, cfg, only, onlySkill);
 
   console.log(
     `# agentloop fleet — runner=${cfg.runner}, cover=${cfg.cover === "all" ? "all" : cfg.cover.join(",")}`,
@@ -264,12 +402,23 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Fail fast, LOUD, before touching a checkout: a scheduled round that ran without its
+  // credentials looks exactly like a healthy sweep that found nothing to do.
+  if (cfg.envFile) {
+    const loaded = loadEnvFile(cfg.envFile);
+    const names = Object.keys(loaded);
+    console.log(
+      `# envFile ${cfg.envFile} → ${names.length} var(s): ${names.join(", ") || "(none)"}`,
+    );
+    if (!names.length) throw new Error(`envFile set no variables: ${cfg.envFile}`);
+  }
+
   const stagger = (cfg.staggerSeconds ?? 30) * 1000;
   let failed = 0;
   for (let i = 0; i < plan.length; i++) {
     const p = plan[i];
     console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${plan.length})`);
-    const res = await executeRun(p);
+    const res = await executeRun(p, cfg);
     console.log(`  ${res.ok ? "✓" : "✗"} ${res.detail}`);
     if (!res.ok) failed++;
     if (i < plan.length - 1 && stagger > 0) await Bun.sleep(stagger);
