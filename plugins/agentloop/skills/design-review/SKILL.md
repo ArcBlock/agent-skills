@@ -222,7 +222,9 @@ A document should have `tasks.md` if it contains future implementation work that
 
 **If should have `tasks.md` but it doesn't exist:**
 
-Ask the user using AskUserQuestion:
+**Unattended / fleet mode (issue-native, no human present — the repo hook hard-denies `AskUserQuestion`): do NOT ask. Default to option 1 — generate `tasks.md` from the design (test-coverage hard gate ON), then review — and continue. Only fall back to the interactive prompt below when a human is demonstrably present in the session.**
+
+Ask the user using AskUserQuestion (interactive only):
 
 ```
 这个设计文档包含可执行的实施工作（{brief description of what}），但没有对应的 tasks.md。

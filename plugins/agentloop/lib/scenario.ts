@@ -195,7 +195,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       ? (readFileSync(resultFile, "utf8").trim() as VerifyResult)
       : "PASS";
     const cached = deliverComment(commentArgs, report, sha, result);
-    finalExit(0, commentArgs.post, cached.posted);
+    // A cached FAIL must not exit 0 just because it was delivered (latent today —
+    // only PASS/NA are cached — but guards a future that persists FAIL results).
+    finalExit(result === "FAIL" ? 1 : 0, commentArgs.post, cached.posted);
   }
 
   const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);

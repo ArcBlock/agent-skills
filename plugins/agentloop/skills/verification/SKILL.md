@@ -35,9 +35,13 @@ The repo exposes a scenario entry (`<verification_entry>`). Common flags:
 --deliver-cached    post the cached PASS report without re-running
 ```
 
-Run the gate with `--comment <pr#>` so "run" and "post" are one step; the exit
-code still reflects PASS/FAIL only. Do not hand-write the report or substitute a
-single `tsc`/`build` command for the scenario script.
+Run the gate with `--comment <pr#>` so "run" and "post" are one step. Exit codes:
+**0** = PASS (and, when `--comment`/`--post` was requested, the report WAS delivered);
+**1** = verify FAIL; **2** = empty check set / unknown `--only`/`--skip` id (fails
+loud, never silent-green); **4** = verified PASS but the requested report was NOT
+delivered — the remedy is to retry / fall back the comment post (e.g. paste the
+stdout sticky body via MCP), NOT to touch the diff. Do not hand-write the report or
+substitute a single `tsc`/`build` command for the scenario script.
 
 ## Discipline
 

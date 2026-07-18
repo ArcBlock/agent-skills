@@ -516,7 +516,7 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 
 ## ★ sweep-trace 埋点（round-awareness 判据 / L2 可观测层）
 
-每条本 skill 发往 issue 的 review verdict comment 末尾**必须**附一行 sweep-trace HTML 注释（人不可见、grep 可查）：
+**本 skill 发往 issue 的每一条 comment**（review verdict / ★Research 证据化 comment / ★Idea 评估 comment / ★父级 rollup 综合——**任何一条,不止 verdict**）末尾**必须**附一行 sweep-trace HTML 注释（人不可见、grep 可查）：
 
 ```html
 <!-- sweep-trace: {"ver":1,"issue":N,"gate":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
