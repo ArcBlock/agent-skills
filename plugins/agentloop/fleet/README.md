@@ -44,6 +44,17 @@ Safety in both: a `.agentloop-fleet` marker is dropped in trees the driver creat
 `checkoutBase` overlapping your dev workspace) can never nuke a checkout it didn't create.
 In worktree mode the dev clone is only ever the *base* (fetched into), never reset.
 
+## Parallel repos (`parallel` in the deployment config)
+
+The repos covered by ONE skill invocation are independent — each sweeps its own repo's
+issues (or PRs). By default they run **serially** (a slow arc blocks did/site). Set
+`"parallel": true` to run them **concurrently**: each still writes its own per-(repo,skill)
+log (stdout mirroring is turned off so N outputs don't interleave), and cadence-state +
+`fleet.jsonl` are written after the barrier so nothing races. Trade-off: N concurrent
+headless sessions and N× the API burst against one token — a **GitHub App token**
+(per-installation limits) is the real headroom fix (P5), a shared personal token can hit
+GitHub's *secondary* (concurrency) rate limit under heavy parallelism.
+
 ## Permission posture (`permissionMode` in the deployment config)
 
 Headless has **no human to approve a tool call**, so anything missing the repo's own

@@ -125,6 +125,15 @@ export interface DeploymentConfig {
   /** Where run logs go (per-(repo,skill) .log + fleet.jsonl). Default <checkoutBase>/logs. */
   logDir?: string;
   /**
+   * Run the covered repos of ONE skill concurrently instead of serially. The repos of a
+   * skill are independent (each sweeps its own repo's issues/PRs), so a slow arc must not
+   * block did/site. Each run still writes to its own per-(repo,skill) log; state + summary
+   * are written after the barrier so the reads/writes never race. Costs: N concurrent
+   * headless sessions + N times the API burst against a shared token (a GitHub App token
+   * with per-installation limits is the real headroom fix — see fleet README P5).
+   */
+  parallel?: boolean;
+  /**
    * Give each (repo × skill) its own checkout — `<base>/<owner>__<name>__<skill>` — instead
    * of one shared tree per repo. Prefer this whenever a repo runs more than one skill on a
    * schedule: with a shared tree the skills must run serially in one driver invocation, and
@@ -435,11 +444,15 @@ export function runEnv(
   return merged;
 }
 
-/** Live-run one planned invocation: fresh checkout, then the skill headless. */
+/** Live-run one planned invocation: fresh checkout, then the skill headless.
+ *  `mirror` tees the skill's output to stdout too (serial mode); parallel mode passes false
+ *  so N repos' outputs don't interleave into unreadable garbage — each still gets its own
+ *  per-(repo,skill) log, which is the clean source. */
 export async function executeRun(
   run: PlannedRun,
   cfg: DeploymentConfig,
   sh: Sh = realSh,
+  mirror = true,
 ): Promise<{ ok: boolean; detail: string; logPath: string; exitCode: number | null; ms: number }> {
   const started = Date.now();
   const { runLog } = logPaths(
@@ -520,8 +533,8 @@ export async function executeRun(
   const tee = async (stream: ReadableStream<Uint8Array> | undefined) => {
     if (!stream) return;
     for await (const chunk of stream) {
-      process.stdout.write(chunk); // live (cron's own redirect still captures this)
-      writeSync(fd, chunk); // the isolated per-run log
+      if (mirror) process.stdout.write(chunk); // live (serial mode); off in parallel to avoid interleave
+      writeSync(fd, chunk); // the isolated per-run log — always the clean source
     }
   };
   await Promise.all([tee(proc.stdout), tee(proc.stderr)]);
@@ -640,16 +653,12 @@ if (import.meta.main) {
           ? "setup-failed"
           : "failed";
 
-  const stagger = (cfg.staggerSeconds ?? 30) * 1000;
-  let failed = 0;
-  for (let i = 0; i < dueRuns.length; i++) {
-    const p = dueRuns[i];
-    console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${dueRuns.length})`);
-    const res = await executeRun(p, cfg);
+  // Record one finished run (summary line + cadence stamp). Called AFTER the runs settle in
+  // parallel mode, so the read-modify-write of .fleet-state.json never races between repos.
+  const record = (p: PlannedRun, res: Awaited<ReturnType<typeof executeRun>>): boolean => {
     console.log(
-      `  ${res.ok ? "✓" : "✗"} ${res.detail}  (${Math.round(res.ms / 1000)}s → ${res.logPath})`,
+      `  ${res.ok ? "✓" : "✗"} [${p.slug} · ${p.skill}] ${res.detail}  (${Math.round(res.ms / 1000)}s → ${res.logPath})`,
     );
-    // Structured summary line, always — this is the layer you tail/jq for fleet health.
     appendFileSync(
       summary,
       `${summaryLine({
@@ -663,10 +672,42 @@ if (import.meta.main) {
         detail: res.detail,
       })}\n`,
     );
-    if (res.ok)
-      recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
-    else failed++;
-    if (i < dueRuns.length - 1 && stagger > 0) await Bun.sleep(stagger);
+    if (res.ok) recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
+    return res.ok;
+  };
+
+  let failed = 0;
+  if (cfg.parallel) {
+    // Repos of one skill are INDEPENDENT — run them concurrently so a slow arc doesn't block
+    // did/site. Each writes only to its own per-(repo,skill) log (mirror=false) so N outputs
+    // don't interleave; state/summary are written after the barrier to avoid races.
+    console.log(`# parallel: launching ${dueRuns.length} repo(s) concurrently`);
+    const settled = await Promise.all(
+      dueRuns.map((p) =>
+        executeRun(p, cfg, realSh, false).then(
+          (res) => ({ p, res }),
+          (err) => ({
+            p,
+            res: {
+              ok: false,
+              detail: `driver error: ${(err as Error).message}`,
+              logPath: "",
+              exitCode: null,
+              ms: 0,
+            },
+          }),
+        ),
+      ),
+    );
+    for (const { p, res } of settled) if (!record(p, res)) failed++;
+  } else {
+    const stagger = (cfg.staggerSeconds ?? 30) * 1000;
+    for (let i = 0; i < dueRuns.length; i++) {
+      const p = dueRuns[i];
+      console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${dueRuns.length})`);
+      if (!record(p, await executeRun(p, cfg))) failed++;
+      if (i < dueRuns.length - 1 && stagger > 0) await Bun.sleep(stagger);
+    }
   }
   console.log(
     `\nDone: ${dueRuns.length - failed}/${dueRuns.length} ok, ${failed} failed${skipped ? `, ${skipped} skipped (cadence)` : ""}. Summary: ${summary}`,
