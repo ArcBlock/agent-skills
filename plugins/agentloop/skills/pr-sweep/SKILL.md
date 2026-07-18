@@ -209,7 +209,18 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) || ( -n "$rfr
 
 每个开放 PR 交给 [`pr-review`](../pr-review/SKILL.md) 引擎,**干净上下文、独立判断**,带上它的 peer 簇信息。返回**结构化 verdict**(5 类 + verification 结果 + 冲突结论 + 证据 + 问题件的 comment 草稿)。pr-review 每次都会跑 `pre-merge` verification 并把结果纳入 verdict(PR 上已无 CI)。
 
-> **UI 改动的 PR:** pr-review 的 Step 3.5 会在 diff 命中 profile **UI Face Paths**时条件触发 [`ui-verify`](../../../../skills/ui-verify/SKILL.md)(截图 + 录屏贴回 PR)——**前提是本 routine 环境有跑着的 daemon**。无 daemon 的纯静态 sweep 环境会跳过并注明,由带 daemon 的 routine 补跑。
+> **UI 改动的 PR:** pr-review 的 Step 3.5 会在 diff 命中 profile **UI Face Paths**时条件触发 [`ui-verify`](../../../../skills/ui-verify/SKILL.md)(截图 + 录屏贴回 PR)——**前提是本 routine 环境有跑着的 daemon**。无 daemon 的纯静态 sweep 环境会打 `ui-verify:pending` label + 注明,由带 daemon 的 routine 用下面的 pending 扫描步骤补跑(#1205)——不再只留一行注记就算数,label 让补跑成为确定性闭环而不是靠人翻 verdict 文本发现遗漏。
+
+### Step 2.5 — `ui-verify:pending` 补跑扫描(仅本 routine 有 daemon 时)
+
+**本 routine 环境有跑着的 daemon** 时,在正常 Step 3 review 扇出之前,先扫一遍这个确定性 label 队列,把无 daemon 环境欠下的 ui-verify 补上:
+
+```bash
+gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=all" \
+  --jq '.[] | select(.pull_request != null) | .number'
+```
+
+对每个命中的 PR:HEAD 若在打 label 之后又有新 push(重新走 Step 1.5 fresh 判定),仍按新 HEAD 补跑;跑 `/ui-verify --pr <n>`,截图/录屏贴回 PR 后 `gh pr edit <n> --remove-label ui-verify:pending`。**本 routine 没有 daemon → 跳过本步(静默,不是 fail)**,这是"两路环境互补"的另一半:纯静态环境负责发现+标记,daemon 环境负责补跑+摘标。
 
 - **Model:** per-PR review 是**有界任务**(读 1 个 diff + 关联 issue + 核验 + 跑 1 次 `pre-merge` + 可能 1 个测试)→ **Sonnet**。**跨 PR 综合(定簇胜负、判矛盾真伪、合并闸决策)用强模型(Opus)** 在主控做,别下放。成本差 ~5×。
 - **并发/编排——按运行环境分两路(这条决定 routine 能不能无人值守):**
@@ -223,6 +234,10 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) || ( -n "$rfr
 **这是 sweep 相对单 PR 引擎的核心增量,也是当前最高频的清理动作。** 一个同-issue 簇里有 ≥2 个开放 PR 时:
 
 1. **选保留方(keeper):** 用 pr-review 的留谁判据——更完整 diff > 更正确(对照权威源)> 有测试 > 更新 base > 先到。综合用 Opus 拍板,带证据。
+1.5. **second opinion（关错 PR 不可逆——作者会收到关闭通知，值得多花一轮验证；#1055 方向五 / #1208）:** 定 keeper 前,再扇出**一个独立全新 context** 的 agent（`Agent` 工具,`general-purpose`),给它同一簇 PR 的摘要(diff 概要 + 判据表,不带主 session 的结论),要求它按同一判据独立选 keeper,返回结构化结果 `{keep: <PR号>, reason: "<一句话>"}`(自然语言对比不可靠,见 #1208 评估——只比较 `keep` 的 PR 号,不比较 `reason` 措辞)。
+   - **两个 `keep` 一致** → 按本判据继续走步骤 2-4。
+   - **不一致** → **不去重关闭这一簇本轮**,在簇内每个 PR 上打 `pr-sweep:awaiting-direction`,comment 列出两个 agent 的选择 + 理由,等人拍板选哪个当 keeper。
+   - **仅对 dedup-close 的 keeper 选择触发**——其余高风险决策(security 标红、verification gate 语义)按现行的保守路径处理,不加 second-opinion,不拖慢日常 sweep 速度(评估结论见 #1208:security 已是 comment-only 足够保守,verification gate 场景在 issue-sweep/pr-sweep 里不存在)。
 2. **矛盾必查权威源:** 簇内两 PR **断言冲突**(如同一处 license,一个 `BUSL-1.1` 一个 `BSL-1.1`)→ 先查 repo 权威源(`LICENSE` / 既有 canonical 文档)定哪个对,**正确的那个才可能当 keeper**;若两个都错,两个都不合,comment 指正。
 3. **关冗余方(twin):** 对每个非-keeper:
    ```bash

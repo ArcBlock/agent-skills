@@ -239,7 +239,7 @@ gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|packa
 - **命中 UI Face Paths**(profile 定义;arc = `blocklets/**` | `providers/runtime/ui/**` | `packages/aup/**` | `packages/core/**`)→
   **先判 renderer/widget 级 vs 页面级（判据优先于 daemon 有无）：**
   - **renderer/widget 级**（改 `packages/aup/**` 下的 renderer/primitive/widget/css 代码、`providers/runtime/ui/**` 的渲染器代码、无独立 blocklet 页面可跑）→ **必须用 `<ui_shot_script>`**（arc: [`scripts/ui-shot/`](../../../../../scripts/ui-shot/README.md);真实 shipped bundle 渲染 fixture，**无需 daemon**，参数矩阵/前后对比/交互序列）。**"无 daemon"在此路径不是跳过理由**——ui-shot 本来就不需要 daemon；命中此路径必须出图，不得以"无 daemon"为由跳过。
-  - **页面级**（改 `blocklets/**` 的页面逻辑、需要跑着的 blocklet 渲染整页）→ 需有跑着的 daemon（cloud routine / 本地），跑 `/ui-verify --pr <n>`，它自动从 diff 推断场景、截图 + 录屏、贴回 PR；daemon 不可用 → 跳过 ui-verify 并注明"ui-verify 需 daemon,本环境未跑"；真正的门控由带 daemon 的 routine / pr-sweep 补跑。但若同时含 renderer 改动，renderer 部分仍须 ui-shot（不受 daemon 有无影响）。
+  - **页面级**（改 `blocklets/**` 的页面逻辑、需要跑着的 blocklet 渲染整页）→ 需有跑着的 daemon（cloud routine / 本地），跑 `/ui-verify --pr <n>`，它自动从 diff 推断场景、截图 + 录屏、贴回 PR；**daemon 不可用 → 打 `ui-verify:pending` label（`gh pr edit <n> --add-label ui-verify:pending`，label 不存在则先 `gh label create`）+ 注明"ui-verify 需 daemon,本环境未跑"** —— label 是让带 daemon 的 routine 能确定性扫描到（而不是靠解析 verdict 文本猜"哪些 PR 还欠 ui-verify"，见 #1205）；带 daemon 的 routine 补跑成功后摘掉该 label（见 [`pr-sweep`](../pr-sweep/SKILL.md) 的 pending 扫描步骤）。但若同时含 renderer 改动，renderer 部分仍须 ui-shot（不受 daemon 有无影响）。
   verdict 里引用截图 pass/fail（与 `pre-merge` 并列为门控输入）。**截图/自查 checklist 命中的明显缺陷(重叠/裸样式/交互失效/Unknown 框)按「★ 发现即修」处置——包括暴露出的 main 既有 bug,当场修 + issue + fix PR,不写「与本 PR 无关的观察,建议复核」了事。**
 - **未命中**(纯后端/文档/脚本/测试) → 跳过,不是 FAIL(在 verdict 注明"无 UI 面,跳过 ui-verify")。
 
