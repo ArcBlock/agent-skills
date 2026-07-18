@@ -25,6 +25,54 @@ These skills still contain arc-specific case-law and paths; de-arc-ifying them i
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and
 loaded into any repo via `--plugin-dir`.
 
+## Publishing / Release (how a change here reaches the fleet)
+
+**Distribution model.** `arc/.claude/plugins/agentloop/` is the **source of truth** —
+develop here. `ArcBlock/agent-skills` is a **one-way published mirror** (the Claude Code
+marketplace). The cron/fleet loads skills from the **marketplace clone** at
+`~/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop` (this path is the
+`agentloopRoot` in the fleet deployment config). Each cron fire is a fresh
+`claude -p --plugin-dir <agentloopRoot>` that reads those files live, so **no restart is
+needed for the cron** — the next fire uses whatever is on disk there (only an *interactive*
+session needs a restart to pick up an update).
+
+**⚠️ Two gotchas that have bitten before:**
+- **`git pull` on the marketplace clone ≠ updating the plugin.** Use `claude plugin update`
+  (step 3) — it git-pulls the clone AND installs the version.
+- **You MUST bump the version on any content change.** `publish-agentloop.sh` warns if
+  content changed but the version didn't; the marketplace/cache won't reliably pick up a
+  same-version change.
+
+Verified flow (2026-07):
+
+```bash
+# 0. edit arc/.claude/plugins/agentloop/**  (source of truth)
+
+# 1. bump + sync to the marketplace repo (default DEST = ~/Develop/arcblock/agent-skills).
+#    Bumps arc plugin.json + agent-skills marketplace.json TOGETHER, then rsync-mirrors.
+#    Does NOT auto-commit/push (semver is deliberate; agent-skills main is protected).
+bash scripts/publish-agentloop.sh --bump patch|minor|major   # pass a repo path arg if DEST differs
+
+# 2. commit + push the marketplace repo. agent-skills main is protected
+#    ("Changes must be made through a pull request"); the repo owner has admin bypass,
+#    so a direct push to main goes through ("Bypassed rule violations").
+DEST=~/Develop/arcblock/agent-skills
+git -C "$DEST" add plugins/agentloop .claude-plugin/marketplace.json
+git -C "$DEST" commit -m "chore(agentloop): sync from arc — <what> (<new-version>)"
+git -C "$DEST" push origin main
+
+# 3. install into the local cache + the marketplace clone the cron reads
+claude plugin update agentloop@arcblock-agent-skills
+
+# 4. VERIFY the cron's agentloopRoot actually updated (don't trust the update message alone)
+ROOT=~/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop
+grep -m1 '"version"' "$ROOT/.claude-plugin/plugin.json"     # == the new version
+# + grep the specific content you changed to confirm it's present in $ROOT
+
+# 5. source-of-truth hygiene: commit the arc side on its branch too
+#    (publish-agentloop.sh already bumped arc's plugin.json).
+```
+
 ## Loading in headless routines (reliability note)
 
 A moved skill only loads when the plugin is loaded. Marketplace auto-install does

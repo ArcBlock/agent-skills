@@ -297,7 +297,7 @@ agent 要**有判断力、自己动手**,不要事事请示。可逆的、可追
 |---|---|---|
 | `planned` | 有价值,还没实现 | **open**(tracker;创建前先 dedup 现有 issue/roadmap) |
 | `partial` | 实现了,但不完整(**「待分诊」信号**) | **open**;gap 有 `path:line` 坐实 → **自动拆成独立自足 spin-off** 后**摘掉本 label**、换残留状态(剩漂移→`drifted`;无残留→`current`+待人 close);仍推测/未定的 gap 留 comment 给人确认。见「partial → 拆分剩余工作」 |
-| `drifted` | 实现了,但文档漂移(描述的接口面 ≠ shipped 面) | **open** → 修文档 → 转 `current` |
+| `drifted` | 实现了,但文档漂移(描述的接口面 ≠ shipped 面) | **按文档类别分流**(2026-07-17 Robert 拍板,#187 批): **`planning/`/`intent/` → 归档**,不修正文——ship 后它们是历史文物,真相源已转移到代码+living docs,修了必再漂(反例:#243 修一轮漂一轮)。归档 = 顶部打 historical tombstone banner(见下「historical 归档」),有价值的设计 rationale 先抽进 `docs/guides/`/README 再归档;tombstone PR merge 时 close issue。**`docs/` living guide → 修文档** → 转 `current` |
 | `current` | 实现了,文档准确 | **closed** + 审计记录 |
 | `deprecated` | 废弃 | **closed**;内容先存 issue → 人确认 → 单独 PR 删文件 |
 
@@ -323,6 +323,22 @@ status: current        # 受控词表,grep ^status: 一把筛
 audit: "#<N>"          # 回链审计 issue(issue body 反指文档路径,双向)
 verified: 2026-06-24   # current 时记确认日期
 ```
+
+### historical 归档(drifted 的 planning/intent resolve 路径)
+
+对无 YAML frontmatter 的老文档,tombstone 是顶部 banner(可 grep `doc-status: historical` 一把筛):
+
+```markdown
+<!-- doc-status: historical (archived <date>, doc-audit #N) -->
+
+> ⚠️ **Historical** — 实现期 planning/intent 文稿,已归档(doc-audit [#N](.../issues/N))。
+> 内容以写作当时为准,**不再随代码更新**;与现行代码的已知漂移明细见上述 audit issue。
+> 现状以代码与 living docs(`docs/`、各包 README)为准。
+```
+
+主文档用全量 banner,同目录 sibling(tasks/plan/review)用一行简版指回主文档。**不删文件、不搬目录**——
+tombstone 保住反向引用的链接(反例:#253 想删 context-builder,结果 2 处活跃文档链接指着它)。
+漂移明细**不抄进文档**,留在 audit issue 里(单一真相源)。归档后该单元退出后续 doc-audit 扫描范围。
 
 ### 生命周期
 
@@ -385,7 +401,7 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
    - **Optional research**:回引原审计 issue #N + 相关 spec——标明是**可选**研究,不是必读前置。
 5. **双向回链 + 原生边**:spin-off body 首行 `<!-- spinoff-of: #N ... -->` + Optional research 引 #N;原 issue 落一条 comment 列出拆出的 #X/#Y(表格:范围 + 独立性)+ 剩余 resolve 动作。**每个拆出的 spin-off 同时 `link.ts --parent <N> --child <#X>` 写原生边**(写边纪律,close-kick/rollup 依赖它)。
 6. **拆完立即摘掉 `status:partial`,换成残留真实状态(否则误导 human review)。** `status:partial` 是**「待分诊」信号**;`path:line` 坐实的 gap 一旦全部 routed 到 tracking issue,它就会让 human 误判本 issue 还有未处理的实现缺口。摘 label / 换 label 可逆 → **自动做**:
-   - **本 issue 还有残留**(典型:文档漂移——「已完成但文档没更新」)→ 换 `status:drifted`(open,等人签名 PR 修 doc 文本 → 转 `current` → close)。
+   - **本 issue 还有残留**(典型:文档漂移——「已完成但文档没更新」)→ 换 `status:drifted`(open;resolve 按 status 表分流:`planning`/`intent` → historical 归档,`docs/` → 修文档转 `current`;均由人签名 PR 落地 → close)。
    - **完全无残留**(gap 全 track + 无漂移)→ 换 `status:current`(或无 status)+ 保留 `needs-human-confirm`,作「审计完成,待人最终 close」信号。
    - **拆分≠完成,但「本 issue 的 partial 工作已分诊完毕」= 完成**——区别在于:剩余实现工作的家已搬到 spin-off,本 issue 只剩 doc resolve(或无)。
    - **仍绝不自动 close / 改 frontmatter**(那是人的不可逆动作);最终 resolve(写 frontmatter + 修 doc + close)由人签名 PR。label 归 AI(可逆)、frontmatter 归人(签名)。
