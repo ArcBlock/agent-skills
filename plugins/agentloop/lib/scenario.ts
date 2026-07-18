@@ -155,6 +155,20 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const commentArgs: CommentArgs = parseCommentArgs(argv);
   const identity = config.identity?.("Verification") ?? "";
 
+  // Exit code that also surfaces a DELIVERY failure. A gate that verified fine but whose
+  // report was requested (--comment/--post) and never posted must not exit 0 — a caller
+  // checking only the exit code would read "verified but report never delivered" as full
+  // success. Verify-failure codes always dominate (the verify result is the primary signal).
+  const finalExit = (verifyCode: number, post: boolean, delivered: boolean): never => {
+    if (verifyCode === 0 && post && !delivered) {
+      console.error(
+        "❌ verification PASSED but the report was NOT delivered — exiting 4 (not 0) so this isn't read as fully successful.",
+      );
+      process.exit(4);
+    }
+    process.exit(verifyCode);
+  };
+
   // --na <reason>: write exemption + optionally deliver, then exit.
   const naIdx = argv.indexOf("--na");
   if (naIdx !== -1) {
@@ -162,9 +176,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const sha = head();
     const report = writeNa(config.scenario, reason, sha, identity);
     console.log(`✅ N/A exemption written to .verify/${sha.slice(0, 9)}.md`);
-    if (commentArgs.post) deliverComment(commentArgs, report, sha, "NA");
-    else console.log(stickyBody(report, sha, "NA"));
-    process.exit(0);
+    const na = commentArgs.post ? deliverComment(commentArgs, report, sha, "NA") : { posted: true };
+    if (!commentArgs.post) console.log(stickyBody(report, sha, "NA"));
+    finalExit(0, commentArgs.post, na.posted);
   }
 
   // --deliver-cached: post the cached report for HEAD without re-running.
@@ -180,8 +194,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const result: VerifyResult = existsSync(resultFile)
       ? (readFileSync(resultFile, "utf8").trim() as VerifyResult)
       : "PASS";
-    deliverComment(commentArgs, report, sha, result);
-    process.exit(0);
+    const cached = deliverComment(commentArgs, report, sha, result);
+    finalExit(0, commentArgs.post, cached.posted);
   }
 
   const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
@@ -240,7 +254,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     // MCP and a later run can still find/upsert it.
     console.log(stickyBody(report, sha, result));
   }
-  deliverComment(commentArgs, report, sha, result);
+  const delivery = deliverComment(commentArgs, report, sha, result);
 
   // Cache a PASS for the pre-push gate — only when the tree is clean, so the
   // cached sha matches exactly what was verified.
@@ -253,5 +267,5 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     }
   }
 
-  process.exit(exitCode(results));
+  finalExit(exitCode(results), commentArgs.post, delivery.posted);
 }

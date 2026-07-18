@@ -94,11 +94,15 @@ Per-item claiming is inside the skills, not the driver.
 
 - **P1 registry** ✅ — catalog + deployment schema + resolver (`driver.ts`, tested).
 - **P2 driver (dry-run)** ✅ — plan resolution + WOULD-RUN output.
-- **P3 checkout lifecycle** — per-repo worktree/clone under `checkoutBase`, reset to
-  `origin/<defaultBranch>` each round, isolated from any shared dev checkout.
-- **P4 live run** — `--run`: real headless execution + the unattended per-skill prompts
-  (generalized from setup-routines templates, runner-parameterized) + stagger.
-- **P5 scale-out** — GitHub App auth (multi-repo install, per-installation rate limits),
-  cadence enforcement, presence-board heartbeat per run.
-- **P6 scheduling** — wire to cron / cloud trigger; arc's setup-routines becomes one
-  deployment (a row in a catalog), not a special case.
+- **P3 checkout lifecycle** ✅ — per-repo worktree/clone under `checkoutBase`, reset to
+  `origin/<defaultBranch>` each round, marker kept OUT of the tree, isolated from any shared
+  dev checkout (`ensureCheckout`, tested).
+- **P4 live run** ✅ — `--run`: real headless execution, unattended per-skill prompts
+  (runner-parameterized), stagger, envFile credential loading, per-(repo,skill) checkouts.
+- **P5 scale-out** ◐ — **cadence enforcement** ✅ (`.fleet-state.json`), **run logging** ✅
+  (per-(repo,skill) `.log` + `fleet.jsonl`), **mount guard** ✅. Still open: GitHub App auth
+  (a local deployment uses a personal token; cloud runners already post as `claude[bot]`),
+  per-run presence-board heartbeat (currently emitted by the skill's own profile hook, not
+  the driver).
+- **P6 scheduling** ✅ — wired to cron; a deployment is one row in a catalog, not a special
+  case. arc's hand-written setup-routines can be retired onto this path.
