@@ -40,6 +40,9 @@ reference implementation to copy patterns from.
 | \`repo_slug\` | \`${SLUG}\` |
 | \`default_branch\` | \`${DEFB}\` — auto-detected; skills read this for every fetch / reset / merge-base. Verify it matches your repo's real default. |
 | \`cli_binary\` | <FILL: your repo's CLI, or remove if none> |
+| \`cli_setup_command\` | <FILL: how to build/relink cli_binary when it's missing/stale — e.g. a \`/setup-local-cli\` command or a curl installer; remove if no CLI> |
+| \`dev_server_node\` | <FILL: local server + port for dynamic / e2e verification, e.g. \`arc service\` on :4900; remove if none> |
+| \`dev_server_edge\` | <FILL: local edge / second runtime for parity verification, e.g. \`arc worker dev\` miniflare; remove if single-runtime> |
 | \`plugin_root\` | \`.claude/plugins/agentloop\` — where the plugin is vendored (recommended: a submodule / vendored clone kept fresh with \`publish-agentloop.sh\`). Resolved at runtime as \`\$AGENTLOOP_ROOT\` (central / fleet clone) → this vendored path — **no machine-specific absolute path is committed**. Skills reference runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. |
 
 ## Gate & Verification
@@ -109,6 +112,8 @@ Add your repo's own work-type / priority / status labels here so the sweeps know
 | Field | Value |
 |---|---|
 | \`agent_identity_script\` | <FILL: a provenance-header script, or remove> |
+| \`capability_probe_script\` | <FILL: env-capability probe for \`<!-- requires: -->\` gating; the plugin ships one at \`<plugin_root>/scripts/agent-capabilities.sh\`, or remove> |
+| \`presence_heartbeat_script\` | <FILL: mandatory end-of-round heartbeat script, or remove if no presence board> |
 | \`ui_shot_script\` / \`ui_upload_script\` | <FILL, or remove if no UI verification> |
 | \`memory_namespace\` | <FILL, or remove> |
 

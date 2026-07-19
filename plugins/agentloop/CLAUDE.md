@@ -28,6 +28,11 @@ cron/fleet 从**镜像 clone**（`~/.claude/plugins/marketplaces/arcblock-agent-
 
 - 消费仓库的具体值住 **`.claude/repo-profile.md`** + **`.claude/verify/config.ts`**（check 列表）。
   skill 从 profile 读工具链/label/verification_entry，不硬编码。
+- **新引用一个 `<profile_key>` 要同步三处**（否则漂移）：① 引用它的 skill；② arc
+  `.claude/repo-profile.md`（reference 实现，给真实值）；③ `bootstrap/init-profile.sh`（scaffold
+  的 `<FILL>` 占位）——第③处最易漏：漏了，新采用者 bootstrap 出来的 profile 就缺这个键，
+  de-arc 化的 skill 在 face/companion-gated 步骤里撞 dangling `<占位符>`。**skill 引用的键集 ≡
+  init-profile.sh scaffold 的键集**，两者不能分叉（本条正是补一次这种分叉后立的规矩）。
 - **现状**：skills 里仍残留 arc 专属 case-law（issue 号、路径）。去 arc 化是 #1037 的持续目标。
   **动到某个 skill 时，倾向把 arc 专属项挪进 repo-profile，而不是再加一条**。新写的判断逻辑
   用「能被 profile 参数化」的形式，别写死 arc。
