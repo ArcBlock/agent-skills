@@ -8,6 +8,7 @@ import {
   CRON_END,
   coveredRepos,
   coveredSkills,
+  parseProbedPath,
   parseReposSpec,
   reconcileCrontab,
   renderCronBlock,
@@ -266,5 +267,29 @@ describe("parseReposSpec", () => {
   test("cadence optional", () => {
     const parsed = parseReposSpec("ArcBlock/arc=issue-sweep");
     expect(parsed[0].cadenceMinutes).toBeUndefined();
+  });
+});
+
+describe("parseProbedPath", () => {
+  test("plain output", () => {
+    expect(parseProbedPath("/usr/bin/node\n")).toBe("/usr/bin/node");
+  });
+
+  // A themed profile emits a colour reset on stdout before `command -v` runs; `.trim()`
+  // does not strip control chars, so these bytes used to land in the crontab PATH and
+  // turn a real dir into an unresolvable one.
+  test("strips ANSI escapes a login profile emits before the path", () => {
+    const out = "\x1b(B\x1b[m/Users/me/.nvm/versions/node/v24.15.0/bin/node\n";
+    expect(parseProbedPath(out)).toBe("/Users/me/.nvm/versions/node/v24.15.0/bin/node");
+  });
+
+  test("ignores profile chatter lines and takes the real path", () => {
+    const out = "nvm: using v24\x1b[0m\nsome banner\n/opt/homebrew/bin/pnpm\n";
+    expect(parseProbedPath(out)).toBe("/opt/homebrew/bin/pnpm");
+  });
+
+  test("undefined when the tool is absent or is a shell builtin", () => {
+    expect(parseProbedPath("")).toBeUndefined();
+    expect(parseProbedPath("cd\n")).toBeUndefined();
   });
 });

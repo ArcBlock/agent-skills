@@ -295,13 +295,31 @@ function detectAgentloopRoot(): string {
   return new URL("..", import.meta.url).pathname.replace(/\/+$/, "");
 }
 
+/** Strip ANSI/terminal escape sequences and pick the last absolute path a probe printed.
+ *  `bash -lc` sources the user's profile, and profiles routinely write to stdout before
+ *  our command runs — colour resets (`ESC ( B ESC [ m` from a theme), banners, version
+ *  managers announcing themselves. `.trim()` does NOT remove control chars, so that junk
+ *  used to be baked straight into the crontab PATH, turning real dirs into unresolvable
+ *  ones (`\x1b(B\x1b[m/Users/…/node/bin`) and defeating the whole point of probing. */
+export function parseProbedPath(stdout: string): string | undefined {
+  return (
+    stdout
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal escapes is the point
+      .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\([A-Za-z0-9]|[@-Z\\-_])/g, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("/"))
+      .pop() ?? undefined
+  );
+}
+
 /** Dir of an executable as a login shell resolves it (`-l` sources the profile, so a
  *  version-manager like nvm/fnm — which puts `node` under ~/.nvm/…/bin, NOT a standard
  *  dir — is found). Returns undefined if the tool isn't on PATH. */
 function whichDir(cmd: string): string | undefined {
   const r = Bun.spawnSync(["bash", "-lc", `command -v ${cmd} 2>/dev/null`]);
-  const p = new TextDecoder().decode(r.stdout).trim();
-  return p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : undefined;
+  const p = parseProbedPath(new TextDecoder().decode(r.stdout));
+  return p?.includes("/") ? p.slice(0, p.lastIndexOf("/")) : undefined;
 }
 
 /** PATH= line for the crontab block. cron starts with a bare PATH, so the block must name
@@ -461,10 +479,15 @@ if (import.meta.main) {
   }
 
   if (local) {
-    const cur = Bun.spawnSync(["bash", "-lc", "crontab -l 2>/dev/null || true"]);
-    const existingCron = new TextDecoder().decode(cur.stdout);
+    // Invoke crontab DIRECTLY, never via `bash -lc`: a login shell sources the user's
+    // profile, whose stdout chatter (colour resets, banners) would be captured as if it
+    // were crontab content and then written back — crontab rejects the whole file with
+    // `"-":0: bad minute`. crontab lives in a standard dir, so no profile is needed.
+    const cur = Bun.spawnSync(["crontab", "-l"]);
+    // No crontab yet → exit!=0 with empty stdout; that is "start from nothing", not an error.
+    const existingCron = cur.exitCode === 0 ? new TextDecoder().decode(cur.stdout) : "";
     const { next, replaced } = reconcileCrontab(existingCron, block);
-    const write = Bun.spawnSync(["bash", "-lc", "crontab -"], { stdin: Buffer.from(next) });
+    const write = Bun.spawnSync(["crontab", "-"], { stdin: Buffer.from(next) });
     if (write.exitCode !== 0) {
       console.error(`✗ crontab install failed: ${new TextDecoder().decode(write.stderr)}`);
       process.exit(1);
