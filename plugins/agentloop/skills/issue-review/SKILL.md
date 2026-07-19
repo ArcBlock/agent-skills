@@ -461,7 +461,7 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 **当验收 / human 点名了验证——「本环境跑不动」是要被证明的结论,不是预设借口。** 用**仓库自己的 blessed skill**,别自己手搓命令再手填数字:
 
 1. **结构性 PR 门控(build / lint / types / tests / architecture)走 `/agentloop:verification`。** 跑 `<verification_entry>`,**数字由脚本测出、不手填**。**不要**自己 `pnpm build` / `bun test` 再手写「759 pass」——那正是手搓命令 + 手填计数的反模式,也是 `/agentloop:verification` 要消灭的非确定性。见 [`verification` skill](../verification/SKILL.md) + CLAUDE.md「Self-Verification」。
-2. **验收点名的集成 e2e(blocklet render / mount / serve)走 `/e2e-verify`——先尝试再下结论。** 它自己 `pnpm build` + boot **两个** runtime(`dev_server_node` + `dev_server_edge`,见 repo profile)——**边缘侧 = `<dev_server_edge>` 起本地环境,不需要云账号、不碰线上环境;所以 edge-parity / runtime 类验证本地就能做,绝不判成「需要云端环境」而 defer——那是错的。别把「别猛测线上环境」当成「本地验不了」**;**`<cli_binary>` 缺失/陈旧就先 `/setup-local-cli`**(e2e-verify 自身也这么要求)。`/agentloop:verification`、`/e2e-verify`、`/setup-local-cli` 你**完全可以调用**——没真跑过就写「需要 daemon / 本环境无法执行」= 失败,**也不能拿 unit test 顶替点名的 e2e**。
+2. **验收点名的集成 e2e(blocklet render / mount / serve)走 `/e2e-verify`(该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)——先尝试再下结论。** 它自己 `pnpm build` + boot **两个** runtime(`dev_server_node` + `dev_server_edge`,见 repo profile)——**边缘侧 = `<dev_server_edge>` 起本地环境,不需要云账号、不碰线上环境;所以 edge-parity / runtime 类验证本地就能做,绝不判成「需要云端环境」而 defer——那是错的。别把「别猛测线上环境」当成「本地验不了」**;**`<cli_binary>` 缺失/陈旧就先跑 `<cli_setup_command>`**(e2e-verify 自身也这么要求)。`/agentloop:verification`、`/e2e-verify`、`<cli_setup_command>` 你**完全可以调用**——没真跑过就写「需要 daemon / 本环境无法执行」= 失败,**也不能拿 unit test 顶替点名的 e2e**。
 3. **缺依赖 = 多一步 setup,不是「跑不动」。** 原生插件没编译(如 better-sqlite3 → `npx node-gyp rebuild`)、CLI 没 link、没 build —— 先把 setup 做掉再跑,别当环境限制。
 4. **真正的硬限制才算「跑不动」**:沙箱根本没那条工具链(repo profile **Deployment Environments** 列出的平台工具链,arc 例:无 Xcode → Swift、无 Android SDK → Kotlin、无 Playwright MCP → e2e-verify 的 Tier B 真浏览器),**且已实际撞墙**。**`dev_server_edge` 不在此列**——它是本地环境,永远不算「跑不动」。这时贴**确切命令 + 确切报错**,退而用能跑的那部分兜底(`/agentloop:verification` 脚本 / 别的 tier / 静态对照),并**显式标注跳过了哪一层**(如 `Tier B skipped/no-playwright`)。
 5. **绝不假装跑过、不手填数字。** 没跑就说没跑;跑了就贴 skill / 脚本的真实输出。
@@ -485,7 +485,7 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 > 🤖 AI Agent Audit @ <hostname> · runner:<runner> · skills@<hash> — Claude Code(<model>)。读取:<文档+代码+测试>。运行:<测试命令>。每条发现附可复现证据。
 ```
 
-整行 header **必须由单点脚本生成**(`agent_identity_script`,arc 默认 `scripts/agent-identity.sh`;环境/归属/skills 版本三维溯源,不能用日期、占位符或手拼代替),行尾追加模型与范围:
+整行 header **必须由单点脚本生成**(`<agent_identity_script>`;环境/归属/skills 版本三维溯源,不能用日期、占位符或手拼代替),行尾追加模型与范围:
 ```bash
 bash <agent_identity_script> --header "Audit"
 # → "> 🤖 AI Agent Audit @ vm · runner:<name> · skills@a2298a3b"
@@ -531,7 +531,7 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 11. **partial 的剩余工作要拆,拆完即摘 label。** `status:partial` 主体已落地、剩有界子任务没做时,把 `path:line` 坐实的未完成任务自动拆成**独立、无依赖、自足**的 feature spin-off(配方见「partial → 拆分剩余工作」);**已完成但文档漂移**的不拆(那是本审计的 resolve)。**gap 全部 routed 后立即摘掉 `status:partial`**(它是「待分诊」信号,留着会误导 human review),换成残留真实状态:剩漂移 → `status:drifted`;无残留 → `status:current`/无 status + `needs-human-confirm`(待人最终 close)。label 归 AI 可逆自动调;close / frontmatter 归人签名 PR。
 12. **开工先 acquire 锁,收尾必 release。** 多 actor(cron sweep + 多人本地手工)并发处理同一 issue 会重复烧 token、重复评论。`agent:processing`(TTL 30min advisory 锁)在 `issue-review` 开工最前获取——新鲜则 SKIP、过期则抢——把撞车从"收尾才发现"提前到"开工就短路";`agent:hold` 是人类预约(自动化永久绕开,只人摘)。锁是 advisory,**硬去重仍靠 `issue-sweep` 的确定性分支 + 认领检查兜底**。`--dry-run` 不动锁。
 
-13. **验收 / human 点名的验证是契约,「本环境跑不动」要先证明。** 结构性门控走 `/agentloop:verification`(`pre-pr.ts`,数字由脚本测、不手填);验收点名的集成 e2e 走 `/e2e-verify`(`<cli_binary>` 缺/陈旧先 `/setup-local-cli`)——这些 skill 你完全能调,缺依赖先补 setup(编译原生插件、link CLI、build),只有实际撞上硬工具链缺失(repo profile **Deployment Environments** 所列平台工具链,arc 例:无 Xcode/Android SDK/Playwright)才算「跑不动」,且贴确切报错 + 显式标注跳过哪层。**不拿 unit test 顶替点名的 e2e,不手搓命令手填数字,不预先开脱,不假装跑过。**
+13. **验收 / human 点名的验证是契约,「本环境跑不动」要先证明。** 结构性门控走 `/agentloop:verification`(`pre-pr.ts`,数字由脚本测、不手填);验收点名的集成 e2e 走 `/e2e-verify`(`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`)——这些 skill 你完全能调,缺依赖先补 setup(编译原生插件、link CLI、build),只有实际撞上硬工具链缺失(repo profile **Deployment Environments** 所列平台工具链,arc 例:无 Xcode/Android SDK/Playwright)才算「跑不动」,且贴确切报错 + 显式标注跳过哪层。**不拿 unit test 顶替点名的 e2e,不手搓命令手填数字,不预先开脱,不假装跑过。**
 
 14. **生成方案设计时,grounding 纪律和审计时一样严:客观、精确、实事求是。** issue-review 不只审计既有文档——也常被用来给 feature/design issue **产出新方案**(issue-sweep feature 行)。产出设计时同样守纪律:① 每条关于**现状**的断言(架构、存储后端、API、文件布局、现有行为)`path:line` 坐实——**代码是唯一权威**,与引用的 planning/docs 冲突时以代码为准**并指出文档过时**;② 每个**数字**(延迟/吞吐/大小/数量/上限)要么**实测**(附命令+输出)、要么**显式标注为未验证估计**、否则删掉——**凭空的延迟/性能数字是最高发的幻觉**,与 human 在 issue 给的实测冲突时以实测为准;③ 明确区分 **as-is(已核实)** 与 **proposed(新增)**。臆造的后端/布局会让后续所有 phase 建在错地基上。方案 **post 回 issue 前过 `/agentloop:design-review`**(其事实+数字 grounding 是 HARD GATE),别手 post 未审的设计。
 
@@ -544,4 +544,4 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 <!-- sweep-trace: {"ver":1,"issue":N,"gate":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
 
-**这不只是可观测——它是 issue-sweep 轮次感知的判据。** sweep 靠**机器标记**（sweep-trace / `Generated by [Claude Code]` footer / Bot 作者）区分「agent 裁决（跳过）」与「人类输入（响应）」，**不靠 `> 🤖` 头**——因为人和 agent 用同一个 `agent-identity.sh` 生成头、格式逐字节相同（实盘 arc#1722：人手贴的指令被当成 agent 裁决跳过 19h）。**本 skill 的评论若不带 trace，会被 issue-sweep 误判成「未处理的人类输入」→ 每轮重复处理/重复评论**（arc#1722 的反向作用正是这个缺口）。identity 头和 `runner:…·skills@…` 行**不算**机器标记（人也会有）。
+**这不只是可观测——它是 issue-sweep 轮次感知的判据。** sweep 靠**机器标记**（sweep-trace / `Generated by [Claude Code]` footer / Bot 作者）区分「agent 裁决（跳过）」与「人类输入（响应）」，**不靠 `> 🤖` 头**——因为人和 agent 用同一个 `<agent_identity_script>` 生成头、格式逐字节相同（实盘 arc#1722：人手贴的指令被当成 agent 裁决跳过 19h）。**本 skill 的评论若不带 trace，会被 issue-sweep 误判成「未处理的人类输入」→ 每轮重复处理/重复评论**（arc#1722 的反向作用正是这个缺口）。identity 头和 `runner:…·skills@…` 行**不算**机器标记（人也会有）。

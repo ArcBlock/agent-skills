@@ -211,7 +211,7 @@ distinguish by **content, not author**:
   token). Markers can arrive HTML-escaped (`&lt;!-- … --&gt;`, the #1278 double-escape bug) —
   **decode entities before matching**.
 - **The `> 🤖 AI Agent` header and the `runner:… · skills@…` identity line are NOT sufficient
-  on their own.** `scripts/agent-identity.sh` generates that exact header for **both agents
+  on their own.** `<agent_identity_script>` generates that exact header for **both agents
   and humans**, so a human posting locally (e.g. a design/decision comment from your own
   machine) produces a byte-identical opener. Keying on the header misread **arc#1722**'s
   human Phase-4 directive as an agent verdict and skipped the issue for 19h. So a `> 🤖`
@@ -472,17 +472,17 @@ Per spin-off issue:
     只编辑同一条不刷屏。)见 CLAUDE.md「Self-Verification」+
     [`verification` skill](../verification/SKILL.md)。
 - **★ 验收点名的集成验证不可预先开脱:** 当 issue 的验收标准 / human **点名** `/e2e-verify`
+  (该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)
   等集成验证(blocklet render / mount / serve),proposing 侧**必须真跑**——`<cli_binary>`
-  CLI 缺失/陈旧就先 `/setup-local-cli`,**不得**以「需要 daemon / 本环境无法执行」开脱,**也不得**拿 `pre-pr.ts` 的 unit
+  CLI 缺失/陈旧就先跑 `<cli_setup_command>`,**不得**以「需要 daemon / 本环境无法执行」开脱,**也不得**拿 `pre-pr.ts` 的 unit
   test 顶替点名的 e2e。缺依赖 = 多一步 setup(编译原生插件、link CLI),只有实际撞上硬工具链缺失(无
-  Xcode/Android SDK/Playwright)才算跑不动,且贴**确切报错** + 标注跳过层。见 [`e2e-verify` skill](../../../../skills/e2e-verify/SKILL.md)。
+  Xcode/Android SDK/Playwright)才算跑不动,且贴**确切报错** + 标注跳过层。见 `e2e-verify` skill。
 - **★ UI 改动的截图左移(proposing 侧生图,不留给 review 侧):** diff 命中
-  **UI Face Paths**(`.claude/repo-profile.md`;arc: `blocklets/**` |
-  `providers/runtime/ui/**` | `packages/aup/**`)时,**开 PR 前必须生成
+  `<UI Face Paths>`(`.claude/repo-profile.md`)时,**开 PR 前必须生成
   UI 运行截图**——renderer/widget 级用 `<ui_shot_script>`(真实 shipped
   bundle 渲染 fixture;参数矩阵 / 前后对比 / 状态序列三型按需多幅),
-  页面级流程用 [`/ui-verify`](../../../../skills/ui-verify/SKILL.md)。三个硬要求:
-  1. **先自查再提**:生成后用 vision 看图过 ui-shot README 的 checklist(裸样式 =
+  页面级流程用 `/ui-verify`。三个硬要求:
+  1. **先自查再提**:生成后用 vision 看图过 `<ui_shot_script>` README 的 checklist(裸样式 =
      css.ts 没配套、hover/点击前后两幅无变化 = 交互失效、Unknown 降级框 = 类型没注册、
      布局叠压)——任何一条命中先修再提。单测全绿看不出这些,别把它们留给 reviewer 或人。
   2. **截图内嵌进 PR body**(`<ui_upload_script>` 上传,
