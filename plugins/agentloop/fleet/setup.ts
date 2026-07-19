@@ -295,18 +295,36 @@ function detectAgentloopRoot(): string {
   return new URL("..", import.meta.url).pathname.replace(/\/+$/, "");
 }
 
+/** Dir of an executable as a login shell resolves it (`-l` sources the profile, so a
+ *  version-manager like nvm/fnm — which puts `node` under ~/.nvm/…/bin, NOT a standard
+ *  dir — is found). Returns undefined if the tool isn't on PATH. */
+function whichDir(cmd: string): string | undefined {
+  const r = Bun.spawnSync(["bash", "-lc", `command -v ${cmd} 2>/dev/null`]);
+  const p = new TextDecoder().decode(r.stdout).trim();
+  return p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : undefined;
+}
+
+/** PATH= line for the crontab block. cron starts with a bare PATH, so the block must name
+ *  every dir the driver + its children need. CRITICAL: probe node/pnpm/git/claude with
+ *  `command -v` (not just standard dirs) — nvm/fnm put `node` under a version-manager dir,
+ *  and a hardcoded list would drop it, so `pnpm install` (the driver's setupCommand) would
+ *  die with "node: command not found" on every repo. Mirrors /setup-routines Step 3c. */
 function detectCronPath(bunPath: string): string {
   const dirs = [
     `${homedir()}/.local/bin`,
     `${homedir()}/Library/pnpm`,
     bunPath.slice(0, bunPath.lastIndexOf("/")),
+    whichDir("node"),
+    whichDir("pnpm"),
+    whichDir("git"),
+    whichDir("claude"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
     "/usr/sbin",
     "/sbin",
-  ];
+  ].filter((d): d is string => Boolean(d));
   return [...new Set(dirs)].join(":");
 }
 
