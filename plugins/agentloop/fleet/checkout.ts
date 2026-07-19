@@ -15,7 +15,9 @@
  * push/verify gates. (In worktree mode the dev checkout is the *base*, never the fleet
  * tree, and git worktrees are isolated by design, so it is doubly safe.)
  */
-export type Sh = (cmd: string) => { code: number; out: string };
+/** Shell runner. `env`, when given, REPLACES the child's environment (callers pass a fully
+ *  merged map — see driver's runEnv, which starts from process.env). Omit it to inherit. */
+export type Sh = (cmd: string, env?: Record<string, string>) => { code: number; out: string };
 
 export type CheckoutPolicy = { mode: "clone" } | { mode: "worktree"; baseDir: string }; // base clone per repo = <baseDir>/<repo-name>
 

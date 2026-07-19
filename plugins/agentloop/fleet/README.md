@@ -42,7 +42,7 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `checkoutPerSkill` | | `false` | give each (repo × skill) its own tree — set `true` when a repo runs >1 skill on a schedule, else the skills serialize and chained sweeps miss the cadence window |
 | `permissionMode` | | `acceptEdits` | `skip` = `--dangerously-skip-permissions`, the workable posture for fresh checkouts — see Permission posture |
 | `envFile` | | — | shell file sourced before every run — **where credentials live** (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Effectively required for a scheduled deployment; a round that sources 0 vars aborts LOUD |
-| `env` | | — | extra env for every run; `{{CHECKOUT}}` expands to the run's checkout path |
+| `env` | | — | extra env for **every step** of a run — checkout (`git clone`/`fetch`), `setupCommand`, and the skill; `{{CHECKOUT}}` expands to the run's checkout path. Use it for anything those steps must see (`npm_config_store_dir`, registry/proxy, `GIT_SSH_COMMAND`): pointing a store-dir at the wrong disk fails *silently* — the install still "succeeds", just against the wrong config |
 | `skillEnv` | | — | per-skill env keyed by skill local name — how two concurrent skills avoid colliding (daemon ports / `ARC_HOME`); `{{CHECKOUT}}` expands. **Needed for any repo whose skills boot a daemon** (arc: issue-sweep :4910/:8797, pr-sweep :4920/:8807) |
 | `model` | | CLI default | `--model` (e.g. `claude-sonnet-5`) |
 | `parallel` | | `false` | run the covered repos of one skill concurrently (a slow arc won't block did/site); costs N sessions + N× API burst on one token |

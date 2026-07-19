@@ -276,8 +276,8 @@ export async function renderPrompt(promptPath: string, runner: string): Promise<
   return tpl.replaceAll("{{RUNNER}}", runner);
 }
 
-const realSh: Sh = (cmd) => {
-  const p = Bun.spawnSync(["bash", "-c", cmd]);
+const realSh: Sh = (cmd, env) => {
+  const p = Bun.spawnSync(["bash", "-c", cmd], env ? { env } : undefined);
   const out = new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
   return { code: p.exitCode ?? 1, out };
 };
@@ -481,6 +481,17 @@ export async function executeRun(
     return { ...r, logPath: runLog, ms };
   };
 
+  // ONE env for the WHOLE run — checkout, setupCommand and the skill must all see the same
+  // thing. Computed first because the checkout runs first: every step left to inherit the
+  // driver's own environment is a step a deployment's `env` silently does not reach, and that
+  // failure is invisible (the step "succeeds", just against the wrong config — a store-dir on
+  // another disk, a registry, a proxy — so nothing errors and you find out much later).
+  // runEnv starts FROM process.env, so this is a superset: nothing the git/install commands
+  // inherit today (PATH, HOME, SSH_AUTH_SOCK) is lost. `sh` here (not shEnv) is deliberate —
+  // loadEnvFile bootstraps the very env we are building.
+  const env = runEnv(run, cfg, process.env, sh);
+  const shEnv: Sh = (cmd) => sh(cmd, env);
+
   const co = ensureCheckout({
     path: run.checkoutPath,
     slug: run.slug,
@@ -488,7 +499,7 @@ export async function executeRun(
     cloneUrl: run.cloneUrl,
     policy: run.policy,
     exists: existsSync,
-    sh,
+    sh: shEnv,
   });
   if (!co.ok)
     return finish({ ok: false, detail: `checkout ${co.action}: ${co.detail}`, exitCode: null });
@@ -496,7 +507,7 @@ export async function executeRun(
   // Dependencies BEFORE the skill: a fresh tree has none, and a sweep that dies on a missing
   // module reads as "the gate is broken" rather than "nobody installed anything".
   if (run.setupCommand) {
-    const st = sh(`cd ${run.checkoutPath} && ${run.setupCommand}`);
+    const st = sh(`cd ${run.checkoutPath} && ${run.setupCommand}`, env);
     write(`# setup: ${run.setupCommand}\n${st.out}`);
     if (st.code !== 0) {
       return finish({ ok: false, detail: `setup failed: ${tailOf(st.out)}`, exitCode: st.code });
@@ -532,7 +543,7 @@ export async function executeRun(
     ],
     {
       cwd: run.checkoutPath,
-      env: runEnv(run, cfg, process.env, sh),
+      env,
       stdin: "ignore", // cron has no stdin; a read would block the round forever
       stdout: "pipe",
       stderr: "pipe",

@@ -8,6 +8,7 @@ import {
   checkoutDir,
   type DeploymentConfig,
   defaultLogDir,
+  executeRun,
   expandHome,
   loadEnvFile,
   logPaths,
@@ -287,6 +288,59 @@ describe("setupCommand", () => {
 
   it("is absent when the catalog declares none", () => {
     expect(planRuns(CATALOG, base({ cover: ["ArcBlock/did"] }))[0].setupCommand).toBeUndefined();
+  });
+
+  // REGRESSION GUARD. setupCommand used to inherit the driver's own environment, so a
+  // deployment's `env` reached the skill but NOT the install. The failure is silent — the
+  // install "succeeds" against the wrong config (wrong store-dir/registry/proxy) and nothing
+  // errors — so only a test can hold this. If you refactor executeRun, keep the env argument.
+  it("runs with the deployment's env, not the driver's (a silent-wrong-install regression)", async () => {
+    const root = `${tmpdir()}/fleet-setupenv-${process.pid}`;
+    const co = `${root}/checkouts/ArcBlock__arc__issue-sweep`;
+    mkdirSync(`${co}/.git`, { recursive: true });
+    // Mark the tree as ours so ensureCheckout resets it instead of refusing to touch it.
+    mkdirSync(`${root}/checkouts/.agentloop-fleet-markers`, { recursive: true });
+    writeFileSync(`${root}/checkouts/.agentloop-fleet-markers/ArcBlock__arc__issue-sweep`, "");
+
+    const seen: { cmd: string; env?: Record<string, string> }[] = [];
+    const fakeSh = (cmd: string, env?: Record<string, string>) => {
+      seen.push({ cmd, env });
+      // Fail the install so executeRun returns before spawning a real `claude`.
+      return cmd.includes("pnpm install") ? { code: 1, out: "boom" } : { code: 0, out: "" };
+    };
+
+    const cfg = base({
+      checkoutBase: `${root}/checkouts`,
+      logDir: `${root}/logs`,
+      cover: ["ArcBlock/arc"],
+      checkoutPerSkill: true, // matches the shipped deployment shape (tree per repo × skill)
+      env: { npm_config_store_dir: "/Volumes/Ext/store", SHARED: "from-deployment" },
+      skillEnv: { "issue-sweep": { ARC_SERVICE_PORT: "4910" } },
+    });
+    const cat: RepoEntry[] = [
+      { ...CATALOG[0], skills: ["issue-sweep"], setupCommand: "pnpm install --frozen-lockfile" },
+    ];
+    const run = planRuns(cat, cfg)[0];
+    const res = await executeRun(run, cfg, fakeSh, false);
+
+    expect(res.ok).toBe(false); // we forced the install to fail
+    const setup = seen.find((s) => s.cmd.includes("pnpm install"));
+    expect(setup).toBeDefined();
+    expect(setup?.env).toBeDefined(); // ← the whole point: env must be PASSED, not inherited
+    expect(setup?.env?.npm_config_store_dir).toBe("/Volumes/Ext/store");
+    expect(setup?.env?.SHARED).toBe("from-deployment");
+    expect(setup?.env?.ARC_SERVICE_PORT).toBe("4910"); // per-skill env reaches setup too
+    expect(setup?.env?.ARC_UNATTENDED).toBe("1"); // driver-owned identity is there as well
+
+    // The checkout is a step of the run too — a deployment's git config (proxy,
+    // GIT_SSH_COMMAND) must reach `git clone`/`fetch`, not just the install.
+    const git = seen.filter((s) => s.cmd.startsWith("git "));
+    expect(git.length).toBeGreaterThan(0);
+    for (const g of git) expect(g.env?.SHARED).toBe("from-deployment");
+
+    // Superset, not replacement: what git inherits today must survive.
+    expect(setup?.env?.PATH).toBe(process.env.PATH);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
