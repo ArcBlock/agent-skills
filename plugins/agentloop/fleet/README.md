@@ -27,6 +27,42 @@ humans work one repo without stepping on each other.
   `cover: "all" | [slugs]` (+ optional per-slug `overrides`). This is where a deployment
   declares "I handle all repos" or "I handle just these" (copy `deployment.example.json`).
 
+## Config field reference
+
+Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this table mirrors it.
+
+### deployment config
+| field | required | default | meaning |
+|---|---|---|---|
+| `runner` | ✅ | — | runner id, carried into every comment's identity line (`runner:<x>`) |
+| `checkoutBase` | ✅ | — | where per-repo checkouts live; a checkout is `<base>/<owner>__<name>` (`~` expanded) |
+| `cover` | ✅ | — | `"all"` (every catalog repo) or an explicit slug list |
+| `agentloopRoot` | | this plugin's dir | `AGENTLOOP_ROOT` + `--plugin-dir`. **Must be ABSOLUTE** — `~` is NOT expanded here (it isn't shell-evaluated). Point it at the marketplace clone the cron reads. |
+| `checkout` | | `{ mode: "clone" }` | `{ mode: "worktree", baseDir }` reuses existing clones (preferred on a dev machine) — see Checkout modes |
+| `checkoutPerSkill` | | `false` | give each (repo × skill) its own tree — set `true` when a repo runs >1 skill on a schedule, else the skills serialize and chained sweeps miss the cadence window |
+| `permissionMode` | | `acceptEdits` | `skip` = `--dangerously-skip-permissions`, the workable posture for fresh checkouts — see Permission posture |
+| `envFile` | | — | shell file sourced before every run — **where credentials live** (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Effectively required for a scheduled deployment; a round that sources 0 vars aborts LOUD |
+| `env` | | — | extra env for every run; `{{CHECKOUT}}` expands to the run's checkout path |
+| `skillEnv` | | — | per-skill env keyed by skill local name — how two concurrent skills avoid colliding (daemon ports / `ARC_HOME`); `{{CHECKOUT}}` expands. **Needed for any repo whose skills boot a daemon** (arc: issue-sweep :4910/:8797, pr-sweep :4920/:8807) |
+| `model` | | CLI default | `--model` (e.g. `claude-sonnet-5`) |
+| `parallel` | | `false` | run the covered repos of one skill concurrently (a slow arc won't block did/site); costs N sessions + N× API burst on one token |
+| `staggerSeconds` | | `30` | delay between serial runs (ignored when `parallel`) |
+| `logDir` | | `<checkoutBase>/logs` | per-(repo,skill) `.log` + `fleet.jsonl` |
+| `promptDir` | | this plugin's `fleet/prompts` | override the unattended prompt dir (e.g. a dry-run variant) |
+| `overrides` | | — | per-slug `Partial<RepoEntry>` merged on top of the catalog (e.g. narrow `skills` for one repo) |
+
+### repos.json (catalog) entry
+| field | required | meaning |
+|---|---|---|
+| `slug` | ✅ | `owner/name` |
+| `defaultBranch` | ✅ | branch each checkout resets to per round |
+| `skills` | ✅ | agentloop skill local names to run — `["issue-sweep","pr-sweep"]` |
+| `cloneUrl` | | clone URL (clone-on-demand; optional if the checkout already exists) |
+| `cadenceMinutes` | | per-repo throttle — the driver skips a (repo,skill) that ran within this window (stamped on SUCCESS only; `--force` ignores). `120` = every 2 h under an hourly cron |
+| `setupCommand` | | run inside the checkout after materialize, before the skill — dependency install (`pnpm install …`); runs every round (cheap on a warm tree) |
+
+**Env precedence** (later wins): `process env` < `envFile` < `env` < `skillEnv[skill]`; then the driver forces `ARC_UNATTENDED=1`, `AGENTLOOP_ROOT`, `ARC_AGENT_RUNNER` last (identity + unattended-hook arming are never overridable).
+
 ## Checkout modes (`checkout` in the deployment config)
 
 Each covered repo gets a fresh, ISOLATED working tree per round. How it's materialized:

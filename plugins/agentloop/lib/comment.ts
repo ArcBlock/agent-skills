@@ -11,7 +11,7 @@
  *
  * This is I/O (not pure render), so it lives OUTSIDE report.ts.
  */
-import { run, tail } from "./report.ts";
+import { run, tail, trimFullLogsSection } from "./report.ts";
 
 /**
  * Resolve `owner/repo` from a git remote URL. Handles GitHub SSH/HTTPS and the
@@ -131,20 +131,30 @@ export interface PostCommentResult {
   out: string;
 }
 
+/** The outbound proxy enforces a "comment-filter work budget" on `gh api` comment
+ *  calls, independent of GitHub's 65536-char limit — a report well under that limit
+ *  can still be rejected with HTTP 403 `Request body exhausted the comment-filter
+ *  work budget` (#1922). `postComment` retries once with the Full Logs appendix
+ *  stripped when it sees this exact error. */
+function isCommentFilterBudgetError(out: string): boolean {
+  return /comment-filter work budget/i.test(out);
+}
+
 /**
- * Upsert the report onto PR `pr` as a marker-keyed sticky comment. Matches on
- * MARKER_PREFIX (not the full dynamic marker) so a comment written with a prior
- * sha is found and updated, not duplicated. `runner` injectable for tests.
+ * Upsert `body` onto issue/PR number `pr` as a marker-keyed sticky comment (works
+ * for either — GitHub's REST API treats issue and PR comments identically). Matches
+ * on `markerPrefix` (not the full dynamic marker) so a comment written with a prior
+ * sha is found and updated, not duplicated. Exported so non-verification callers
+ * (e.g. scripts/team-report.ts's `--post-issue`) can reuse the same upsert-by-
+ * marker-prefix dance instead of re-implementing the lookup+PATCH/POST.
  */
-export function postComment(
+export function postOnce(
   pr: string,
-  report: string,
-  sha: string,
-  result: VerifyResult,
-  runner = run,
-  markerPrefix = MARKER_PREFIX,
+  body: string,
+  runner: typeof run,
+  markerPrefix: string,
 ): PostCommentResult {
-  const payload = JSON.stringify({ body: stickyBody(report, sha, result, markerPrefix) });
+  const payload = JSON.stringify({ body });
   const ghRepoEnv = resolveGhRepoEnv(runner);
   const found = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
@@ -168,6 +178,27 @@ export function postComment(
         payload,
       );
   return { ok: res.code === 0, out: res.out };
+}
+
+/**
+ * Upsert the report onto PR `pr` as a marker-keyed sticky comment. Matches on
+ * MARKER_PREFIX (not the full dynamic marker) so a comment written with a prior
+ * sha is found and updated, not duplicated. `runner` injectable for tests. Retries
+ * once with the Full Logs section stripped on a comment-filter work-budget 403.
+ */
+export function postComment(
+  pr: string,
+  report: string,
+  sha: string,
+  result: VerifyResult,
+  runner = run,
+  markerPrefix = MARKER_PREFIX,
+): PostCommentResult {
+  const first = postOnce(pr, stickyBody(report, sha, result, markerPrefix), runner, markerPrefix);
+  if (first.ok || !isCommentFilterBudgetError(first.out)) return first;
+  const trimmedReport = trimFullLogsSection(report);
+  if (trimmedReport === report) return first; // nothing to trim — retrying repeats the same body
+  return postOnce(pr, stickyBody(trimmedReport, sha, result, markerPrefix), runner, markerPrefix);
 }
 
 /**

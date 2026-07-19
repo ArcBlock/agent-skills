@@ -472,6 +472,10 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 - **reframe**(如适用):文档整体站错层/重开已结的题时,直接说"这一轮真正该产出什么"。
 - 价值在**独立发现**,不在复述 human。
 
+### Step 5.5 — needs-human-confirm 硬前置(issue #1860)
+
+打 `needs-human-confirm` 标之前先问一遍:**我能不能说出一个安全默认动作?** 能 → 禁止升级,当场按 ratchet(默认放行,出问题再收紧,同 [`pr-review` Step 5.5](../pr-review/SKILL.md))执行该动作并留 trace;不能,才是真判断题,才配打 `needs-human-confirm` 走 Step 6 的结构化拍板块。这条硬前置在**打标动作之前**过,不是打完标再补。
+
 ### Step 6 — 落 comment(产物归宿)
 用 `comment_language` 指定的正文语言写(arc 默认:中文),顶部标 AI 身份与读取/运行范围:
 

@@ -1,9 +1,29 @@
 {
-  "runner": "wangshijun-mac-studio",
-  "checkoutBase": "~/.agentloop-fleet",
-  "checkout": { "mode": "worktree", "baseDir": "/Users/wangshijun/Develop/arcblock" },
+  "runner": "you-mac-studio",
+  "agentloopRoot": "/Users/you/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop",
+  "checkoutBase": "~/.agentloop-fleet/checkouts",
+  "checkout": { "mode": "worktree", "baseDir": "/Users/you/Develop/arcblock" },
+  "checkoutPerSkill": true,
   "cover": ["ArcBlock/arc", "ArcBlock/did"],
-  "staggerSeconds": 30,
+  "permissionMode": "skip",
+  "model": "claude-sonnet-5",
+  "envFile": "~/.arc-routines/env",
+  "env": { "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0" },
+  "skillEnv": {
+    "issue-sweep": {
+      "ARC_HOME": "{{CHECKOUT}}/.arc-home",
+      "ARC_SERVICE_PORT": "4910",
+      "ARC_WORKER_PORT": "8797"
+    },
+    "pr-sweep": {
+      "ARC_HOME": "{{CHECKOUT}}/.arc-home",
+      "ARC_SERVICE_PORT": "4920",
+      "ARC_WORKER_PORT": "8807"
+    }
+  },
+  "parallel": true,
+  "staggerSeconds": 20,
+  "logDir": "~/.agentloop-fleet/logs",
   "overrides": {
     "ArcBlock/did": { "skills": ["issue-sweep"] }
   }

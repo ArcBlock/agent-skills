@@ -304,6 +304,8 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
 | 🟡 中风险 | 核心代码 bug fix(有测试)、行为变更、**非 breaking 的 feature**(含向后兼容的协议加法:新 action / 新可选字段 / 新枚举项+配套消费端)、跨平台 parity 补齐、大 diff 但语义为加法 | 默认**自动合**(前提:通用前置全过——`pre-merge` 绿 + 声明核验 + UI 证据闸 + 新行为有真测试);verdict 有任何保留(部分修复 / 缺测试 / parity 缺口 / 无 caller 疑点)→ 降级为 comment 等人 |
 | 🔴 高风险 | **security 面**(认证/授权/支付/exec-gate/密钥/沙箱边界)、**breaking change**(判据见下)、**改架构方向 / 设计 A/B 未定 / 人明确表达过异议**、改 verification 门控语义(安全闸) | **永不自动合**;升级给人——security/breaking/门控语义 → `pr-sweep:awaiting-caution`,方向未定/人已异议 → `pr-sweep:awaiting-direction`;verdict **必带 pr-review「需人确认块」**(要你判什么 + 怎么验 + 推荐;security 逐条列安全属性 path:line + 验证命令) |
 
+**升级前硬前置(issue #1860,同 [`pr-review` Step 5.5](../pr-review/SKILL.md) / [`issue-review` Step 5.5](../issue-review/SKILL.md)):** 判 🔴 之前先问「我能不能说出一个安全默认动作?」——能 → 不判 🔴,当场按 ratchet 执行该默认动作并留 trace;不能,才是真判断题,才配升级给人。
+
 **breaking change 判据(命中任一才算;monorepo 内部同 PR 已修完的 rename/重构不算——
 types/tests 绿就是证据):**
 - 不兼容的协议/wire 变更:已部署客户端(Swift/Kotlin native、已发 blocklet)会因此断连或误解报文;
