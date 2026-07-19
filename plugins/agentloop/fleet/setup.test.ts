@@ -143,19 +143,25 @@ describe("coveredSkills", () => {
 });
 
 describe("renderCronRow", () => {
-  test("Linux uses flock", () => {
+  test("runs the driver directly, sources envFile, NO cron-level lock (driver self-locks per repo)", () => {
     const row = renderCronRow(baseInput({ envFile: "~/.arc-routines/env" }), "issue-sweep", 9);
-    expect(row).toContain("flock -n");
+    expect(row).not.toContain("shlock");
+    expect(row).not.toContain("flock");
     expect(row).toContain("/fleet/driver.ts --config");
     expect(row).toContain("--skill issue-sweep --run");
+    expect(row).toContain(". /"); // envFile sourced (expandHome'd absolute path)
     expect(row).toContain("cron-issue-sweep.log");
     expect(row.startsWith("9 * * * *")).toBe(true);
   });
-  test("macOS uses shlock + explicit lock rm", () => {
-    const row = renderCronRow(baseInput({ os: "Darwin" }), "pr-sweep", 39);
-    expect(row).toContain("/usr/bin/shlock -f");
-    expect(row).toContain("rm -f");
-    expect(row).not.toContain("flock");
+  test("OS-independent now that the cron lock is gone (Darwin === Linux)", () => {
+    const darwin = renderCronRow(baseInput({ os: "Darwin" }), "pr-sweep", 39);
+    const linux = renderCronRow(baseInput({ os: "Linux" }), "pr-sweep", 39);
+    expect(darwin).toBe(linux);
+  });
+  test("no envFile → no source prefix, still runs the driver", () => {
+    const row = renderCronRow(baseInput({ envFile: undefined }), "pr-sweep", 39);
+    expect(row).not.toContain(". /");
+    expect(row).toContain("--skill pr-sweep --run");
   });
 });
 

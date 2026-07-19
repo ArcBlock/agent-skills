@@ -85,11 +85,35 @@ In worktree mode the dev clone is only ever the *base* (fetched into), never res
 The repos covered by ONE skill invocation are independent — each sweeps its own repo's
 issues (or PRs). By default they run **serially** (a slow arc blocks did/site). Set
 `"parallel": true` to run them **concurrently**: each still writes its own per-(repo,skill)
-log (stdout mirroring is turned off so N outputs don't interleave), and cadence-state +
-`fleet.jsonl` are written after the barrier so nothing races. Trade-off: N concurrent
+log (stdout mirroring is turned off so N outputs don't interleave). Trade-off: N concurrent
 headless sessions and N× the API burst against one token — a **GitHub App token**
 (per-installation limits) is the real headroom fix (P5), a shared personal token can hit
 GitHub's *secondary* (concurrency) rate limit under heavy parallelism.
+
+## Per-repo run lock (`fleet/runlock.ts`) — why cron has no `shlock`
+
+`parallel` handles concurrency WITHIN one invocation. But invocations OVERLAP across cron
+fires, and that used to be the starvation trap:
+
+- The cron row no longer wraps the driver in a `shlock`/`flock`. Instead the **driver holds a
+  per-(repo,skill) advisory lock** (`<checkoutBase>/.locks/<owner>__<name>__<skill>.run.lock`,
+  containing `<pid> <epochMs>`) around each repo's run.
+- When a fire lands while a **slow repo is still running** from an earlier invocation, the new
+  invocation finds that repo's lock held by a **live pid** and **skips just that repo**, running
+  the others that are due. A cron-wide lock instead serialized the WHOLE invocation, so one lone
+  slow repo (blockchain's ~2h pr-sweep, alone in its fire because cadence desynced the others)
+  blocked every subsequent fire — starving arc even though they never share an invocation.
+- Liveness is PID-based (`process.kill(pid, 0)`): a lock owned by a **dead** pid (a killed
+  driver) is **stolen**, so nothing wedges forever. The atomic `wx` create closes the acquire
+  race; a stale-steal has a tiny window — advisory, same philosophy as the GitHub-label claiming
+  above, not a distributed lock.
+- The shared writes overlapping invocations both touch (`.fleet-state.json` cadence stamps +
+  `fleet.jsonl`) run under a short cross-process lock (`withFileLock`), which spins briefly then
+  proceeds advisory (a contended stamp that times out just reruns that repo next fire).
+
+Net: a very slow repo throttles only *itself*, never the fleet. Migration note — a deployment
+whose crontab still has the old `shlock` rows keeps the old behavior until it re-runs
+`/agentloop:fleet-setup` (or `fleet/setup.ts --local --apply`), which regenerates lock-free rows.
 
 ## Permission posture (`permissionMode` in the deployment config)
 

@@ -28,6 +28,14 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { type CheckoutPolicy, ensureCheckout, type Sh } from "./checkout.ts";
+import {
+  acquire,
+  ensureLockDir,
+  realLockIO,
+  release,
+  runLockPath,
+  withFileLock,
+} from "./runlock.ts";
 
 /**
  * Expand a leading `~` to the real home dir. Required: the shell expands `~` but
@@ -609,7 +617,9 @@ if (import.meta.main) {
   }
   try {
     mkdirSync(expandHome(cfg.checkoutBase), { recursive: true });
-    const probe = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.fleet-write-probe`;
+    // PID-unique probe: overlapping invocations must not remove each other's probe and
+    // mistake the ENOENT for "not writable" (that would false-exit-3 the whole round).
+    const probe = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.fleet-write-probe.${process.pid}`;
     writeFileSync(probe, "");
     unlinkSync(probe);
   } catch (e) {
@@ -653,64 +663,103 @@ if (import.meta.main) {
           ? "setup-failed"
           : "failed";
 
-  // Record one finished run (summary line + cadence stamp). Called AFTER the runs settle in
-  // parallel mode, so the read-modify-write of .fleet-state.json never races between repos.
+  // Per-repo run locks live here; overlapping invocations coexist by skipping a repo whose
+  // lock a LIVE invocation still holds (see runlock.ts). The cron no longer serializes whole
+  // invocations, so shared-file writes (state stamps + fleet.jsonl) are guarded per-write.
+  const pid = process.pid;
+  const lockDir = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.locks`;
+  ensureLockDir(lockDir);
+  const stateLockPath = `${sPath}.lock`;
+  const nowMs = () => Date.now();
+  const sleepSync = (ms: number) => Bun.sleepSync(ms);
+
+  // Record one finished run. The summary append + cadence stamp touch SHARED files, so with
+  // overlapping invocations they run under a short cross-process lock (advisory: a contended
+  // stamp that times out just reruns that repo next fire — never a deadlock).
   const record = (p: PlannedRun, res: Awaited<ReturnType<typeof executeRun>>): boolean => {
     console.log(
       `  ${res.ok ? "✓" : "✗"} [${p.slug} · ${p.skill}] ${res.detail}  (${Math.round(res.ms / 1000)}s → ${res.logPath})`,
     );
-    appendFileSync(
-      summary,
-      `${summaryLine({
-        ts: new Date(now).toISOString(),
-        runner: cfg.runner,
-        slug: p.slug,
-        skill: p.skillLocal,
-        outcome: outcomeOf(res.detail, res.ok),
-        exitCode: res.exitCode,
-        ms: res.ms,
-        detail: res.detail,
-      })}\n`,
-    );
-    if (res.ok) recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
+    withFileLock(stateLockPath, pid, realLockIO, nowMs, sleepSync, () => {
+      appendFileSync(
+        summary,
+        `${summaryLine({
+          ts: new Date(now).toISOString(),
+          runner: cfg.runner,
+          slug: p.slug,
+          skill: p.skillLocal,
+          outcome: outcomeOf(res.detail, res.ok),
+          exitCode: res.exitCode,
+          ms: res.ms,
+          detail: res.detail,
+        })}\n`,
+      );
+      if (res.ok) recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
+    });
     return res.ok;
   };
 
+  // One run under its per-repo lock: skip (locked=true) if a live invocation already runs this
+  // repo; otherwise execute and ALWAYS release the lock, even on failure.
+  type RunOutcome = {
+    p: PlannedRun;
+    res?: Awaited<ReturnType<typeof executeRun>>;
+    locked?: boolean;
+  };
+  const runOne = async (p: PlannedRun): Promise<RunOutcome> => {
+    const lockPath = runLockPath(lockDir, p.slug, p.skillLocal);
+    if (!acquire(lockPath, pid, Date.now(), realLockIO)) return { p, locked: true };
+    try {
+      return { p, res: await executeRun(p, cfg, realSh, !cfg.parallel) };
+    } catch (err) {
+      return {
+        p,
+        res: {
+          ok: false,
+          detail: `driver error: ${(err as Error).message}`,
+          logPath: "",
+          exitCode: null,
+          ms: 0,
+        },
+      };
+    } finally {
+      release(lockPath, pid, realLockIO);
+    }
+  };
+
   let failed = 0;
+  let lockSkipped = 0;
+  const finish = (o: RunOutcome): void => {
+    if (o.locked) {
+      console.log(
+        `# skip [${o.p.slug} · ${o.p.skill}] — already running in another invocation (per-repo lock held)`,
+      );
+      lockSkipped++;
+      return;
+    }
+    if (o.res && !record(o.p, o.res)) failed++;
+  };
+
   if (cfg.parallel) {
-    // Repos of one skill are INDEPENDENT — run them concurrently so a slow arc doesn't block
-    // did/site. Each writes only to its own per-(repo,skill) log (mirror=false) so N outputs
-    // don't interleave; state/summary are written after the barrier to avoid races.
-    console.log(`# parallel: launching ${dueRuns.length} repo(s) concurrently`);
-    const settled = await Promise.all(
-      dueRuns.map((p) =>
-        executeRun(p, cfg, realSh, false).then(
-          (res) => ({ p, res }),
-          (err) => ({
-            p,
-            res: {
-              ok: false,
-              detail: `driver error: ${(err as Error).message}`,
-              logPath: "",
-              exitCode: null,
-              ms: 0,
-            },
-          }),
-        ),
-      ),
+    // Repos of one skill are INDEPENDENT — run them concurrently. Each writes only to its own
+    // per-(repo,skill) log (mirror=false) so N outputs don't interleave; the per-repo lock
+    // skips any repo a still-running earlier invocation owns.
+    console.log(
+      `# parallel: launching up to ${dueRuns.length} repo(s) concurrently (per-repo lock skips any already running)`,
     );
-    for (const { p, res } of settled) if (!record(p, res)) failed++;
+    const settled = await Promise.all(dueRuns.map(runOne));
+    for (const o of settled) finish(o);
   } else {
     const stagger = (cfg.staggerSeconds ?? 30) * 1000;
     for (let i = 0; i < dueRuns.length; i++) {
-      const p = dueRuns[i];
-      console.log(`\n▶ [${p.slug} · ${p.skill}] (${i + 1}/${dueRuns.length})`);
-      if (!record(p, await executeRun(p, cfg))) failed++;
+      console.log(`\n▶ [${dueRuns[i].slug} · ${dueRuns[i].skill}] (${i + 1}/${dueRuns.length})`);
+      finish(await runOne(dueRuns[i]));
       if (i < dueRuns.length - 1 && stagger > 0) await Bun.sleep(stagger);
     }
   }
+  const ranCount = dueRuns.length - lockSkipped;
   console.log(
-    `\nDone: ${dueRuns.length - failed}/${dueRuns.length} ok, ${failed} failed${skipped ? `, ${skipped} skipped (cadence)` : ""}. Summary: ${summary}`,
+    `\nDone: ${ranCount - failed}/${ranCount} ok, ${failed} failed${lockSkipped ? `, ${lockSkipped} skipped (running)` : ""}${skipped ? `, ${skipped} skipped (cadence)` : ""}. Summary: ${summary}`,
   );
   process.exit(failed ? 1 : 0);
 }

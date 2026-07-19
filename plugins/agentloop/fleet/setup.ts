@@ -92,7 +92,6 @@ export function paths(input: Pick<SetupInput, "configDir" | "logDir">) {
     catalog: j(dir, "repos.json"),
     checkoutsDefault: j(dir, "checkouts"),
     logDir: input.logDir ? expandHome(input.logDir) : j(dir, "logs"),
-    lock: (skill: string) => j(dir, `${skill}.lock`),
   };
 }
 
@@ -207,20 +206,19 @@ export function buildCloudPlan(input: SetupInput, repos: RepoEntry[]): CloudRout
   return specs;
 }
 
-/** One crontab row for a skill: lock → source envFile → run the driver for that skill
- *  (which handles checkout/install/cadence/parallel per repo) → release lock. Mirrors
- *  the proven block; shlock on macOS (no flock binary), flock on Linux. */
+/** One crontab row for a skill: source envFile → run the driver for that skill (which
+ *  handles checkout/install/cadence/parallel per repo). NO cron-level lock: the driver now
+ *  holds a per-(repo,skill) lock itself (see fleet/runlock.ts), so overlapping invocations
+ *  coexist — a still-running slow repo is skipped while the others run. This is what stops a
+ *  2h blockchain run from starving arc's next fire. (Before, a cron-wide shlock serialized
+ *  whole invocations and a lone slow repo blocked everyone.) OS-independent now. */
 export function renderCronRow(input: SetupInput, skill: string, minute: number): string {
   const p = paths(input);
   const driver = `${input.agentloopRoot.replace(/\/+$/, "")}/fleet/driver.ts`;
   const run = `${input.bunPath} ${driver} --config ${p.deployment} --catalog ${p.catalog} --skill ${skill} --run`;
   const src = input.envFile ? `. ${expandHome(input.envFile)}; ` : "";
   const log = `${p.logDir}/cron-${skill}.log`;
-  const lock = p.lock(skill);
-  if (input.os === "Darwin") {
-    return `${minute} * * * * { /usr/bin/shlock -f ${lock} -p $$ && { ${src}${run}; rm -f ${lock}; }; } >> ${log} 2>&1`;
-  }
-  return `${minute} * * * * flock -n ${lock} bash -lc '${src}${run}' >> ${log} 2>&1`;
+  return `${minute} * * * * { ${src}${run}; } >> ${log} 2>&1`;
 }
 
 /** The full begin..end crontab block (header + PATH + one row per skill). */

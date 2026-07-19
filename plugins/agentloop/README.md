@@ -176,16 +176,19 @@ bun <agentloopRoot>/fleet/driver.ts --config … --catalog … --run --only ArcB
 ```
 Watch it end-to-end and check the log (below) before trusting it unattended.
 
-### 5. Cron — two independent rows
-issue-sweep and pr-sweep get **separate locks + schedules** so they can overlap; each sources
-your env then runs the driver for one skill (so each skill has its own cadence lane):
+### 5. Cron — two independent rows (no cron-level lock)
+issue-sweep and pr-sweep get separate schedules; each sources your env then runs the driver
+for one skill (so each skill has its own cadence lane):
 ```cron
-9  * * * * { /usr/bin/shlock -f ~/.agentloop-fleet/issue-sweep.lock -p $$ && { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill issue-sweep --run; rm -f ~/.agentloop-fleet/issue-sweep.lock; }; } >> ~/.agentloop-fleet/logs/cron-issue-sweep.log 2>&1
-39 * * * * { /usr/bin/shlock -f ~/.agentloop-fleet/pr-sweep.lock  -p $$ && { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill pr-sweep    --run; rm -f ~/.agentloop-fleet/pr-sweep.lock;  }; } >> ~/.agentloop-fleet/logs/cron-pr-sweep.log 2>&1
+10 * * * * { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill issue-sweep --run; } >> ~/.agentloop-fleet/logs/cron-issue-sweep.log 2>&1
+40 * * * * { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill pr-sweep    --run; } >> ~/.agentloop-fleet/logs/cron-pr-sweep.log 2>&1
 ```
-The `shlock` makes a >1 h run skip its own next fire (self-serialising per skill); `cadenceMinutes`
-is the per-repo throttle. **Cron reads `agentloopRoot` live each fire — no restart needed after a
-`claude plugin update`.**
+**No `shlock`/`flock` wrapper.** The driver holds a **per-(repo,skill) lock** itself
+(`fleet/runlock.ts`), so overlapping invocations coexist: if a slow repo (blockchain's ~2h
+pr-sweep) is still running when the next fire lands, the driver **skips just that repo** and
+runs the others that are due — a cron-wide lock used to serialize the whole invocation and let
+one lone slow repo starve everyone. `cadenceMinutes` is the per-repo throttle. **Cron reads
+`agentloopRoot` live each fire — no restart needed after a `claude plugin update`.**
 
 ### Debugging
 | Symptom | Where to look |
