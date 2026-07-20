@@ -6,7 +6,7 @@
  * `.claude/verify/identity.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { type CheckResult, renderReport, run, trimFullLogsSection } from "./report.ts";
+import { type CheckResult, renderReport, run, sumNum, trimFullLogsSection } from "./report.ts";
 
 const results: CheckResult[] = [
   {
@@ -112,6 +112,50 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
 
 // Ported from main's verification/scripts/report.test.ts on merge (#1922/#2054): the run() subprocess
 // timeout landed in report.ts via auto-merge; its test lives here now that the engine is in the plugin.
+describe("sumNum (arc#2080 — check-tests must total per-task summaries, not grab the first)", () => {
+  test("sums every match instead of returning only the first", () => {
+    // Real shape: turbo runs test tasks concurrently and interleaves each
+    // package's own bun-test summary line into one combined stdout.
+    const out = [
+      "@aigne/afs-aup:test:  12 pass",
+      "@aigne/afs-aup:test:  0 fail",
+      "@aigne/aos:test:  1147 pass",
+      "@aigne/aos:test:  0 fail",
+      "@aigne/afs-integration-tests:test:  1353 pass",
+      "@aigne/afs-integration-tests:test:  0 fail",
+    ].join("\n");
+    expect(sumNum(/(\d+) pass(?=\s*(?:\/|$|\n))/gim, out)).toBe(12 + 1147 + 1353);
+    expect(sumNum(/(\d+) fail(?=\s*(?:\/|$|\n))/gim, out)).toBe(0);
+  });
+
+  test("handles the combined 'N pass / N fail / N skip' single-line summary shape too", () => {
+    const out = "@aigne/afs-ui:test: 7283 pass / 0 fail / 15 skip";
+    expect(sumNum(/(\d+) pass(?=\s*(?:\/|$|\n))/gim, out)).toBe(7283);
+    expect(sumNum(/(\d+) fail(?=\s*(?:\/|$|\n))/gim, out)).toBe(0);
+  });
+
+  test("does not false-positive on digit+'fail'/'pass' phrases inside test NAMES (arc#2080, real captured cases)", () => {
+    // Real lines pulled from an actual affected-tests run: "P3 fail-closed" and
+    // "T5.1 fail-loud" are describe-block labels, not bun-test summary lines —
+    // a naive `\d+ fail` match previously reported these as real failures
+    // (passed=1147 / failed=3 was actually a fully-green run, code===0).
+    const out = [
+      "@aigne/arc-worker:test: (pass) exec /.actions/write {path:/user/...} → REJECTED (P3 fail-closed, write does not leak) [1.2ms]",
+      "@aigne/arc-worker:test: (pass) deriveInstallerDid (T5.1 fail-loud) > derives a normalized did [0.5ms]",
+      "@aigne/arc-worker:test: (pass) deriveInstallerDid (T5.1 fail-loud) > is deterministic [0.3ms]",
+      "@aigne/arc-worker:test: (pass) deriveInstallerDid (T5.1 fail-loud) > throws on empty input [0.4ms]",
+      "@aigne/arc-worker:test:  4 pass",
+      "@aigne/arc-worker:test:  0 fail",
+    ].join("\n");
+    expect(sumNum(/(\d+) fail(?=\s*(?:\/|$|\n))/gim, out)).toBe(0);
+    expect(sumNum(/(\d+) pass(?=\s*(?:\/|$|\n))/gim, out)).toBe(4);
+  });
+
+  test("returns undefined when there are no matches", () => {
+    expect(sumNum(/(\d+) pass(?=\s*(?:\/|$|\n))/gim, "no test output here")).toBeUndefined();
+  });
+});
+
 describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts forever)", () => {
   test("kills a hung command at timeoutMs and reports code 124 + timedOut:true", () => {
     const start = Date.now();

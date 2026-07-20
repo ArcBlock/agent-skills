@@ -82,6 +82,20 @@ export function num(re: RegExp, s: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/**
+ * Sum of the first capture group across every match of `re` in `s`, or undefined
+ * if there are no matches. `re` must carry the `g` flag. Use this (not `num`) when
+ * the summary line repeats once per concurrent task — e.g. bun test prints its own
+ * "N pass / M fail" per package, and turbo interleaves them — so a single `num()`
+ * match only reflects whichever task's line happened to appear first in the
+ * interleaved stream, not the true total (arc#2080).
+ */
+export function sumNum(re: RegExp, s: string): number | undefined {
+  const matches = [...s.matchAll(re)];
+  if (matches.length === 0) return undefined;
+  return matches.reduce((total, m) => total + Number(m[1]), 0);
+}
+
 /** affected-detection base: merge-base of `origin/<branch>` and HEAD. */
 export function mergeBase(branch = "origin/main"): string {
   return run(`git merge-base ${branch} HEAD`).out.trim() || branch;
