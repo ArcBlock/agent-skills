@@ -360,6 +360,59 @@ export function pidsWithCwdUnder(path: string, sh: Sh = realSh): number[] {
   return [...new Set(out)];
 }
 
+/** PPID of `pid`, or 0 if it is gone. */
+export const ppidOf = (pid: number, sh: Sh = realSh): number =>
+  Number(sh(`ps -o ppid= -p ${pid} 2>/dev/null | tr -d ' '`).out.trim()) || 0;
+
+/**
+ * Kill leftovers from EARLIER rounds in this checkout — the safety net under the group reap.
+ *
+ * The group reap only covers processes this driver started. It cannot cover a round whose
+ * driver was `kill -9`'d (no `finally` runs), nor anything left by a driver older than the
+ * reap itself. Those survive as re-parented orphans and are what actually accumulated here.
+ *
+ * This one kills processes it did not start, so every guard below is load-bearing:
+ *
+ *  1. CALL ONLY WHILE HOLDING THE (repo,skill) LOCK. That is what makes "anything alive in
+ *     this checkout is dead weight" true — the lock is what guarantees no *live* round of
+ *     this same checkout exists. Called without it, this would kill a working sweep.
+ *  2. Scope by CHECKOUT PATH, never by process name. `pkill -f "bun test"` would reach
+ *     another repo's healthy round, and has form: it once killed a long-running daemon.
+ *  3. Only `PPID == 1`. A live round's processes have a live driver as parent (verified on
+ *     the running fleet); orphans are exactly the re-parented ones.
+ *  4. Never this process. The driver's own cwd is never inside a checkout (cron starts it
+ *     in $HOME — verified), but a cheap identity check beats relying on that.
+ *
+ * Returns what it killed and what it deliberately spared, so a round can report both.
+ */
+export function reapOrphans(
+  checkoutPath: string,
+  sh: Sh = realSh,
+  kill: (pid: number, sig: NodeJS.Signals) => void = (p, s) => process.kill(p, s),
+  selfPid: number = process.pid,
+): { killed: number[]; spared: { pid: number; why: string }[] } {
+  const killed: number[] = [];
+  const spared: { pid: number; why: string }[] = [];
+  for (const pid of pidsWithCwdUnder(checkoutPath, sh)) {
+    if (pid === selfPid) {
+      spared.push({ pid, why: "self" });
+      continue;
+    }
+    const parent = ppidOf(pid, sh);
+    if (parent !== 1) {
+      spared.push({ pid, why: `live parent ${parent}` });
+      continue;
+    }
+    try {
+      kill(pid, "SIGTERM");
+      killed.push(pid);
+    } catch {
+      spared.push({ pid, why: "vanished" });
+    }
+  }
+  return { killed, spared };
+}
+
 /**
  * Kill the round's process group — every descendant, at any depth, in one signal.
  *
@@ -907,6 +960,12 @@ if (import.meta.main) {
     const lockPath = runLockPath(lockDir, p.slug, p.skillLocal);
     if (!acquire(lockPath, pid, Date.now(), realLockIO)) return { p, locked: true };
     try {
+      // Only now — holding the lock is the precondition that makes this safe (see reapOrphans).
+      const orphans = reapOrphans(p.checkoutPath, realSh);
+      if (orphans.killed.length)
+        console.log(
+          `# reaped ${orphans.killed.length} orphan(s) from an earlier round in ${p.slug} · ${p.skillLocal}: ${orphans.killed.join(", ")}`,
+        );
       return { p, res: await executeRun(p, cfg, realSh, !cfg.parallel) };
     } catch (err) {
       return {

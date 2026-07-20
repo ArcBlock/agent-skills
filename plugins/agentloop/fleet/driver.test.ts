@@ -17,6 +17,7 @@ import {
   planRuns,
   type RepoEntry,
   reapGroup,
+  reapOrphans,
   referenceEnvKey,
   renderPrompt,
   resolveCovered,
@@ -495,6 +496,77 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
 
   it("reports zero residue as absent, not as a noisy zero", () => {
     expect(pidsWithCwdUnder("/co/nothing-here", () => ({ code: 0, out: "" }))).toEqual([]);
+  });
+});
+
+// reapOrphans kills processes it did NOT start. Each guard below is the difference between
+// "cleans up yesterday's leak" and "kills a colleague's running sweep", so each gets a test.
+describe("reapOrphans (cleaning up what an earlier round left behind)", () => {
+  // cwd table + ppid lookups, driven through the same `sh` the production code uses.
+  const shFor = (cwds: Record<number, string>, ppids: Record<number, number>) => (cmd: string) => {
+    if (cmd.includes("lsof")) {
+      const out = Object.entries(cwds)
+        .flatMap(([pid, cwd]) => [`p${pid}`, `n${cwd}`])
+        .join("\n");
+      return { code: 0, out };
+    }
+    const m = cmd.match(/-p (\d+)/);
+    return { code: 0, out: m ? String(ppids[Number(m[1])] ?? 0) : "" };
+  };
+
+  it("kills the orphan and spares the one with a live parent", () => {
+    const sh = shFor({ 101: "/co/X", 102: "/co/X/sub" }, { 101: 1, 102: 555 });
+    const sent: number[] = [];
+    const r = reapOrphans("/co/X", sh, (p) => sent.push(p), 999);
+    expect(r.killed).toEqual([101]); // PPID 1 → re-parented leftover
+    expect(sent).toEqual([101]);
+    expect(r.spared).toEqual([{ pid: 102, why: "live parent 555" }]); // a RUNNING round
+  });
+
+  // The guard that matters most: a healthy concurrent sweep in another checkout.
+  it("never reaches another repo's checkout, even one with a similar name", () => {
+    const sh = shFor(
+      { 201: "/co/ArcBlock__arc", 202: "/co/ArcBlock__arcblock-site", 203: "/co/ArcBlock__did" },
+      { 201: 1, 202: 1, 203: 1 },
+    );
+    const sent: number[] = [];
+    const r = reapOrphans("/co/ArcBlock__arc", sh, (p) => sent.push(p), 999);
+    expect(r.killed).toEqual([201]);
+    expect(sent).toEqual([201]); // 202/203 are other repos — scope is the path, not the name
+  });
+
+  it("never kills itself", () => {
+    const sh = shFor({ 777: "/co/X" }, { 777: 1 });
+    const sent: number[] = [];
+    const r = reapOrphans("/co/X", sh, (p) => sent.push(p), 777);
+    expect(sent).toEqual([]);
+    expect(r.spared).toEqual([{ pid: 777, why: "self" }]);
+  });
+
+  it("treats a pid that vanished mid-sweep as spared, not as a failure", () => {
+    const sh = shFor({ 303: "/co/X" }, { 303: 1 });
+    const r = reapOrphans(
+      "/co/X",
+      sh,
+      () => {
+        throw new Error("ESRCH");
+      },
+      999,
+    );
+    expect(r.killed).toEqual([]);
+    expect(r.spared).toEqual([{ pid: 303, why: "vanished" }]);
+  });
+
+  it("is a no-op on a clean checkout", () => {
+    const r = reapOrphans(
+      "/co/X",
+      () => ({ code: 0, out: "" }),
+      () => {
+        throw new Error("must not be called");
+      },
+      999,
+    );
+    expect(r).toEqual({ killed: [], spared: [] });
   });
 });
 
