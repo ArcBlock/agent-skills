@@ -177,6 +177,26 @@ describe("scaffoldEnvFile", () => {
   });
 });
 
+describe("skillEnv defaults (daemon repos must not fight over ports)", () => {
+  test("a fresh config gets isolated ports per skill", () => {
+    const d = buildDeployment(baseInput());
+    expect(d.skillEnv?.["issue-sweep"]?.ARC_SERVICE_PORT).toBe("4910");
+    expect(d.skillEnv?.["pr-sweep"]?.ARC_SERVICE_PORT).toBe("4920");
+    // Same port for two concurrently-sweeping skills = the second daemon dies on bind,
+    // which reads as a broken sweep rather than a config gap.
+    expect(d.skillEnv?.["issue-sweep"]?.ARC_SERVICE_PORT).not.toBe(
+      d.skillEnv?.["pr-sweep"]?.ARC_SERVICE_PORT,
+    );
+    expect(d.skillEnv?.["issue-sweep"]?.ARC_HOME).toContain("{{CHECKOUT}}");
+  });
+
+  test("never clobbers a hand-tuned skillEnv", () => {
+    const mine = { "issue-sweep": { ARC_SERVICE_PORT: "9999" } };
+    const d = buildDeployment(baseInput(), { skillEnv: mine } as never);
+    expect(d.skillEnv).toEqual(mine);
+  });
+});
+
 describe("buildCatalog", () => {
   test("empty incoming keeps existing untouched", () => {
     expect(buildCatalog(undefined, repos)).toEqual(repos);

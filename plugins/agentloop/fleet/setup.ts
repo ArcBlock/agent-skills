@@ -131,6 +131,7 @@ export function buildDeployment(
     parallel: true,
     staggerSeconds: 20,
     env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0" },
+    skillEnv: defaultSkillEnv(),
     logDir: p.logDir,
   };
   return { ...defaults, ...existing, ...explicit };
@@ -347,6 +348,30 @@ function detectCronPath(bunPath: string): string {
 /** Parse a compact --repos spec: "slug=skill,skill@cadence;slug=skill@cadence".
  *  cloneUrl/setupCommand are NOT in the compact form (special chars) — reconcile
  *  preserves those from an existing repos.json, or pass --repos-json for full control. */
+/**
+ * Per-skill isolation defaults, applied to a config that has none.
+ *
+ * Two skills sweeping the same repo concurrently each boot that repo's dev daemon, and with
+ * one port pair between them the second one dies on a bound port — a failure that looks like
+ * a broken sweep rather than a config gap. Isolating the port pair and the daemon home costs
+ * nothing for repos that run no daemon (unset variables they never read), so it is the
+ * default rather than a question, and `buildDeployment` preserves any hand-tuned value.
+ *
+ * `{{CHECKOUT}}` is expanded per run by the driver, giving each tree its own daemon state.
+ */
+export const defaultSkillEnv = (): DeploymentConfig["skillEnv"] => ({
+  "issue-sweep": {
+    ARC_HOME: "{{CHECKOUT}}/.arc-home",
+    ARC_SERVICE_PORT: "4910",
+    ARC_WORKER_PORT: "8797",
+  },
+  "pr-sweep": {
+    ARC_HOME: "{{CHECKOUT}}/.arc-home",
+    ARC_SERVICE_PORT: "4920",
+    ARC_WORKER_PORT: "8807",
+  },
+});
+
 /** Credentials the cron rows source. `derive` returns the value or "" if unobtainable. */
 export const ENV_KEYS: { key: string; derive: string; how: string }[] = [
   {
