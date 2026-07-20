@@ -97,7 +97,7 @@ skill 无命名空间，别硬加前缀）。
 
 | 引用对象 | slash command | markdown 相对链接（从插件 skill 出发） |
 |---|---|---|
-| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / verification / issue-graph / impact-check …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
+| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / verification / issue-graph / impact-check / img-upload …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
 | **消费仓库 project skill**（住 `.claude/skills/`，如 ui-verify / e2e-verify / e2e-gate / deploy / plan-status） | 裸 `/ui-verify` ✅ | `../../../../skills/<skill>/SKILL.md` |
 
 - 反向同理：`.claude/skills/` 下的 project skill 引用**插件 skill** 时，slash command 要 `/agentloop:<skill>`，
