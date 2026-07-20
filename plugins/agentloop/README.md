@@ -5,21 +5,33 @@ Repo-agnostic engineering-loop engine, extracted from `ArcBlock/arc`'s
 in `.claude/verify/config.ts` and `.claude/repo-profile.md`.
 
 Status: **work in progress** (issue [ArcBlock/arc#1037](https://github.com/ArcBlock/arc/issues/1037)).
-Shipped: the **verification gate** engine + the loop-engine skills (verification /
-issue-sweep / issue-review / pr-sweep / pr-review / impact-check).
+
+**New here? → [`SETUP.md`](SETUP.md)** gets a fleet running on your machine. This file is the
+engine's own reference: what it contains, how a change reaches the fleet, and how to debug it.
 
 ## What's in the plugin
 
 ```
 .claude-plugin/plugin.json     # manifest (name: agentloop)
+SETUP.md                       # first-install path (start here to RUN it)
 lib/report.ts                  # CheckResult contract + deterministic run/render helpers
 lib/comment.ts                 # sticky PR-comment upsert (marker-keyed, gh REST)
 lib/gate.ts                    # requireStickyGate — the merge-gate primitive
 lib/scenario.ts                # runScenario() + cmd() — the config-driven gate runner
 lib/*.test.ts                  # engine unit tests (report / comment / gate)
-skills/verification/SKILL.md   # the verification contract (repo-agnostic)
-skills/issue-sweep …           # loop-engine skills (issue/PR sweep + review + impact-check)
+fleet/driver.ts                # the multi-repo loop driver (checkout → setup → skill → reap)
+fleet/setup.ts                 # the installer behind /agentloop:fleet-setup
+fleet/runlock.ts               # per-(repo,skill) lock; PID-liveness, stale self-heal
+fleet/prompts/*.md             # the unattended prompt per sweep skill
+scripts/fleet-report.ts        # reads fleet.jsonl back — deterministic, never a model's arithmetic
+scripts/*.sh                   # universal scripts repos reference rather than copy
+bootstrap/*.sh                 # repo adoption (profile scaffold, labels, env preflight)
+skills/*/SKILL.md              # the skills themselves (see below)
 ```
+
+**Skills:** loop — `issue-sweep` `issue-review` `pr-sweep` `pr-review` `impact-check`
+`design-review` `build-phases` `issue-graph`; gate — `verification`; fleet — `fleet-setup`
+`fleet-report`; adoption — `bootstrap`; utility — `media-upload`.
 
 These skills still contain arc-specific case-law and paths; de-arc-ifying them into
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and
@@ -85,13 +97,6 @@ practical get-it-running-and-debug guide.
 
 ### The one-command path — `/agentloop:fleet-setup`
 
-**Setting it up for the first time? → [`SETUP.md`](SETUP.md)** — the step-by-step path, with
-the prerequisites, the token you must mint by hand, what to verify before trusting cron, and
-the traps. Everything below is what that does under the hood: read it to debug or to
-configure by hand, not to get started.
-
-Don't hand-write any of the config below. Run the interactive setup skill:
-
 ```
 /agentloop:fleet-setup
 ```
@@ -109,26 +114,18 @@ bun fleet/setup.ts --runner me --repos "ArcBlock/arc=issue-sweep,pr-sweep@120" \
 bun fleet/setup.ts … same … --local --apply                                       # write + install
 ```
 
-The rest of this section is **what that does under the hood** — read it to debug or to configure by
-hand. `fleet-setup` is the scheduling counterpart to `/agentloop:bootstrap` (which adopts a repo:
-repo-profile + labels + verify gate, but deliberately does not schedule anything).
+`fleet-setup` is the scheduling counterpart to `/agentloop:bootstrap` (which adopts a repo —
+repo-profile + labels + verify gate — but deliberately schedules nothing).
 
-### 1. Prereqs
-- **Install the plugin:** `claude plugin install agentloop@arcblock-agent-skills` (or
-  `update`). The cron reads it from
-  `~/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop` — that path is
-  your **`agentloopRoot`**.
-- **Clone the repos you'll cover** under one base dir (e.g. `~/Develop/arcblock/{arc,did,…}`)
-  — `worktree` checkout mode reuses these clones (shares the object store, isolated tree).
-- **Credentials** — the installer writes `~/.agentloop-fleet/env` (mode 600) itself,
-  deriving `GH_TOKEN` from your own `gh` session and leaving a marked `FILL` line for
-  `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` — an interactive login is yours to run).
-  It never overwrites an existing file. Cron cannot reach the GUI keychain, which is why
-  long-lived tokens go to a file at all.
+### 1. Two config files — live, per-deployment, NOT committed
 
-### 2. Two config files — live, per-deployment, NOT committed
-`/agentloop:fleet-setup` GENERATES both; the examples are for reading, not for copying (a
-copied config carries the previous owner's paths). Shape: Minimal `~/.agentloop-fleet/deployment.json`:
+(Prerequisites and the install steps are in [`SETUP.md`](SETUP.md); this is the shape of what
+gets generated.)
+
+`/agentloop:fleet-setup` GENERATES both. The examples are for reading, not copying — a copied
+config carries the previous owner's paths, and the ones that hurt are the plausible ones: a
+`checkoutBase` on a disk you do not have looks like a working config right up until every
+round silently skips. `~/.agentloop-fleet/deployment.json`:
 ```json
 {
   "runner": "<your-name>",
@@ -159,18 +156,19 @@ copied config carries the previous owner's paths). Shape: Minimal `~/.agentloop-
 - `permissionMode: "skip"` (= `--dangerously-skip-permissions`) is what the proven setup uses;
   a fresh checkout is untrusted so its allowlist is ignored — see the permission section in
   [`fleet/README.md`](fleet/README.md) before choosing anything else.
-- **`skillEnv` (not in the minimal example above):** if a repo's skills boot a daemon — arc
-  does — give each skill its own ports + `ARC_HOME` so issue-sweep and pr-sweep don't collide
-  when they run concurrently (arc: `:4910/:8797` and `:4920/:8807`). Skip it and the second
-  skill's daemon fails to bind. Every field is in the reference table in
-  [`fleet/README.md`](fleet/README.md#config-field-reference).
+- **`skillEnv` is generated for you** (since 0.18.2) with isolated ports + `ARC_HOME` per
+  skill (`:4910/:8797`, `:4920/:8807`). Two skills sweeping one repo concurrently each boot
+  that repo's daemon, and sharing a port pair means the second dies on bind — a symptom that
+  reads as a broken sweep rather than a missing key, so it is a default rather than a
+  question. A hand-tuned value is preserved across re-runs. Every field is in the reference
+  table in [`fleet/README.md`](fleet/README.md#config-field-reference).
 
 **Each covered repo must have** its own `.claude/repo-profile.md` (the skills read toolchain /
 face-paths / labels / verification_entry from it) **and the coordination labels**
 (`agent:processing` / `agent:ready` / `needs-human-confirm` / … — run `bootstrap/sync-labels.sh`
 once inside that repo). No repo-profile ⇒ the skills can't find the repo's toolchain.
 
-### 3. Dry-run FIRST — zero writes, no cron
+### 2. Dry-run FIRST — zero writes, no cron
 ```bash
 bun <agentloopRoot>/fleet/driver.ts \
   --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json
@@ -178,13 +176,13 @@ bun <agentloopRoot>/fleet/driver.ts \
 Prints the plan (which repos × skills, the exact `claude -p` command, cadence-skips) and
 makes **no** GitHub writes. Scope with `--only ArcBlock/did` / `--skill issue-sweep`.
 
-### 4. One real run manually, before wiring cron
+### 3. One real run manually, before wiring cron
 ```bash
 bun <agentloopRoot>/fleet/driver.ts --config … --catalog … --run --only ArcBlock/did --skill issue-sweep
 ```
 Watch it end-to-end and check the log (below) before trusting it unattended.
 
-### 5. Cron — two independent rows (no cron-level lock)
+### 4. Cron — two independent rows (no cron-level lock)
 issue-sweep and pr-sweep get separate schedules; each sources your env then runs the driver
 for one skill (so each skill has its own cadence lane):
 ```cron
@@ -210,6 +208,11 @@ one lone slow repo starve everyone. `cadenceMinutes` is the per-repo throttle. *
 | Nothing happens / skill "not found" | bad `agentloopRoot` — `--plugin-dir` fails **silently**; verify `<agentloopRoot>/.claude-plugin/plugin.json` exists and its version matches what you published |
 | A round "did nothing" but says ok | not a bug — check GitHub (labels/PRs). The tee'd `.log` does **not** echo the agent's `gh` actions; `fleet.jsonl` + GitHub are the truth |
 
+**Start with `/agentloop:fleet-report`** — it reads `fleet.jsonl` back: rounds run vs
+skipped and why, what each produced, per-repo×skill duration, residual processes. Every number
+is computed from the file, never by a model. Reach for the raw logs below when it points at
+something.
+
 **Golden rule:** trust `fleet.jsonl` (structured, per-run) and **GitHub itself** over the tee'd
 `.log`. A "healthy but idle" round (backlog saturated / already claimed) looks identical to a
 dead one in the log — only GitHub shows what actually landed.
@@ -218,8 +221,9 @@ dead one in the log — only GitHub shows what actually landed.
 
 A moved skill only loads when the plugin is loaded. Marketplace auto-install does
 **not** run under `claude -p` (verified), so every routine invocation must pass
-`--plugin-dir .claude/plugins/agentloop`. arc's `setup-routines` bakes this
-into the generated crontab. A bad `--plugin-dir` path fails **silently** (exit 0,
+`--plugin-dir .claude/plugins/agentloop`. `/agentloop:fleet-setup` bakes this into the
+crontab block it generates (arc's own `/setup-routines` schedules its other routines and
+deliberately leaves the sweep loop to fleet-setup). A bad `--plugin-dir` path fails **silently** (exit 0,
 skill just absent) — guard it with an existence check on `.claude-plugin/plugin.json`.
 
 ## The engine/config/checks split
