@@ -427,15 +427,53 @@ describe("referenceRepos (a repo that must READ another repo to work)", () => {
 });
 
 describe("process hygiene (a round's descendants must not outlive it)", () => {
-  it("signals the GROUP, not the pid — that is what reaches grandchildren", () => {
+  // Found in production, not in review: a live round signalled the group and counted
+  // residue in the same tick, reported "1 survived the reap", and the pid was already gone
+  // when it was looked up. A residue signal that cries wolf gets ignored — which costs more
+  // than the leak it exists to expose. The waits below are what make the count truthful.
+  it("waits between TERM and KILL, and after KILL, so the residue count is not a race", async () => {
+    const order: string[] = [];
+    const slept: number[] = [];
+    await reapGroup(
+      4242,
+      () => {},
+      (_t, s) => order.push(s as string),
+      999,
+      async (ms) => {
+        slept.push(ms);
+        order.push(`wait${ms}`);
+      },
+      2000,
+    );
+    expect(order).toEqual(["SIGTERM", "wait2000", "SIGKILL", "wait250"]);
+    expect(slept.length).toBe(2); // never signal-then-count in the same tick
+  });
+
+  it("skips SIGKILL entirely when the group went down on SIGTERM", async () => {
+    const sent: string[] = [];
+    await reapGroup(
+      4242,
+      () => {},
+      (_t, s) => {
+        sent.push(s as string);
+        if (s === "SIGKILL") throw new Error("ESRCH"); // group already empty
+      },
+      999,
+      async () => {},
+    );
+    expect(sent).toEqual(["SIGTERM", "SIGKILL"]); // attempted, ESRCH → stop, no extra wait
+  });
+
+  it("signals the GROUP, not the pid — that is what reaches grandchildren", async () => {
     const sent: { target: number; sig: string }[] = [];
-    reapGroup(
+    await reapGroup(
       4242,
       () => {},
       (t, s) => {
         sent.push({ target: t, sig: s as string });
       },
       999,
+      async () => {},
     );
     // Negative target = process group. A positive one would leave every grandchild alive,
     // which is exactly the bug: `claude` exits, its `bun test` child does not.
@@ -443,10 +481,10 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
     expect(sent.map((s) => s.sig)).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("REFUSES to reap when the child shares the driver's group (it would kill the driver)", () => {
+  it("REFUSES to reap when the child shares the driver's group (it would kill the driver)", async () => {
     const sent: number[] = [];
     let logged = "";
-    reapGroup(
+    await reapGroup(
       777,
       (s) => {
         logged += s;
@@ -455,25 +493,29 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
         sent.push(t);
       },
       777,
+      async () => {},
     );
     expect(sent).toEqual([]); // measured: without `detached`, grandchildren sit in OUR group
     expect(logged).toContain("SKIPPED");
   });
 
-  it("stops at the first ESRCH — an empty group is the healthy path, not an error", () => {
+  it("stops at the first ESRCH — an empty group is the healthy path, not an error", async () => {
     const sent: string[] = [];
-    expect(() =>
-      reapGroup(
-        1234,
-        () => {},
-        (_t, s) => {
-          sent.push(s as string);
-          throw new Error("ESRCH");
-        },
-        999,
-      ),
-    ).not.toThrow();
-    expect(sent).toEqual(["SIGTERM"]); // no pointless SIGKILL at a group that is already gone
+    let threw = false;
+    await reapGroup(
+      1234,
+      () => {},
+      (_t, s) => {
+        sent.push(s as string);
+        throw new Error("ESRCH");
+      },
+      999,
+      async () => {},
+    ).catch(() => {
+      threw = true;
+    });
+    expect(threw).toBe(false); // an already-empty group is not a failure
+    expect(sent).toEqual(["SIGTERM"]); // and costs no wait, no pointless SIGKILL
   });
 
   it("counts residue by cwd prefix, and does not mistake a sibling checkout for it", () => {

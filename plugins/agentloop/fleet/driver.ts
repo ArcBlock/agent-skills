@@ -421,23 +421,35 @@ export function reapOrphans(
  * group-reaping is not merely ineffective there, it is unsafe. The guard below refuses that
  * case rather than trusting the caller.
  */
-export function reapGroup(
+export async function reapGroup(
   pid: number,
   log: (s: string) => void,
   kill: (target: number, sig: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
   ownPgid: number = process.pid,
-): void {
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+  graceMs = 2000,
+): Promise<void> {
   if (pid === ownPgid) {
     log(`# reap SKIPPED — child shares the driver's process group (pid ${pid})\n`);
     return;
   }
-  for (const sig of ["SIGTERM", "SIGKILL"] as NodeJS.Signals[]) {
-    try {
-      kill(-pid, sig); // negative pid = the whole group
-    } catch {
-      return; // ESRCH: group already empty — the normal, healthy path
-    }
+  try {
+    kill(-pid, "SIGTERM"); // negative pid = the whole group
+  } catch {
+    return; // ESRCH: group already empty — the normal, healthy path
   }
+  // The waits are not politeness, they are correctness for the residue count that follows.
+  // Signalling then counting immediately reports processes that ARE dying as survivors:
+  // a live round did exactly that on the first day, flagged one, and the pid was gone by the
+  // time anyone looked. A residue signal that cries wolf gets ignored, which costs more than
+  // the leak it was built to expose.
+  await sleep(graceMs); // let SIGTERM be handled — a clean exit beats a killed one
+  try {
+    kill(-pid, "SIGKILL"); // whatever ignored SIGTERM
+  } catch {
+    return; // everything went down on TERM
+  }
+  await sleep(250); // SIGKILL is immediate, but the table needs a moment to reflect it
 }
 
 const realSh: Sh = (cmd, env) => {
@@ -788,7 +800,7 @@ export async function executeRun(
   } finally {
     // `finally`, not the happy path: a round that throws leaks exactly like one that
     // succeeds, and the leak we found came from rounds that SUCCEEDED.
-    reapGroup(proc.pid, write);
+    await reapGroup(proc.pid, write);
   }
   // Counted after the reap, so a live sweep is never mistaken for residue: whatever is
   // still here escaped a signal aimed at it.
