@@ -22,6 +22,8 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -547,10 +549,25 @@ export interface RunRecord {
   runner: string;
   slug: string;
   skill: string;
-  outcome: "ok" | "failed" | "checkout-failed" | "setup-failed";
+  /**
+   * `skipped-cadence` / `skipped-locked` are recorded, not just printed. A round that did
+   * not happen is a fact about the fleet: without it "why has blockchain not moved all day"
+   * and "how often does a 60-minute cadence actually collide with a 114-minute round" are
+   * both unanswerable, and the second is exactly the question raising a cadence creates.
+   */
+  outcome:
+    | "ok"
+    | "failed"
+    | "checkout-failed"
+    | "setup-failed"
+    | "skipped-cadence"
+    | "skipped-locked";
   exitCode: number | null;
   ms: number;
   detail: string;
+  /** Correlates this row with its `==== <runId> ====` segment in the per-(repo,skill) log.
+   *  Timestamps alone stop being a reliable join the moment rounds run concurrently. */
+  runId?: string;
   /**
    * Processes still living in the checkout AFTER the round reaped its own process group.
    * Non-zero means something escaped the reap (re-parented itself, or predates this driver
@@ -560,10 +577,107 @@ export interface RunRecord {
    * `outcome=ok, exitCode=0` while leaving a `bun test` at 98% CPU for 18h and a `pnpm dev`
    * tree for 29h. Every signal said healthy. Reaping fixes the leaks we know about; counting
    * is what makes the next unknown one show up on its own.
+   *
+   * ALWAYS written for an executed round, including `0`. Omitting the healthy value would
+   * make "measured, clean" and "old driver that never measured" the same observation — the
+   * same silence this field was added to break.
    */
   residualProcs?: number;
+  /**
+   * What the round actually DID, self-reported by the skill (see RUN_REPORT_ENV).
+   *
+   * The mechanical fields above answer "did the plumbing work" — and answered it 182 times
+   * with the identical string `checkout reset; claude exit 0`. They cannot distinguish a
+   * round that opened three PRs from one that ran 114 minutes and produced nothing; both
+   * are `outcome: ok`. That distinction lived only in free prose at the tail of a 228 KB
+   * append-only log.
+   *
+   * Reported through a file rather than parsed back out of that prose on purpose: the
+   * wording differs every round, so a parser would be fragile in the silent way — it would
+   * return nothing and look like a quiet day.
+   */
+  produced?: RunProduct;
 }
+
+/** Structured, machine-readable "what happened" written by the skill at end of run. */
+export interface RunProduct {
+  prsOpened?: number[];
+  prsMerged?: number[];
+  issuesClosed?: number[];
+  issuesOpened?: number[];
+  commentsPosted?: number;
+  /** True when the round deliberately did nothing — a healthy quiet round, not a failure. */
+  noop?: boolean;
+  /** One line, for humans skimming a report. */
+  summary?: string;
+}
+
+/** Env var naming the file a skill writes its RunProduct to. */
+export const RUN_REPORT_ENV = "AGENTLOOP_RUN_REPORT";
 export const summaryLine = (r: RunRecord): string => JSON.stringify(r);
+
+/**
+ * Roll a log once it passes `maxBytes`, keeping ONE previous generation as `<name>.1`.
+ *
+ * Append-only per-(repo,skill) logs are where a round's real narrative lives, so they are
+ * worth keeping — but at 24 rounds/day they only grow. One generation is the deliberate
+ * trade: enough to still hold the previous round when something breaks mid-round, bounded
+ * enough that the fleet cannot fill a disk it does not own.
+ */
+export function rotateIfLarge(
+  path: string,
+  maxBytes = 5_000_000,
+  stat: (p: string) => number | undefined = (p) => (existsSync(p) ? statSync(p).size : undefined),
+  move: (from: string, to: string) => void = (f, t) => renameSync(f, t),
+): boolean {
+  const size = stat(path);
+  if (size === undefined || size < maxBytes) return false;
+  try {
+    move(path, `${path}.1`); // rename over any older generation
+    return true;
+  } catch {
+    return false; // rotation is hygiene, never a reason to fail a round
+  }
+}
+
+/** Short, sortable, collision-free enough for one host: `<base36 ms>-<4 hex>`. */
+export const newRunId = (now: number, rand = Math.random): string =>
+  `${now.toString(36)}-${Math.floor(rand() * 0x10000)
+    .toString(16)
+    .padStart(4, "0")}`;
+
+/**
+ * Read (and consume) the structured report a skill left behind.
+ *
+ * Consumed — deleted after reading — so a round that writes nothing cannot inherit the
+ * previous round's report and silently look productive. Absent or malformed yields
+ * undefined rather than throwing: a skill that never learned this contract must still be
+ * able to complete a round, it just reports no product.
+ */
+export function readRunProduct(
+  path: string,
+  exists: (p: string) => boolean = existsSync,
+  read: (p: string) => string = (p) => readFileSync(p, "utf8"),
+  remove: (p: string) => void = (p) => unlinkSync(p),
+): RunProduct | undefined {
+  if (!exists(path)) return undefined;
+  let raw: string;
+  try {
+    raw = read(path);
+  } finally {
+    try {
+      remove(path);
+    } catch {
+      /* best effort — a stale file is caught by the next round's delete */
+    }
+  }
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as RunProduct) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function readState(path: string): RunState {
   try {
@@ -645,6 +759,9 @@ export function runEnv(
   merged.AGENTLOOP_ROOT = run.root;
   merged.ARC_AGENT_RUNNER = run.runner;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
+  // Beside the checkout, never inside it: an in-tree file would dirty `git status` and
+  // disarm the repo's own push/verify gates — the same reason the fleet marker lives out.
+  merged[RUN_REPORT_ENV] = `${run.checkoutPath.replace(/\/+$/, "")}.run-report.json`;
   return merged;
 }
 
@@ -672,22 +789,26 @@ export async function executeRun(
     run.skillLocal,
   );
   mkdirSync(runLog.slice(0, runLog.lastIndexOf("/")), { recursive: true });
+  rotateIfLarge(runLog); // before opening: 24 rounds/day only ever grows this file
   const fd = openSync(runLog, "a");
   const write = (s: string) => writeSync(fd, s);
+  const runId = newRunId(started);
   write(
-    `\n==== ${new Date(started).toISOString()} · ${run.slug} · ${run.skill} · runner=${run.runner} ====\n`,
+    `\n==== ${new Date(started).toISOString()} · run=${runId} · ${run.slug} · ${run.skill} · runner=${run.runner} ====\n`,
   );
   const finish = (r: {
     ok: boolean;
     detail: string;
     exitCode: number | null;
     residualProcs?: number;
+    produced?: RunProduct;
   }) => {
     const ms = Date.now() - started;
     const res = r.residualProcs ? ` · ⚠ ${r.residualProcs} residual proc(s)` : "";
-    write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail}${res} · ${ms}ms ----\n`);
+    const prod = r.produced?.summary ? ` · ${r.produced.summary}` : "";
+    write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail}${res}${prod} · ${ms}ms ----\n`);
     closeSync(fd);
-    return { ...r, logPath: runLog, ms };
+    return { ...r, logPath: runLog, ms, runId };
   };
 
   // ONE env for the WHOLE run — checkout, setupCommand and the skill must all see the same
@@ -700,6 +821,9 @@ export async function executeRun(
   // loadEnvFile bootstraps the very env we are building.
   const env = runEnv(run, cfg, process.env, sh);
   const shEnv: Sh = (cmd) => sh(cmd, env);
+  const reportPath = env[RUN_REPORT_ENV];
+  // Clear any leftover before the round: a stale report would be read as THIS round's work.
+  if (existsSync(reportPath)) unlinkSync(reportPath);
 
   const co = ensureCheckout({
     path: run.checkoutPath,
@@ -807,9 +931,16 @@ export async function executeRun(
   const residual = pidsWithCwdUnder(run.checkoutPath, sh);
   if (residual.length)
     write(`# ⚠ ${residual.length} process(es) survived the reap: ${residual.join(", ")}\n`);
+  const produced = readRunProduct(reportPath);
+  write(
+    produced
+      ? `# produced ${JSON.stringify(produced)}\n`
+      : `# produced (none reported — skill wrote no ${RUN_REPORT_ENV})\n`,
+  );
   return finish({
     ok: exitCode === 0,
     residualProcs: residual.length,
+    produced,
     detail: `checkout ${co.action}; claude exit ${exitCode}`,
     exitCode,
   });
@@ -901,18 +1032,53 @@ if (import.meta.main) {
     if (!names.length) throw new Error(`envFile set no variables: ${cfg.envFile}`);
   }
 
+  // Shared-file write plumbing. Declared HERE, above its first user: `recordSkip` runs during
+  // cadence filtering, which happens before the run loop — a TDZ crash the unit tests could
+  // not see, because they exercise the pure helpers and never the main loop. Caught by
+  // actually running the driver.
+  const pid = process.pid;
+  const stateLockPath = `${sPath}.lock`;
+  const nowMs = () => Date.now();
+  const sleepSync = (ms: number) => Bun.sleepSync(ms);
+  const logDir = expandHome(cfg.logDir ?? defaultLogDir(cfg.checkoutBase));
+  const { summary } = logPaths(logDir, "x/y", "z");
+
+  /** A round that did NOT happen is a fact worth keeping — printing it only to the cron log
+   *  makes "why has this repo not moved" and "how often does the cadence collide" both
+   *  unanswerable from data. Same file, same shape, zero duration. */
+  const recordSkip = (
+    p: PlannedRun,
+    outcome: "skipped-cadence" | "skipped-locked",
+    detail: string,
+  ): void => {
+    withFileLock(stateLockPath, pid, realLockIO, nowMs, sleepSync, () => {
+      appendFileSync(
+        summary,
+        `${summaryLine({
+          ts: new Date(Date.now()).toISOString(),
+          runner: cfg.runner,
+          slug: p.slug,
+          skill: p.skillLocal,
+          outcome,
+          exitCode: null,
+          ms: 0,
+          detail,
+        })}\n`,
+      );
+    });
+  };
+
   const dueRuns = gated.filter((g) => g.due).map((g) => g.p);
   const skipped = gated.length - dueRuns.length;
   if (skipped) {
     for (const g of gated.filter((g) => !g.due)) {
+      recordSkip(g.p, "skipped-cadence", `within cadence, due in ${g.remainingMin}m`);
       console.log(
         `# skip [${g.p.slug} · ${g.p.skill}] — within cadence, due in ${g.remainingMin}m`,
       );
     }
   }
 
-  const logDir = expandHome(cfg.logDir ?? defaultLogDir(cfg.checkoutBase));
-  const { summary } = logPaths(logDir, "x/y", "z");
   console.log(`# logs → ${logDir}/  (per-(repo,skill) .log + fleet.jsonl)`);
 
   const outcomeOf = (detail: string, ok: boolean): RunRecord["outcome"] =>
@@ -927,12 +1093,8 @@ if (import.meta.main) {
   // Per-repo run locks live here; overlapping invocations coexist by skipping a repo whose
   // lock a LIVE invocation still holds (see runlock.ts). The cron no longer serializes whole
   // invocations, so shared-file writes (state stamps + fleet.jsonl) are guarded per-write.
-  const pid = process.pid;
   const lockDir = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.locks`;
   ensureLockDir(lockDir);
-  const stateLockPath = `${sPath}.lock`;
-  const nowMs = () => Date.now();
-  const sleepSync = (ms: number) => Bun.sleepSync(ms);
 
   // Record one finished run. The summary append + cadence stamp touch SHARED files, so with
   // overlapping invocations they run under a short cross-process lock (advisory: a contended
@@ -953,7 +1115,10 @@ if (import.meta.main) {
           exitCode: res.exitCode,
           ms: res.ms,
           detail: res.detail,
-          ...(res.residualProcs ? { residualProcs: res.residualProcs } : {}),
+          runId: res.runId,
+          // Always, including 0 — see RunRecord.residualProcs.
+          residualProcs: res.residualProcs ?? 0,
+          ...(res.produced ? { produced: res.produced } : {}),
         })}\n`,
       );
       if (res.ok) recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
@@ -999,6 +1164,7 @@ if (import.meta.main) {
   let lockSkipped = 0;
   const finish = (o: RunOutcome): void => {
     if (o.locked) {
+      recordSkip(o.p, "skipped-locked", "another invocation holds the per-repo lock");
       console.log(
         `# skip [${o.p.slug} · ${o.p.skill}] — already running in another invocation (per-repo lock held)`,
       );

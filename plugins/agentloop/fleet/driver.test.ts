@@ -12,15 +12,19 @@ import {
   expandHome,
   loadEnvFile,
   logPaths,
+  newRunId,
   permissionFlags,
   pidsWithCwdUnder,
   planRuns,
   type RepoEntry,
+  RUN_REPORT_ENV,
+  readRunProduct,
   reapGroup,
   reapOrphans,
   referenceEnvKey,
   renderPrompt,
   resolveCovered,
+  rotateIfLarge,
   runEnv,
   stateKey,
   summaryLine,
@@ -609,6 +613,117 @@ describe("reapOrphans (cleaning up what an earlier round left behind)", () => {
       999,
     );
     expect(r).toEqual({ killed: [], spared: [] });
+  });
+});
+
+describe("observability: what a round DID, not just that it ran", () => {
+  it("run ids sort by time and do not collide within a millisecond", () => {
+    const a = newRunId(1_700_000_000_000, () => 0.1);
+    const b = newRunId(1_700_000_000_000, () => 0.9);
+    const later = newRunId(1_700_000_001_000, () => 0.1);
+    expect(a).not.toBe(b); // same ms, different random tail
+    expect(a < later).toBe(true); // base36 of epoch ms stays lexically sortable
+    expect(a).toMatch(/^[0-9a-z]+-[0-9a-f]{4}$/);
+  });
+
+  it("reads the skill's structured report", () => {
+    const p = readRunProduct(
+      "/x/report.json",
+      () => true,
+      () => JSON.stringify({ prsOpened: [2035], issuesClosed: [2029], noop: false }),
+      () => {},
+    );
+    expect(p).toEqual({ prsOpened: [2035], issuesClosed: [2029], noop: false });
+  });
+
+  // Without consuming it, a round that reports nothing inherits the previous round's work
+  // and looks productive — a false positive in exactly the direction nobody would question.
+  it("CONSUMES the report, so a silent round cannot inherit the last one's credit", () => {
+    const removed: string[] = [];
+    readRunProduct(
+      "/x/report.json",
+      () => true,
+      () => "{}",
+      (f) => removed.push(f),
+    );
+    expect(removed).toEqual(["/x/report.json"]);
+  });
+
+  it("survives a skill that wrote nothing, or wrote garbage", () => {
+    expect(readRunProduct("/x/none.json", () => false)).toBeUndefined();
+    const bad = (body: string) =>
+      readRunProduct(
+        "/x/r.json",
+        () => true,
+        () => body,
+        () => {},
+      );
+    expect(bad("not json at all")).toBeUndefined();
+    expect(bad("[1,2,3]")).toBeUndefined(); // an array is not a RunProduct
+    expect(bad("null")).toBeUndefined();
+  });
+
+  it("still consumes a malformed report (else it poisons every later round)", () => {
+    const removed: string[] = [];
+    readRunProduct(
+      "/x/r.json",
+      () => true,
+      () => "{oops",
+      (f) => removed.push(f),
+    );
+    expect(removed).toEqual(["/x/r.json"]);
+  });
+
+  it("names the report file BESIDE the checkout — in-tree would dirty git status forever", () => {
+    const run = { skillLocal: "issue-sweep", checkoutPath: "/co/X", root: "/p", runner: "r" };
+    const e = runEnv(run, base(), {});
+    expect(e[RUN_REPORT_ENV]).toBe("/co/X.run-report.json");
+    expect(e[RUN_REPORT_ENV].startsWith("/co/X/")).toBe(false);
+  });
+
+  it("rotates a log past the cap, keeping exactly one generation", () => {
+    const moves: [string, string][] = [];
+    expect(
+      rotateIfLarge(
+        "/l/a.log",
+        100,
+        () => 500,
+        (f, t) => moves.push([f, t]),
+      ),
+    ).toBe(true);
+    expect(moves).toEqual([["/l/a.log", "/l/a.log.1"]]);
+  });
+
+  it("leaves a small log alone, and treats a missing one as nothing to do", () => {
+    expect(
+      rotateIfLarge(
+        "/l/a.log",
+        100,
+        () => 50,
+        () => {},
+      ),
+    ).toBe(false);
+    expect(
+      rotateIfLarge(
+        "/l/a.log",
+        100,
+        () => undefined,
+        () => {},
+      ),
+    ).toBe(false);
+  });
+
+  it("never fails a round because rotation failed — it is hygiene, not correctness", () => {
+    expect(
+      rotateIfLarge(
+        "/l/a.log",
+        100,
+        () => 500,
+        () => {
+          throw new Error("EPERM");
+        },
+      ),
+    ).toBe(false);
   });
 });
 

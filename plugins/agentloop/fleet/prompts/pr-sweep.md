@@ -17,4 +17,14 @@ DISCIPLINE (the skill spells these out; these are the productivity-critical ones
 3. **DEDUP-CLOSE** same-issue duplicates (keep the best, comment + close the twin, both directions linked).
 4. **NEVER re-post the same verdict** — edit the last one in place (`--edit-last`). Sync local to latest `origin/<default-branch>` first; **for affected-gate correctness, rebase a PR onto `<default-branch>` before judging its verification.** Act on every actionable item, never stop to ask.
 
+RUN REPORT — before that heartbeat, write what this round actually DID to the JSON file named by `$AGENTLOOP_RUN_REPORT`. One line, `jq`-free:
+
+```bash
+cat > "$AGENTLOOP_RUN_REPORT" <<'JSON'
+{"prsOpened":[2035],"issuesClosed":[2029,1007],"commentsPosted":3,"noop":false,"summary":"closed 2 stale issues, opened 1 PR"}
+JSON
+```
+
+Every key is optional; write `{"noop":true,"summary":"nothing actionable"}` for a deliberately quiet round — that is a RESULT, not an absence, and the difference between "found nothing" and "never reported" is the whole point. Numbers are issue/PR numbers, not URLs. If `$AGENTLOOP_RUN_REPORT` is unset you are not running under the fleet driver — skip silently. This file is the ONLY machine-readable record of the round's output: the driver knows the round exited 0 and took 47 minutes, and cannot know whether that produced three PRs or nothing at all. Never let writing it fail the run.
+
 END OF RUN — if this repo's `.claude/repo-profile.md` declares a `presence_heartbeat_script` and it exists, running it is the MANDATORY LAST STEP on EVERY exit path: PRs opened, silent no-op round, or you hit a wall and stopped early. A round that ends without a beat is a bug, not a quiet success — the board cannot tell "idle" from "dead". Use `--routine "pr-sweep ({{RUNNER}})"` and a one-line `--outcome`, and inline-prefix `ARC_AGENT_RUNNER={{RUNNER}}` on that command (a session-start `export` does NOT persist across Bash calls). If the profile declares no such script, skip silently — never let presence reporting block or fail the run.
