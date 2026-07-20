@@ -347,6 +347,79 @@ function detectCronPath(bunPath: string): string {
 /** Parse a compact --repos spec: "slug=skill,skill@cadence;slug=skill@cadence".
  *  cloneUrl/setupCommand are NOT in the compact form (special chars) — reconcile
  *  preserves those from an existing repos.json, or pass --repos-json for full control. */
+/** Credentials the cron rows source. `derive` returns the value or "" if unobtainable. */
+export const ENV_KEYS: { key: string; derive: string; how: string }[] = [
+  {
+    key: "GH_TOKEN",
+    // Already on the machine if the human has ever used `gh` — no reason to make them paste it.
+    derive: "gh auth token 2>/dev/null",
+    how: "gh auth login",
+  },
+  {
+    key: "CLAUDE_CODE_OAUTH_TOKEN",
+    // Deliberately NOT derived: `claude setup-token` is an interactive OAuth flow. A setup
+    // script must not drive a human's browser login, and a token minted behind their back is
+    // worse than one line of manual work.
+    derive: "",
+    how: "claude setup-token",
+  },
+];
+
+/**
+ * Create the credential file the cron rows source, filling in what the machine can already
+ * answer and leaving an obvious hole for what it cannot.
+ *
+ * Onboarding is the point. Warning "create this file before the first fire" leaves a teammate
+ * to discover the format from a README, and the failure mode when they get it wrong is a
+ * fleet that runs and quietly does nothing — a round that sources 0 vars is the one shape the
+ * driver already aborts loudly on, precisely because it used to be silent.
+ *
+ * NEVER overwrites an existing file, and never echoes a value — the caller prints only which
+ * keys are present, which is enough to know what is left to do.
+ */
+export function scaffoldEnvFile(
+  path: string,
+  exists: (p: string) => boolean = existsSync,
+  read: (p: string) => string = (p) => readFileSync(p, "utf8"),
+  write: (p: string, body: string) => void = (p, body) => writeFileSync(p, body, { mode: 0o600 }),
+  run: (cmd: string) => string = (cmd) => {
+    const r = Bun.spawnSync(["bash", "-c", cmd]);
+    return new TextDecoder().decode(r.stdout).trim();
+  },
+): string[] {
+  const out: string[] = [];
+  if (exists(path)) {
+    const body = read(path);
+    const missing = ENV_KEYS.filter((k) => !new RegExp(`^\\s*export\\s+${k.key}=`, "m").test(body));
+    out.push(
+      missing.length
+        ? `⚠ ${path} exists but sets no ${missing.map((m) => m.key).join(", ")} — add it (${missing.map((m) => m.how).join("; ")}) or the fleet aborts on its first fire.`
+        : `✓ ${path} already sets ${ENV_KEYS.map((k) => k.key).join(", ")}`,
+    );
+    return out; // never touch a file holding someone's credentials
+  }
+
+  const lines = ["# agentloop fleet credentials — sourced by every cron row. Keep mode 600.", ""];
+  const todo: typeof ENV_KEYS = [];
+  for (const k of ENV_KEYS) {
+    const v = k.derive ? run(k.derive) : "";
+    if (v) lines.push(`export ${k.key}=${v}`);
+    else {
+      lines.push(`export ${k.key}=   # ← FILL: ${k.how}`);
+      todo.push(k);
+    }
+  }
+  write(path, `${lines.join("\n")}\n`);
+  out.push(`✓ wrote ${path} (mode 600)`);
+  for (const k of ENV_KEYS) {
+    const done = !todo.includes(k);
+    out.push(
+      `   ${done ? "✓" : "→"} ${k.key}${done ? " (derived)" : `  RUN: ${k.how}, then paste it in`}`,
+    );
+  }
+  return out;
+}
+
 export function parseReposSpec(spec: string): RepoEntry[] {
   const out: RepoEntry[] = [];
   for (const part of spec
@@ -354,13 +427,22 @@ export function parseReposSpec(spec: string): RepoEntry[] {
     .map((s) => s.trim())
     .filter(Boolean)) {
     const [slug, rest = ""] = part.split("=");
-    const [skillsCsv, cadence] = rest.split("@");
+    // `<slug>=<skills>@<cadence>+<ref,ref>` — the `+` tail names other catalog repos this one
+    // must be able to READ (see RepoEntry.referenceRepos). Optional and rare, so it is a
+    // suffix rather than another positional field.
+    const [head, refsCsv] = rest.split("+");
+    const [skillsCsv, cadence] = head.split("@");
     const skills = skillsCsv
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
     const entry: RepoEntry = { slug: slug.trim(), defaultBranch: "main", skills };
     if (cadence) entry.cadenceMinutes = Number(cadence);
+    const refs = (refsCsv ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (refs.length) entry.referenceRepos = refs;
     out.push(entry);
   }
   return out;
@@ -470,11 +552,8 @@ if (import.meta.main) {
   console.log(`✓ wrote ${p.deployment}`);
   console.log(`✓ wrote ${p.catalog}`);
 
-  if (input.envFile && !existsSync(expandHome(input.envFile))) {
-    console.log(
-      `⚠ envFile ${input.envFile} not found — the cron rows source it for credentials; create it before the first fire (see fleet/README.md).`,
-    );
-  }
+  if (input.envFile)
+    for (const line of scaffoldEnvFile(expandHome(input.envFile))) console.log(line);
 
   if (local) {
     // Invoke crontab DIRECTLY, never via `bash -lc`: a login shell sources the user's

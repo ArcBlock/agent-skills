@@ -40,7 +40,7 @@ uname -s                                             # Darwin → shlock, Linux 
 crontab -l 2>/dev/null | sed -n '/# agentloop-fleet:begin/,/# agentloop-fleet:end/p'  # existing block
 cat ~/.agentloop-fleet/repos.json 2>/dev/null        # existing catalog (reconcile, don't clobber)
 ls -1 ~/Develop/arcblock 2>/dev/null                 # local clones you could cover via worktree mode
-ls ~/.arc-routines/env 2>/dev/null && echo "envFile present"  # credential file for cron
+ls ~/.agentloop-fleet/env 2>/dev/null && echo "envFile present"  # credentials; installer scaffolds it if absent
 ```
 
 Load `RemoteTrigger` (ToolSearch) and `{action:"list"}` to see the user's current cloud routines
@@ -56,6 +56,11 @@ the human — the API has no delete).
 2. **repos + skills** (header "Repos", multiSelect): the covered set. Default = existing catalog
    if present, else the clones detected under the base dir, with `issue-sweep`+`pr-sweep` each.
    (A repo must have been through `/agentloop:bootstrap` — repo-profile + labels — first.)
+   **If a covered repo's conventions live in ANOTHER covered repo** — a content/blocklet repo
+   whose page format and examples belong to the repo that builds it — give it
+   `referenceRepos`, or its agent works blind and re-invents conventions that already exist.
+   In the `--repos` spec that is the `+` tail: `Owner/site=issue-sweep@240+Owner/core`.
+   Do not ask about this when no such pairing is apparent; it is rare.
 3. **where** (header "Where"): Local (crontab) / Cloud (routines) / Both. Default = Local if a
    crontab exists and the machine stays on; else Cloud.
 4. **cadence + model** (header "Cadence"): cadence minutes per repo (default 120 = every 2h under
@@ -73,7 +78,7 @@ bun "$PLUGIN/fleet/setup.ts" \
   --runner <runner> \
   --repos "<slug=skill,skill@cadence;…>" \
   --checkout-base-dir <base with your clones, e.g. ~/Develop/arcblock> \
-  --env-file ~/.arc-routines/env \
+  --env-file ~/.agentloop-fleet/env \
   --model <model> \
   --local                       # dry-run: prints deployment.json + repos.json + crontab block
 bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes config + installs crontab
@@ -81,16 +86,15 @@ bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes c
 
 - The installer merges over any existing config (preserves hand-added `skillEnv`/`env`), reconciles
   the crontab marker-block (never touches other cron), and is idempotent.
-- **envFile is where credentials live** (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
-  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`). If it's missing, create it before the first fire —
-  on macOS cron can't reach the GUI keychain, so drop long-lived tokens to a file:
+- **envFile — the installer writes it for you.** It derives `GH_TOKEN` from the machine's own
+  `gh` session, leaves a marked `FILL` line for `CLAUDE_CODE_OAUTH_TOKEN` (an interactive
+  browser login is the human's to run, never a script's), and writes mode 600. It NEVER
+  overwrites an existing file — an env file holds someone's credentials. If its output shows a
+  `RUN:` line, relay it and do not call setup complete: a round that sources 0 vars aborts on
+  the first fire, which is loud but wastes a cycle.
 
   ```bash
-  BASE=~/.arc-routines; mkdir -p "$BASE"
-  T=$(claude setup-token | grep -oE 'sk-ant-oat[0-9A-Za-z_-]+' | head -1)
-  G=$(env -u GITHUB_TOKEN gh auth token 2>/dev/null)
-  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nGH_TOKEN=%s\nCLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0\n' "$T" "$G" > "$BASE/env"
-  chmod 600 "$BASE/env"
+  claude setup-token          # only if the installer asked for it, then paste into the envFile
   ```
 - **Repos running a daemon** (arc: `arc service`) need per-skill isolated ports so issue-sweep and
   pr-sweep don't collide — add `skillEnv` to the generated deployment.json (issue-sweep
@@ -125,6 +129,15 @@ stagger), but usually pick one to avoid burning double tokens.
 | arc · issue-sweep | local | installed / cloud updated / unchanged | `17 * * * *` | … |
 
 Plus:
+- **Credentials**: the installer writes the envFile (mode 600), deriving `GH_TOKEN` from the
+  machine's own `gh` session. It NEVER overwrites an existing one. If it printed a `RUN:` line
+  for `CLAUDE_CODE_OAUTH_TOKEN`, say so plainly and stop short of calling setup complete —
+  `claude setup-token` is an interactive browser login, so it is the human's to run, and a
+  fleet whose envFile sets 0 vars aborts on its first fire.
+- **How to watch it**: `/agentloop:fleet-report` reads the fleet's own telemetry back — rounds
+  run vs skipped (and why), what each produced, per-repo×skill duration, and whether any round
+  left processes behind. Say this every time: a fleet nobody looks at is one whose first
+  failure is discovered by accident.
 - **Legacy**: canonical-unmatched cloud routines (name + cron + one-line summary) + "the API has no
   delete — handle at https://claude.ai/code/routines"; any old local block that was replaced.
 - **Single-identity caveat (local)**: a local cron's PRs are authored by your own `gh` account, and

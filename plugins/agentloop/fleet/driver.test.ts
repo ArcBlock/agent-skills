@@ -26,6 +26,7 @@ import {
   resolveCovered,
   rotateIfLarge,
   runEnv,
+  settleResidual,
   stateKey,
   summaryLine,
 } from "./driver.ts";
@@ -542,6 +543,51 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
 
   it("reports zero residue as absent, not as a noisy zero", () => {
     expect(pidsWithCwdUnder("/co/nothing-here", () => ({ code: 0, out: "" }))).toEqual([]);
+  });
+
+  // Measured on a live fleet: single-sample counting reported an MCP server and a shell
+  // script as "survivors" while they were shutting down normally, gone seconds later.
+  describe("settleResidual (a process mid-exit is not a leak)", () => {
+    const lsofFor = (pids: number[]) => ({
+      code: 0,
+      out: pids.flatMap((p) => [`p${p}`, "n/co/X"]).join("\n"),
+    });
+    /** Returns each successive snapshot, so a shrinking tree can be simulated. */
+    const shSeq = (snaps: number[][]) => {
+      let i = 0;
+      return () => lsofFor(snaps[Math.min(i++, snaps.length - 1)]);
+    };
+
+    it("does not report a tree that is still shedding", async () => {
+      const r = await settleResidual("/co/X", shSeq([[1, 2, 3], [2, 3], [3], []]), async () => {});
+      expect(r).toEqual([]);
+    });
+
+    it("DOES report what is still there once the set stops shrinking", async () => {
+      // 9 never leaves — that is a real leak, and the whole point of the field.
+      const r = await settleResidual("/co/X", shSeq([[9, 10], [9], [9], [9]]), async () => {});
+      expect(r).toEqual([9]);
+    });
+
+    it("returns immediately on a clean checkout — no waiting in the common case", async () => {
+      let slept = 0;
+      const r = await settleResidual(
+        "/co/X",
+        () => ({ code: 0, out: "" }),
+        async () => {
+          slept++;
+        },
+      );
+      expect(r).toEqual([]);
+      expect(slept).toBe(0); // the healthy path must not add seconds to every round
+    });
+
+    it("gives up at the ceiling rather than waiting on a churning tree forever", async () => {
+      // Never stabilises and never empties: alternating sets.
+      const flip = shSeq([[1], [2], [1], [2], [1], [2], [1], [2], [1], [2], [1], [2]]);
+      const r = await settleResidual("/co/X", flip, async () => {}, 2000, 500);
+      expect(r.length).toBe(1); // bounded, and still reports what it last saw
+    });
   });
 });
 

@@ -367,6 +367,38 @@ export const ppidOf = (pid: number, sh: Sh = realSh): number =>
   Number(sh(`ps -o ppid= -p ${pid} 2>/dev/null | tr -d ' '`).out.trim()) || 0;
 
 /**
+ * What is STILL in the checkout once the round's own tree has finished dying.
+ *
+ * A single post-reap sample overcounts. Measured on a live fleet: rounds reported 1–2
+ * "survivors" that were an MCP server and a `bash …/triage.sh` shutting down normally — gone
+ * seconds later, nothing leaked. That is worse than not measuring: a residue signal that
+ * cries wolf gets ignored, and the 15-process leak it exists to catch gets ignored with it.
+ *
+ * So: poll until the set stops shrinking, or until `maxWaitMs`. A process that is exiting
+ * disappears within a poll or two; one that is genuinely stuck is still there at the end, and
+ * only that is reported.
+ */
+export async function settleResidual(
+  checkoutPath: string,
+  sh: Sh = realSh,
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+  maxWaitMs = 6000,
+  stepMs = 750,
+): Promise<number[]> {
+  let prev = pidsWithCwdUnder(checkoutPath, sh);
+  if (!prev.length) return prev;
+  for (let waited = 0; waited < maxWaitMs; waited += stepMs) {
+    await sleep(stepMs);
+    const now = pidsWithCwdUnder(checkoutPath, sh);
+    if (!now.length) return now;
+    // Stable across a full step and nothing left to shed → it is not mid-exit, it is stuck.
+    if (now.length === prev.length && now.every((p, i) => p === prev[i])) return now;
+    prev = now;
+  }
+  return prev;
+}
+
+/**
  * Kill leftovers from EARLIER rounds in this checkout — the safety net under the group reap.
  *
  * The group reap only covers processes this driver started. It cannot cover a round whose
@@ -926,9 +958,9 @@ export async function executeRun(
     // succeeds, and the leak we found came from rounds that SUCCEEDED.
     await reapGroup(proc.pid, write);
   }
-  // Counted after the reap, so a live sweep is never mistaken for residue: whatever is
-  // still here escaped a signal aimed at it.
-  const residual = pidsWithCwdUnder(run.checkoutPath, sh);
+  // Counted after the reap AND after the tree has stopped shedding — a process mid-exit is
+  // not a leak, and reporting it as one is how this signal would lose its credibility.
+  const residual = await settleResidual(run.checkoutPath, sh);
   if (residual.length)
     write(`# ⚠ ${residual.length} process(es) survived the reap: ${residual.join(", ")}\n`);
   const produced = readRunProduct(reportPath);

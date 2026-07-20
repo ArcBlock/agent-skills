@@ -14,6 +14,7 @@ import {
   renderCronBlock,
   renderCronRow,
   type SetupInput,
+  scaffoldEnvFile,
   skillBaseMinute,
   staggerOffset,
   stripCronBlock,
@@ -90,6 +91,89 @@ describe("buildDeployment", () => {
     });
     expect(d.permissionMode).toBe("acceptEdits");
     expect(d.parallel).toBe(false);
+  });
+});
+
+describe("parseReposSpec — referenceRepos", () => {
+  test("parses the +refs tail without disturbing skills or cadence", () => {
+    const [r] = parseReposSpec("ArcBlock/site=issue-sweep,pr-sweep@240+ArcBlock/arc");
+    expect(r.slug).toBe("ArcBlock/site");
+    expect(r.skills).toEqual(["issue-sweep", "pr-sweep"]);
+    expect(r.cadenceMinutes).toBe(240);
+    expect(r.referenceRepos).toEqual(["ArcBlock/arc"]);
+  });
+  test("accepts several references", () => {
+    const [r] = parseReposSpec("O/a=issue-sweep+O/b,O/c");
+    expect(r.referenceRepos).toEqual(["O/b", "O/c"]);
+  });
+  test("omits the key entirely when no reference is given — the common case", () => {
+    const [r] = parseReposSpec("O/a=issue-sweep@60");
+    expect(r.referenceRepos).toBeUndefined();
+    expect(r.cadenceMinutes).toBe(60);
+  });
+});
+
+describe("scaffoldEnvFile", () => {
+  const KEYS = ["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+  test("writes what the machine can answer, and marks what it cannot", () => {
+    let body = "";
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => false,
+      () => "",
+      (_p, b) => {
+        body = b;
+      },
+      (cmd) => (cmd.includes("gh auth token") ? "gho_derived" : ""),
+    );
+    expect(body).toContain("export GH_TOKEN=gho_derived");
+    expect(body).toContain("export CLAUDE_CODE_OAUTH_TOKEN=");
+    expect(body).toContain("FILL"); // the hole is obvious, not implied
+    expect(out.join("\n")).toContain("claude setup-token"); // and says exactly how to fill it
+  });
+
+  // The one behaviour that must never regress: this file holds someone's credentials.
+  test("NEVER overwrites an existing file", () => {
+    let wrote = false;
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => true,
+      () => KEYS.map((k) => `export ${k}=real`).join("\n"),
+      () => {
+        wrote = true;
+      },
+      () => "should-not-be-called",
+    );
+    expect(wrote).toBe(false);
+    expect(out[0]).toContain("already sets");
+  });
+
+  test("flags an existing file that is missing a key rather than silently passing", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => true,
+      () => "export GH_TOKEN=real\n", // no CLAUDE_CODE_OAUTH_TOKEN
+      () => {},
+      () => "",
+    );
+    expect(out[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(out[0]).toContain("aborts");
+  });
+
+  test("derives nothing when the machine has no gh session — still writes a usable skeleton", () => {
+    let body = "";
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => false,
+      () => "",
+      (_p, b) => {
+        body = b;
+      },
+      () => "",
+    );
+    for (const k of KEYS) expect(body).toContain(`export ${k}=`);
+    expect(out.filter((l) => l.includes("RUN:")).length).toBe(2);
   });
 });
 
