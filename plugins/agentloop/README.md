@@ -85,6 +85,11 @@ practical get-it-running-and-debug guide.
 
 ### The one-command path — `/agentloop:fleet-setup`
 
+**Setting it up for the first time? → [`SETUP.md`](SETUP.md)** — the step-by-step path, with
+the prerequisites, the token you must mint by hand, what to verify before trusting cron, and
+the traps. Everything below is what that does under the hood: read it to debug or to
+configure by hand, not to get started.
+
 Don't hand-write any of the config below. Run the interactive setup skill:
 
 ```
@@ -100,7 +105,7 @@ it calls the installer, which is also runnable directly for scripted bootstrap:
 
 ```bash
 bun fleet/setup.ts --runner me --repos "ArcBlock/arc=issue-sweep,pr-sweep@120" \
-  --checkout-base-dir ~/Develop/arcblock --env-file ~/.arc-routines/env --local   # dry-run
+  --checkout-base-dir ~/Develop/arcblock --env-file ~/.agentloop-fleet/env --local   # dry-run
 bun fleet/setup.ts … same … --local --apply                                       # write + install
 ```
 
@@ -115,12 +120,15 @@ repo-profile + labels + verify gate, but deliberately does not schedule anything
   your **`agentloopRoot`**.
 - **Clone the repos you'll cover** under one base dir (e.g. `~/Develop/arcblock/{arc,did,…}`)
   — `worktree` checkout mode reuses these clones (shares the object store, isolated tree).
-- **A GitHub token** with repo write in an env file (`gh` uses it). Reuse
-  `~/.arc-routines/env` if you already have one.
+- **Credentials** — the installer writes `~/.agentloop-fleet/env` (mode 600) itself,
+  deriving `GH_TOKEN` from your own `gh` session and leaving a marked `FILL` line for
+  `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` — an interactive login is yours to run).
+  It never overwrites an existing file. Cron cannot reach the GUI keychain, which is why
+  long-lived tokens go to a file at all.
 
 ### 2. Two config files — live, per-deployment, NOT committed
-Copy `fleet/deployment.example.json` + `fleet/repos.example.json` into `~/.agentloop-fleet/`
-and edit. Minimal `~/.agentloop-fleet/deployment.json`:
+`/agentloop:fleet-setup` GENERATES both; the examples are for reading, not for copying (a
+copied config carries the previous owner's paths). Shape: Minimal `~/.agentloop-fleet/deployment.json`:
 ```json
 {
   "runner": "<your-name>",
@@ -131,7 +139,7 @@ and edit. Minimal `~/.agentloop-fleet/deployment.json`:
   "cover": "all",
   "permissionMode": "skip",
   "model": "claude-sonnet-5",
-  "envFile": "~/.arc-routines/env",
+  "envFile": "~/.agentloop-fleet/env",
   "env": { "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0" },
   "parallel": true,
   "logDir": "~/.agentloop-fleet/logs"
@@ -180,8 +188,8 @@ Watch it end-to-end and check the log (below) before trusting it unattended.
 issue-sweep and pr-sweep get separate schedules; each sources your env then runs the driver
 for one skill (so each skill has its own cadence lane):
 ```cron
-10 * * * * { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill issue-sweep --run; } >> ~/.agentloop-fleet/logs/cron-issue-sweep.log 2>&1
-40 * * * * { . ~/.arc-routines/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill pr-sweep    --run; } >> ~/.agentloop-fleet/logs/cron-pr-sweep.log 2>&1
+10 * * * * { . ~/.agentloop-fleet/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill issue-sweep --run; } >> ~/.agentloop-fleet/logs/cron-issue-sweep.log 2>&1
+40 * * * * { . ~/.agentloop-fleet/env; bun <agentloopRoot>/fleet/driver.ts --config ~/.agentloop-fleet/deployment.json --catalog ~/.agentloop-fleet/repos.json --skill pr-sweep    --run; } >> ~/.agentloop-fleet/logs/cron-pr-sweep.log 2>&1
 ```
 **No `shlock`/`flock` wrapper.** The driver holds a **per-(repo,skill) lock** itself
 (`fleet/runlock.ts`), so overlapping invocations coexist: if a slow repo (blockchain's ~2h
