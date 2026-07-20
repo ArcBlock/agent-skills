@@ -6,7 +6,7 @@
  * `.claude/verify/identity.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { type CheckResult, renderReport, trimFullLogsSection } from "./report.ts";
+import { type CheckResult, renderReport, run, trimFullLogsSection } from "./report.ts";
 
 const results: CheckResult[] = [
   {
@@ -107,5 +107,32 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
     const md = renderReport(results, { scenario: "pre-pr" });
     expect(md).not.toContain("### Full Logs");
     expect(trimFullLogsSection(md)).toBe(md);
+  });
+});
+
+// Ported from main's verification/scripts/report.test.ts on merge (#1922/#2054): the run() subprocess
+// timeout landed in report.ts via auto-merge; its test lives here now that the engine is in the plugin.
+describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts forever)", () => {
+  test("kills a hung command at timeoutMs and reports code 124 + timedOut:true", () => {
+    const start = Date.now();
+    const r = run("sleep 999", {}, undefined, 300);
+    const elapsed = Date.now() - start;
+    expect(r.code).toBe(124);
+    expect(r.timedOut).toBe(true);
+    // Must return promptly after the timeout, not after the full 999s sleep.
+    expect(elapsed).toBeLessThan(10_000);
+  });
+
+  test("without timeoutMs, behavior is unchanged — real exit code, no timedOut flag", () => {
+    const r = run("exit 3");
+    expect(r.code).toBe(3);
+    expect(r.timedOut).toBeUndefined();
+  });
+
+  test("a fast command under a generous timeoutMs completes normally", () => {
+    const r = run("echo hi", {}, undefined, 5000);
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("hi");
+    expect(r.timedOut).toBeUndefined();
   });
 });

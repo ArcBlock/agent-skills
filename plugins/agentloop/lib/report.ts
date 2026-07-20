@@ -36,22 +36,40 @@ export interface CheckResult {
   rawFull?: string;
 }
 
-/** Run a shell command, capture combined stdout+stderr, measure wall time. */
+/**
+ * Run a shell command, capture combined stdout+stderr, measure wall time.
+ *
+ * `timeoutMs`, when given, uses spawnSync's native `timeout`/`killSignal`
+ * options — no shell `timeout`/`gtimeout` binary dependency (that approach
+ * exits 127 on stock macOS, issue #1296). A killed process reports as
+ * `code: 124` (matching the `timeout(1)` convention already used by
+ * check-native.ts) with `timedOut: true`, instead of hanging the caller
+ * forever (issue #1922: an affected-test run against a slow package could
+ * block pre-pr.ts indefinitely with no report ever produced).
+ */
 export function run(
   cmd: string,
   env: Record<string, string> = {},
   input?: string,
-): { code: number; out: string; ms: number } {
+  timeoutMs?: number,
+): { code: number; out: string; ms: number; timedOut?: boolean } {
   const start = Date.now();
   const r = spawnSync("bash", ["-c", cmd], {
     encoding: "utf8",
     env: { ...process.env, ...env },
     maxBuffer: 128 * 1024 * 1024,
     ...(input === undefined ? {} : { input }),
+    ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" as const }),
   });
   const ms = Date.now() - start;
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
-  return { code: typeof r.status === "number" ? r.status : 1, out, ms };
+  const timedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
+  return {
+    code: timedOut ? 124 : typeof r.status === "number" ? r.status : 1,
+    out,
+    ms,
+    ...(timedOut ? { timedOut: true } : {}),
+  };
 }
 
 export function tail(s: string, n = 50): string {

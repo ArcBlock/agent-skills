@@ -197,6 +197,29 @@ describe("labelStance (arc#1722: which of agent:ready / needs-human-confirm was 
       ),
     ).toBe(false);
   });
+
+  // arc#1362 archetype: the presence-board heartbeat is script-authored
+  // (scripts/presence-heartbeat.ts edits the same comment in place) but carries
+  // no sweep-trace and no `> 🤖 AI Agent` marker — without this exception it
+  // reads as a fresh human reply and the board gets "re-processed" every round.
+  it("recognizes the presence-board `> 📡` heartbeat as non-human (#1361/#1362)", () => {
+    expect(
+      isAiAgentComment(
+        '<!-- presence: {"runner":"Robert Mao"} -->\n> 📡 **runner: Robert Mao** — 由 `scripts/presence-heartbeat.ts` 维护(编辑本 comment,不新发)\n\n| routine | last beat |...',
+      ),
+    ).toBe(true);
+  });
+
+  // arc#1977 archetype: not just the leading HTML comment but the `> 🤖` marker
+  // LINE ITSELF arrived double-HTML-encoded (`&gt;` instead of `>`), so the
+  // #1278 leading-comment decode alone wasn't enough to recognize it.
+  it("recognizes AI comment when the marker line itself is double-HTML-escaped (#1278 variant, arc#1977)", () => {
+    expect(
+      isAiAgentComment(
+        "&lt;!-- test-sweep-report --&gt;\n&gt; 🤖 AI Agent @ vm · runner:yechao · skills@71a1c3c1\n\nreport body",
+      ),
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -264,10 +287,46 @@ describe("isTerminalAiComment", () => {
     );
   });
 
-  it("NOT terminal when comment says 留开放 (non-terminal wins over terminal check)", () => {
+  it("NOT terminal when comment says 留开放 and has no real unlock condition", () => {
     expect(isTerminalAiComment("> 🤖 AI Agent\n🟠 不在本轮范围 / 留开放，PR 暂无计划。")).toBe(
       false,
     );
+  });
+
+  // TERMINAL WINS (SKILL.md Step 2, detection step 2): a genuine unlock
+  // condition overrides an incidental deferral-looking word elsewhere in the
+  // same comment. Before this fix, isNonTerminalAiComment checked
+  // NON_TERMINAL_PATTERNS unconditionally and never looked at
+  // TERMINAL_INDICATORS at all, so a comment with a real `needs-human-confirm`
+  // verdict got silently re-classified as "unfinished" whenever it also
+  // happened to contain any deferral-looking substring.
+  it("TERMINAL WINS: a real needs-human-confirm verdict overrides an incidental 'todo' substring (arc#1923 archetype)", () => {
+    const body =
+      "> 🤖 AI Agent Issue Review\n" +
+      "A2(did-space authed `/explorer` 走查)和 B(todo 宿主 + 嵌入 explorer 走查)不受这个虚假前提影响,可以独立往前推。\n" +
+      '<!-- sweep-trace: {"ver":1,"issue":1923,"gate":"disposition","val":"needs-human-confirm","run":"2026-07-19T02:30:00Z"} -->';
+    expect(isNonTerminalAiComment(body)).toBe(false);
+    expect(isTerminalAiComment(body)).toBe(true);
+  });
+
+  // arc#1983 archetype: "这没有核实，不在本轮范围内" is a scoping caveat about
+  // what wasn't checked, not a deferral of the whole comment — and the same
+  // comment already carries a genuine `needs-human-confirm` verdict.
+  it("TERMINAL WINS: a scoping caveat containing '不在本轮' does not mask a real needs-human-confirm verdict (arc#1983 archetype)", () => {
+    const body =
+      "> 🤖 AI Agent\n" +
+      "这部分(iOS 具体到 module 级别还是仅 stub)没有核实，不在本轮范围内，仅指出「已有代码可读」这一事实。\n" +
+      "标签（`research` + `needs-human-confirm`）已正确，本 issue 保持 parked，等待拍板。";
+    expect(isNonTerminalAiComment(body)).toBe(false);
+    expect(isTerminalAiComment(body)).toBe(true);
+  });
+
+  // The code-span stripping (step 1) still protects the ORIGINAL documented
+  // incident — a YAML key inside a fenced code block must not trip the
+  // deferral pattern — when there is no competing terminal indicator either.
+  it("still ignores a deferral-looking word inside a fenced code block when no terminal indicator is present", () => {
+    const body = "> 🤖 AI Agent\n配置示例:\n```yaml\ncancel-in-progress: false\n```\n仅供参考。";
+    expect(isNonTerminalAiComment(body)).toBe(false);
   });
 });
 

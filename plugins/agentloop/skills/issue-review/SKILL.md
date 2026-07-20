@@ -260,6 +260,14 @@ issue 是一个**内部提案/想法**——作者自己都标注「可能可行
 3. **核对验收**:读父 issue 的验收标准/问题清单/body 意图,逐条对应到子 issue/PR 的
    落地证据(`path:line`、PR 链接、测试输出)。**动手前最后重读一次 issue state**
    (已关/有新人类 comment → 放弃动作,先按新输入走)。
+   **★ 大块 issue 的完整测试闸(Robert 拍板 2026-07-20,源 #1947)**:多 phase /
+   带 sub-issue 图 / 带终局验收的 feature epic,**close 前必须有真实 surface 上的
+   完整端到端场景测试**——不是各 PR 单测绿,而是在真实目标环境(真机 / 真浏览器 /
+   live daemon)设计多类型场景(正向 + 诚实性负样本 + 边界),逐 case 跑、每 case 附
+   截图/输出证据,报告以稳定编号 checkbox(如 FM-01…)post 到 issue 逐项核销;
+   **测试计划本身先 post 并标注为关闭验收条款**。缺这层 → 不 close,先补测试
+   (这是 rollup 的默认组成,不等人提醒)。失败项如实记录:接线 bug → spin-off;
+   平台/模型局限 → 注明请人认可,不调宽判定凑绿。单 PR 小修不适用本闸。
 4. **综合 comment**(中文,`> 🤖 AI Agent` 头 + `@ <hostname>`):逐条覆盖表 +
    每个子 issue 一句话结论 + 残留 gap(如有)。末尾带 `<!-- rollup-done -->` marker
    (幂等 key)。
