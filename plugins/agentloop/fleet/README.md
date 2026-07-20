@@ -62,6 +62,30 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `setupCommand` | | run inside the checkout after materialize, before the skill — dependency install (`pnpm install …`); runs every round (cheap on a warm tree) |
 | `referenceRepos` | | other **catalog** slugs this repo must be able to READ — shallow-cloned once to `<checkoutBase>/.reference/<owner>__<name>` (shared by all referrers, reset each round) and handed to the skill as extra `--add-dir` roots. For a repo whose conventions/examples live elsewhere (a content repo built by another repo's CLI). Always cloned, never a worktree — `--add-dir` grants **write**, and an unattended agent must not get a writable path into a developer's tree. Unknown slug throws; a failed mount fails the round rather than running blind |
 
+### Reading the telemetry — `scripts/fleet-report.ts`
+
+`fleet.jsonl` is the fleet's own record of itself. To turn it into numbers:
+
+```bash
+bun <plugin_root>/scripts/fleet-report.ts                 # terminal summary (all records)
+bun <plugin_root>/scripts/fleet-report.ts --days 7        # a window
+bun <plugin_root>/scripts/fleet-report.ts --html out.html # self-contained dashboard, light+dark
+bun <plugin_root>/scripts/fleet-report.ts --json          # for further processing
+```
+
+It answers what the mechanical fields alone cannot: how many rounds actually RAN vs were
+skipped (and why), what they produced, how long each repo×skill takes at the median/P90, and
+whether any round left processes behind.
+
+**Every number is computed from the file — no model counts anything.** A wrong number that
+looks plausible is worse than no number, so interpretation (a skill, a human) reads this
+output; it never generates it.
+
+The report always states **field coverage**. Records written before a field existed cannot
+answer questions about it, and a rate computed over a partial window silently understates
+everything — so `produced 7/212` is shown rather than a bare "0 PRs opened", which would read
+as a fleet doing nothing rather than a fleet that only recently started reporting.
+
 **Env precedence** (later wins): `process env` < `envFile` < `env` < `skillEnv[skill]`; then the driver forces `ARC_UNATTENDED=1`, `AGENTLOOP_ROOT`, `ARC_AGENT_RUNNER` last (identity + unattended-hook arming are never overridable).
 
 ## Checkout modes (`checkout` in the deployment config)
