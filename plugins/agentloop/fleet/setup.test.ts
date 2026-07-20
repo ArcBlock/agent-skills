@@ -123,6 +123,21 @@ describe("buildCatalog", () => {
     expect(merged[0].cloneUrl).toBe("git@github.com:ArcBlock/arc.git"); // preserved
     expect(merged[0].setupCommand).toBe("pnpm install"); // preserved
   });
+  test("preserves hand-added referenceRepos (the installer never asks for them)", () => {
+    const existing: RepoEntry[] = [
+      {
+        slug: "ArcBlock/arcblock-site",
+        defaultBranch: "main",
+        skills: ["issue-sweep"],
+        referenceRepos: ["ArcBlock/arc"],
+      },
+    ];
+    const merged = buildCatalog(
+      [{ slug: "ArcBlock/arcblock-site", defaultBranch: "main", skills: ["issue-sweep"] }],
+      existing,
+    );
+    expect(merged[0].referenceRepos).toEqual(["ArcBlock/arc"]);
+  });
   test("adds a new repo alongside existing", () => {
     const merged = buildCatalog(
       [{ slug: "ArcBlock/new", defaultBranch: "main", skills: ["issue-sweep"] }],

@@ -60,6 +60,7 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `cloneUrl` | | clone URL (clone-on-demand; optional if the checkout already exists) |
 | `cadenceMinutes` | | per-repo throttle — the driver skips a (repo,skill) that ran within this window (stamped on SUCCESS only; `--force` ignores). `120` = every 2 h under an hourly cron |
 | `setupCommand` | | run inside the checkout after materialize, before the skill — dependency install (`pnpm install …`); runs every round (cheap on a warm tree) |
+| `referenceRepos` | | other **catalog** slugs this repo must be able to READ — shallow-cloned once to `<checkoutBase>/.reference/<owner>__<name>` (shared by all referrers, reset each round) and handed to the skill as extra `--add-dir` roots. For a repo whose conventions/examples live elsewhere (a content repo built by another repo's CLI). Always cloned, never a worktree — `--add-dir` grants **write**, and an unattended agent must not get a writable path into a developer's tree. Unknown slug throws; a failed mount fails the round rather than running blind |
 
 **Env precedence** (later wins): `process env` < `envFile` < `env` < `skillEnv[skill]`; then the driver forces `ARC_UNATTENDED=1`, `AGENTLOOP_ROOT`, `ARC_AGENT_RUNNER` last (identity + unattended-hook arming are never overridable).
 

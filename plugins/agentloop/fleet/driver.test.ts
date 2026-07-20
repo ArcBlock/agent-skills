@@ -15,6 +15,7 @@ import {
   permissionFlags,
   planRuns,
   type RepoEntry,
+  referenceEnvKey,
   renderPrompt,
   resolveCovered,
   runEnv,
@@ -340,6 +341,84 @@ describe("setupCommand", () => {
 
     // Superset, not replacement: what git inherits today must survive.
     expect(setup?.env?.PATH).toBe(process.env.PATH);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("referenceRepos (a repo that must READ another repo to work)", () => {
+  const cat: RepoEntry[] = [
+    { ...CATALOG[2], skills: ["issue-sweep"], referenceRepos: ["ArcBlock/arc"] },
+    { ...CATALOG[0], cloneUrl: "git@github.com:ArcBlock/arc.git" },
+  ];
+
+  it("mounts one shared copy under .reference/, never inside a checkout leaf", () => {
+    const p = planRuns(cat, base({ cover: ["ArcBlock/arcblock-site"] }))[0];
+    expect(p.referenceRepos).toHaveLength(1);
+    expect(p.referenceRepos[0].path).toBe("/co/.reference/ArcBlock__arc");
+    expect(p.referenceRepos[0].cloneUrl).toBe("git@github.com:ArcBlock/arc.git"); // from catalog
+    expect(p.referenceRepos[0].branch).toBe("main");
+  });
+
+  it("hands the reference to the skill as an extra --add-dir root", () => {
+    const p = planRuns(cat, base({ cover: ["ArcBlock/arcblock-site"] }))[0];
+    expect(p.command).toContain("--add-dir /co/.reference/ArcBlock__arc");
+  });
+
+  it("throws on a slug absent from the catalog (a silent no-mount degrades the run blind)", () => {
+    const bad: RepoEntry[] = [{ ...CATALOG[2], referenceRepos: ["ArcBlock/ghost"] }];
+    expect(() => planRuns(bad, base({ cover: ["ArcBlock/arcblock-site"] }))).toThrow(
+      /not in the catalog/,
+    );
+  });
+
+  it("is empty for a repo that declares none", () => {
+    expect(planRuns(CATALOG, base({ cover: ["ArcBlock/did"] }))[0].referenceRepos).toEqual([]);
+  });
+
+  // A repo-profile is committed and read on every machine — it must NOT name a mount path
+  // (external disk here, home dir there). It names this env key, which the driver fills in.
+  it("exports the mount path as a stable env key the committed profile can name", () => {
+    const p = planRuns(cat, base({ cover: ["ArcBlock/arcblock-site"] }))[0];
+    expect(referenceEnvKey("ArcBlock/arc")).toBe("AGENTLOOP_REF_ARCBLOCK_ARC");
+    const e = runEnv(p, base({ cover: ["ArcBlock/arcblock-site"] }), {});
+    expect(e.AGENTLOOP_REF_ARCBLOCK_ARC).toBe("/co/.reference/ArcBlock__arc");
+  });
+
+  // THE safety property. `--add-dir` grants WRITE, and the fleet runs
+  // --dangerously-skip-permissions. A worktree reference would hang off the developer's own
+  // clone; mounting that is handing an unattended agent a writable path into a human's tree.
+  it("materializes in CLONE mode even when the deployment's own policy is worktree", async () => {
+    const root = `${tmpdir()}/fleet-ref-${process.pid}`;
+    const co = `${root}/checkouts/ArcBlock__arcblock-site`;
+    mkdirSync(`${co}/.git`, { recursive: true });
+    mkdirSync(`${root}/checkouts/.agentloop-fleet-markers`, { recursive: true });
+    writeFileSync(`${root}/checkouts/.agentloop-fleet-markers/ArcBlock__arcblock-site`, "");
+    // A real base clone, so the deployment's worktree policy is genuinely exercised —
+    // without it the main checkout aborts and the reference step is never reached.
+    mkdirSync(`${root}/base/arcblock-site/.git`, { recursive: true });
+
+    const seen: string[] = [];
+    const fakeSh = (cmd: string) => {
+      seen.push(cmd);
+      return cmd.includes("pnpm install") ? { code: 1, out: "stop" } : { code: 0, out: "" };
+    };
+    const cfg = base({
+      checkoutBase: `${root}/checkouts`,
+      logDir: `${root}/logs`,
+      cover: ["ArcBlock/arcblock-site"],
+      checkout: { mode: "worktree", baseDir: `${root}/base` },
+    });
+    const withSetup: RepoEntry[] = [{ ...cat[0], setupCommand: "pnpm install" }, cat[1]];
+    await executeRun(planRuns(withSetup, cfg)[0], cfg, fakeSh, false);
+
+    const refCmds = seen.filter((c) => c.includes(".reference/ArcBlock__arc"));
+    expect(refCmds.length).toBeGreaterThan(0);
+    expect(refCmds.some((c) => c.includes("git clone"))).toBe(true);
+    // The reference is never materialized as a worktree, even though this deployment's own
+    // checkout policy is — no command may do both.
+    expect(refCmds.some((c) => c.includes("worktree"))).toBe(false);
+    // …and nothing reaches into the base clone on the reference's behalf.
+    expect(seen.some((c) => c.includes(`${root}/base/arc `))).toBe(false);
     rmSync(root, { recursive: true, force: true });
   });
 });

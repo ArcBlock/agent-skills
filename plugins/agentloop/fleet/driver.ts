@@ -65,6 +65,27 @@ export interface RepoEntry {
    * runs every round rather than only on create.
    */
   setupCommand?: string;
+  /**
+   * Other catalog repos this one must be able to READ while it works — mounted read-only
+   * beside the checkouts and passed to the skill as extra `--add-dir` roots.
+   *
+   * The case that forced it: a content/blocklet repo (arcblock-site) whose "toolchain" is
+   * another repo's CLI. Its agent has to follow that repo's conventions and copy its example
+   * blocklets, but a fleet checkout is sandboxed to itself — so the agent was guessing at
+   * conventions it could not read. Cheap to fix (a shallow clone of arc is ~157 MB) and the
+   * quality difference is the whole point of the loop.
+   *
+   * Each slug MUST exist in the catalog (that is where its cloneUrl/branch come from);
+   * an unknown slug throws rather than silently mounting nothing.
+   *
+   * Materialized at `<checkoutBase>/.reference/<owner>__<name>`, ALWAYS in clone mode even
+   * when the deployment's own checkout policy is `worktree`: a worktree would hang the
+   * reference off the developer's own clone, and an unattended `--dangerously-skip-permissions`
+   * agent must never be handed a writable path into a human's working tree. One copy is
+   * shared by every repo that references it; each round resets it, so anything the agent
+   * scribbles there is discarded rather than accumulated.
+   */
+  referenceRepos?: string[];
 }
 
 export interface DeploymentConfig {
@@ -167,6 +188,8 @@ export interface PlannedRun {
   modelFlags: string[];
   setupCommand?: string;
   cadenceMinutes?: number;
+  /** Read-only repos mounted beside the checkouts and handed to the skill as extra roots. */
+  referenceRepos: { slug: string; branch: string; cloneUrl?: string; path: string }[];
   command: string; // readable dry-run representation
 }
 
@@ -183,6 +206,38 @@ export function permissionFlags(mode: DeploymentConfig["permissionMode"]): strin
 export function checkoutDir(base: string, slug: string, skill?: string): string {
   const leaf = slug.replace("/", "__") + (skill ? `__${skill}` : "");
   return `${base.replace(/\/+$/, "")}/${leaf}`;
+}
+
+/** Where a read-only reference repo is mounted. Under a dot-dir so it can never collide
+ *  with a real checkout leaf (`<owner>__<name>[__<skill>]`), and one copy is shared by
+ *  every repo that references it. */
+export function referenceDir(base: string, slug: string): string {
+  return `${base.replace(/\/+$/, "")}/.reference/${slug.replace("/", "__")}`;
+}
+
+/** Resolve a repo's `referenceRepos` slugs against the FULL catalog (not the covered set —
+ *  a reference need not itself be swept). Unknown slug throws: a silently-unmounted
+ *  reference would degrade the run's quality with no signal, which is the failure mode
+ *  this whole field exists to remove. */
+export function resolveReferences(
+  entry: RepoEntry,
+  catalog: RepoEntry[],
+  base: string,
+): { slug: string; branch: string; cloneUrl?: string; path: string }[] {
+  return (entry.referenceRepos ?? []).map((slug) => {
+    const ref = catalog.find((c) => c.slug === slug);
+    if (!ref)
+      throw new Error(
+        `${entry.slug} declares referenceRepos "${slug}", which is not in the catalog — ` +
+          `add it (cloneUrl + defaultBranch) or drop the reference`,
+      );
+    return {
+      slug,
+      branch: ref.defaultBranch,
+      cloneUrl: ref.cloneUrl,
+      path: referenceDir(base, slug),
+    };
+  });
 }
 
 /** Resolve which catalog repos this deployment covers, applying overrides. */
@@ -245,10 +300,13 @@ export function planRuns(
       // worktree, so without it the skills' own runtime scripts (which live at
       // <root>/skills/**/scripts/*.ts, outside the checkout) are unreachable and any
       // step that shells out to them hard-fails. Found by the first live arc smoke.
+      const referenceRepos = resolveReferences(r, catalog, expandHome(cfg.checkoutBase));
+      const refFlags = referenceRepos.flatMap((ref) => ["--add-dir", ref.path]);
       const command =
         `cd ${checkoutPath} && ${envNote ? `${envNote} ` : ""}ARC_UNATTENDED=1 AGENTLOOP_ROOT=${root} ARC_AGENT_RUNNER=${cfg.runner} ` +
-        `claude -p --plugin-dir ${root} --add-dir ${root} ${[...permFlags, ...modelFlags].join(" ")} @${s}.md`;
+        `claude -p --plugin-dir ${root} --add-dir ${root} ${refFlags.join(" ")}${refFlags.length ? " " : ""}${[...permFlags, ...modelFlags].join(" ")} @${s}.md`;
       plan.push({
+        referenceRepos,
         permFlags,
         modelFlags,
         setupCommand: r.setupCommand,
@@ -432,9 +490,17 @@ export function loadEnvFile(path: string, sh: Sh = realSh): Record<string, strin
   return parseEnv0(r.out);
 }
 
+/** `ArcBlock/arc` → `AGENTLOOP_REF_ARCBLOCK_ARC`. A repo-profile is committed and read on
+ *  every machine, so it can never name the mount path (it differs per deployment — an
+ *  external disk here, a home dir there). It names this variable instead. */
+export const referenceEnvKey = (slug: string): string =>
+  `AGENTLOOP_REF_${slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+
 /** Env for one run: process env < envFile < deployment env < per-skill env. */
 export function runEnv(
-  run: Pick<PlannedRun, "skillLocal" | "checkoutPath" | "root" | "runner">,
+  run: Pick<PlannedRun, "skillLocal" | "checkoutPath" | "root" | "runner"> & {
+    referenceRepos?: PlannedRun["referenceRepos"];
+  },
   cfg: DeploymentConfig,
   base: Record<string, string | undefined> = process.env,
   sh: Sh = realSh,
@@ -449,6 +515,7 @@ export function runEnv(
   merged.ARC_UNATTENDED = "1";
   merged.AGENTLOOP_ROOT = run.root;
   merged.ARC_AGENT_RUNNER = run.runner;
+  for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
   return merged;
 }
 
@@ -504,6 +571,29 @@ export async function executeRun(
   if (!co.ok)
     return finish({ ok: false, detail: `checkout ${co.action}: ${co.detail}`, exitCode: null });
   write(`# checkout ${co.action}\n`);
+
+  // Read-only references, materialized BEFORE the skill so `--add-dir` points at a real tree.
+  // A failure here is FATAL, deliberately: the repo declared it needs this to work, and a
+  // round that quietly proceeds without it produces plausible-looking output written blind —
+  // exactly the silent degradation the strict "declare ⇒ execute" rule exists to prevent.
+  for (const ref of run.referenceRepos) {
+    const rc = ensureCheckout({
+      path: ref.path,
+      slug: ref.slug,
+      branch: ref.branch,
+      cloneUrl: ref.cloneUrl,
+      policy: { mode: "clone" }, // never worktree — see RepoEntry.referenceRepos
+      exists: existsSync,
+      sh: shEnv,
+    });
+    if (!rc.ok)
+      return finish({
+        ok: false,
+        detail: `reference ${ref.slug} ${rc.action}: ${rc.detail}`,
+        exitCode: null,
+      });
+    write(`# reference ${ref.slug} ${rc.action} → ${ref.path}\n`);
+  }
   // Dependencies BEFORE the skill: a fresh tree has none, and a sweep that dies on a missing
   // module reads as "the gate is broken" rather than "nobody installed anything".
   if (run.setupCommand) {
@@ -538,6 +628,7 @@ export async function executeRun(
       run.root,
       "--add-dir",
       run.root,
+      ...run.referenceRepos.flatMap((ref) => ["--add-dir", ref.path]),
       ...run.permFlags,
       ...run.modelFlags,
     ],

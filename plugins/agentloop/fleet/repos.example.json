@@ -18,6 +18,7 @@
     "defaultBranch": "main",
     "skills": ["issue-sweep"],
     "cloneUrl": "git@github.com:ArcBlock/arcblock-site.git",
-    "cadenceMinutes": 240
+    "cadenceMinutes": 240,
+    "referenceRepos": ["ArcBlock/arc"]
   }
 ]
