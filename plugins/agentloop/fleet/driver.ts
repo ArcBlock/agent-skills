@@ -382,18 +382,25 @@ export async function settleResidual(
   checkoutPath: string,
   sh: Sh = realSh,
   sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
-  maxWaitMs = 6000,
-  stepMs = 750,
+  maxWaitMs = 8000,
+  stepMs = 700,
+  stableSteps = 3,
 ): Promise<number[]> {
   let prev = pidsWithCwdUnder(checkoutPath, sh);
   if (!prev.length) return prev;
+  // "Unchanged for one step" is NOT enough, and assuming it was cost a false positive against
+  // real processes: a `sleep 2` still counting down looks identical to something wedged — the
+  // set is stable the whole time it is alive. Only sustained stability distinguishes them, so
+  // require several consecutive quiet steps before calling anything a leak.
+  let quiet = 0;
   for (let waited = 0; waited < maxWaitMs; waited += stepMs) {
     await sleep(stepMs);
     const now = pidsWithCwdUnder(checkoutPath, sh);
     if (!now.length) return now;
-    // Stable across a full step and nothing left to shed → it is not mid-exit, it is stuck.
-    if (now.length === prev.length && now.every((p, i) => p === prev[i])) return now;
+    const same = now.length === prev.length && now.every((p, i) => p === prev[i]);
+    quiet = same ? quiet + 1 : 0;
     prev = now;
+    if (quiet >= stableSteps) return now;
   }
   return prev;
 }

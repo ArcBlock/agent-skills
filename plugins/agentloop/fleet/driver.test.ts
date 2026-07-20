@@ -563,10 +563,22 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
       expect(r).toEqual([]);
     });
 
-    it("DOES report what is still there once the set stops shrinking", async () => {
-      // 9 never leaves — that is a real leak, and the whole point of the field.
-      const r = await settleResidual("/co/X", shSeq([[9, 10], [9], [9], [9]]), async () => {});
+    it("DOES report what is still there once the set is stable for SEVERAL steps", async () => {
+      // 9 never leaves — a real leak, and the whole point of the field. One unchanged step is
+      // deliberately not enough: a `sleep 2` still counting down is stable the whole time it
+      // is alive, and treating that as wedged was a measured false positive.
+      const r = await settleResidual(
+        "/co/X",
+        shSeq([[9, 10], [9], [9], [9], [9], [9]]),
+        async () => {},
+      );
       expect(r).toEqual([9]);
+    });
+
+    it("does NOT call a set stuck after a single quiet step", async () => {
+      // Stable, stable, then gone — the shape of a process on a short timer.
+      const r = await settleResidual("/co/X", shSeq([[7], [7], [7], []]), async () => {});
+      expect(r).toEqual([]);
     });
 
     it("returns immediately on a clean checkout — no waiting in the common case", async () => {
@@ -585,7 +597,7 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
     it("gives up at the ceiling rather than waiting on a churning tree forever", async () => {
       // Never stabilises and never empties: alternating sets.
       const flip = shSeq([[1], [2], [1], [2], [1], [2], [1], [2], [1], [2], [1], [2]]);
-      const r = await settleResidual("/co/X", flip, async () => {}, 2000, 500);
+      const r = await settleResidual("/co/X", flip, async () => {}, 2000, 500, 3);
       expect(r.length).toBe(1); // bounded, and still reports what it last saw
     });
   });
