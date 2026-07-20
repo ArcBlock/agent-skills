@@ -101,6 +101,30 @@ skill 无命名空间，别硬加前缀）。
 - 改完用**定向检查**证明每个链接可解析（`test -f` 会自然解析 `../`；**别用 macOS 不支持的
   `realpath -m`**，会把全部链接误报成 broken）。
 
+### 沉淀一个 skill 进插件时（#1037 的迁移动作）：全仓 sweep 它的每处引用
+
+把一个 skill 从消费仓库 `.claude/skills/` 挪进插件 `skills/` 后，它的调用形态从裸 `/<skill>`
+变成 `/agentloop:<skill>`。**必须全仓 sweep 对这个被沉淀 skill 的每一处 slash-command 引用**，
+两个方向都要改：
+
+1. **插件内**：其它插件 skill 里引用它的地方（companion 引用）。
+2. **消费仓库**：`.claude/skills/` 里的 project skill、`.claude/verify/`、`planning/`、CLAUDE.md
+   里引用它的地方。
+
+漏一处的后果是实测过的、不是假设：那处裸 `/<skill>` 会 resolve 到消费仓库残留的**同名 stale
+fork**（arc main 就还带着若干同名旧副本），或直接 `Unknown skill` 挂掉无人值守 routine（且模型
+不自纠）。判据仍是那一句——**这个 skill 现在装在哪**：插件里 = 带前缀。
+
+**这条已经自动化，不再靠人记得跑**：
+
+- **canonical 守卫** = `scripts/lint-skill-namespace.sh`（Rule A：pinned-literal `name: 'x'` 调用；
+  Rule B：任何 SKILL.md 里裸 `/<plugin-skill>` 引用——**同时扫插件 skill 树 + 消费仓库 `.claude/skills/`
+  两棵树**）。自带负向自检（探针匹配不到就 exit 2，绝不用「静默 ✓」骗你）。
+- **已接进 gate**：`.claude/verify/checks/check-skills.ts` shell out 调它，随 `pre-pr` 每次跑
+  （目前 warn-only，和该 check 的既有姿态一致；误报率调稳后翻 blocking）。**别在 check-skills 里
+  重抄一份正则**——单一真相源在 bash 守卫里。
+- **新增一个插件 skill 名**（如将来再沉淀一个）→ 记得把名字加进守卫的 `SKILLS` 列表，否则对它的裸引用抓不到。
+
 ## 合并 main / 迁移窗口期的合并纪律
 
 skills 已从旧 `.claude/skills/**` 迁到本插件，但 main 仍可能改**旧路径**。合并时 git 的 rename

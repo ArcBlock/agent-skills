@@ -1,77 +1,68 @@
 #!/usr/bin/env bash
-# gh-upload-image.sh — upload an image/asset to the shared company asset repo
-# (ArcBlock/loop-agent-assets, PUBLIC) and print its permanently embeddable raw URL.
+# gh-upload-image.sh — upload an image to the shared public asset repo and print a
+# permanently embeddable, camo-safe raw URL. THE ONE universal uploader (issue #1037).
 #
-# UNIVERSAL: ships WITH THE PLUGIN (#1037), works in ANY consuming repo with no per-repo
-# setup — it auto-detects the SOURCE_REPO from `git remote get-url origin`, so arc, did,
-# arcblock-site … each get their assets filed under their own slug. A repo references it as
-# `<plugin_root>/scripts/gh-upload-image.sh` (its `ui_upload_script` profile key); the copy
-# a repo keeps at `scripts/gh-upload-image.sh`, if any, is a thin delegator to this one.
+# UNIVERSAL: ships WITH THE PLUGIN, works in ANY consuming repo with no per-repo setup — it
+# auto-detects SOURCE_REPO from `git remote`, so arc, did, arcblock-site … each get their assets
+# filed under their own slug. A repo references it as `<plugin_root>/scripts/gh-upload-image.sh`
+# (its `ui_upload_script` profile key); the copy a repo keeps at `scripts/gh-upload-image.sh`, if
+# any, is a thin delegator to this one.
 #
-# Single-track storage (issue #949, unified after #1039's dual-track):
-# ALL environments store assets in the dedicated public repo — `gh` environments via this
-# script (contents API), cloud routines via MCP create_or_update_file (Path B in the calling
-# skills). Same layout either way, so URLs never depend on which environment produced them.
+# TWO WRITE CHANNELS, auto-selected by environment; the URL it returns is identical either way:
+#   A. `gh` contents API  — when `gh` is authenticated (local + most `gh` environments).
+#   B. `git push`         — when `gh` is absent (cloud routines): pushes the binary into a local
+#      clone of the asset repo mounted as a git source. MCP file-write is NOT used — it corrupts
+#      binaries (#1079). Set ASSETS_REPO_DIR to point at the clone, else common paths are probed.
 #
-# Why a dedicated PUBLIC repo (not release assets / a source-repo branch):
-#   - cloud routine proxies block ALL GitHub release-write endpoints by session type
-#     (#949 measurements); MCP file commits are the only write channel there.
-#   - The repo must stay PUBLIC: private-repo raw URLs cannot be rendered anonymously by
-#     GitHub camo, so embedded images would break.
-#   - A dedicated repo cannot be merged/deleted by PR automation (the old image-hosting
-#     branch died exactly that way, #907).
+# It ALWAYS returns `https://raw.githubusercontent.com/<assets-repo>/main/<path>` — NOT a jsdelivr
+# URL. Reason (#1334, measured): GitHub's MCP comment-writer (`add_issue_comment` / `issue_write`)
+# strips `![](url)` to a plain link for EVERY host except `raw.githubusercontent.com` on `main`;
+# `gh`-posted comments keep any host. So raw.githubusercontent/main is the one URL that survives
+# BOTH posting channels — jsdelivr broke silently whenever a comment was posted via MCP.
 #
-# Layout (must match the calling skills' Path B and the assets repo README):
+# Layout (matches the assets-repo README):
 #   {source-repo-slug}/{context}/{filename}     e.g. arc/pr123/20260705-120000-shot.png
 #   {source-repo-slug}/{context}/index.md       appended row per asset (reverse lookup)
 #
 # Usage:
 #   <plugin_root>/scripts/gh-upload-image.sh <image-file> [<output-filename>]
 #
-# Output (stdout): permanent jsdelivr CDN URL, e.g.
-#   https://cdn.jsdelivr.net/gh/ArcBlock/loop-agent-assets@main/arc/pr123/20260705-120000-shot.png
+# Output (stdout): the raw URL, verified anonymously reachable AND served as image/*.
 #
 # Environment variables:
-#   ASSETS_REPO    asset repo slug,                default: ArcBlock/loop-agent-assets (shared)
-#   SOURCE_REPO    repo the asset belongs to,      default: auto-detected from git remote origin
-#   ASSET_CONTEXT  pr<N> | ts-<TS> | issue-<N> | slug, default: misc
-#   SOURCE_URL     backlink for the index row,     default derived from ASSET_CONTEXT
-#   UPLOADER       identity for the index row,     default: <whoami>@<hostname>
+#   ASSETS_REPO      asset repo slug,               default: ArcBlock/loop-agent-assets (shared)
+#   ASSETS_REPO_DIR  local clone for channel B,     default: probed (git-source mounts)
+#   SOURCE_REPO      repo the asset belongs to,     default: auto-detected from git remote origin
+#   ASSET_CONTEXT    pr<N> | ts-<TS> | issue-<N>,   default: misc
+#   SOURCE_URL       backlink for the index row,    default derived from ASSET_CONTEXT
+#   UPLOADER         identity for the index row,    default: <whoami>@<hostname>
 #
-# Requires: gh CLI (authenticated, write access to ASSETS_REPO) + jq.
-# In cloud routines gh is absent, or present but unauthenticated (some session types inject an
-# invalid GH_TOKEN placeholder — issue #1416) — exit 2 either way so callers fall back to the
-# MCP path instead of failing deeper with a confusing API error.
+# Requires: jq. Channel A also needs `gh` (authenticated); channel B needs a local asset-repo clone.
 #
 # Exit codes:
-#   0  uploaded; stdout = raw URL, verified anonymously reachable (HTTP 200)
-#   2  gh CLI absent or not authenticated (caller falls back to the MCP path)
-#   3  freshness guard: this script differs from its repo's origin/main (stale checkout —
-#      the #915/#996 broken-image root cause); sync or ALLOW_STALE_UPLOADER=1
-#   4  uploaded but the raw URL is NOT anonymously reachable — do not embed
+#   0  uploaded; stdout = raw URL, verified anonymously reachable + content-type image/*
+#   2  neither channel usable (no `gh` AND no asset-repo clone) — caller falls back (SendUserFile)
+#   3  freshness guard: this script differs from its repo's origin/main (stale — #915/#996)
+#   4  uploaded but the raw URL is NOT anonymously reachable, or served as non-image (#1079)
 
 set -euo pipefail
 
 IMAGE="${1:?Usage: $0 <image-file> [output-filename]}"
 CUSTOM_NAME="${2:-}"
 ASSETS_REPO="${ASSETS_REPO:-ArcBlock/loop-agent-assets}"
-# SOURCE_REPO: default to the CALLING repo (cwd's git remote), so assets file under the right
-# slug in any repo — the one arc-specific default this script used to hardcode.
+# SOURCE_REPO: default to the CALLING repo (cwd's git remote), so assets file under the right slug
+# in any repo — the one arc-specific default the old script hardcoded (in BOTH channels).
 SOURCE_REPO="${SOURCE_REPO:-$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#/$##; s#.*[:/]([^/]+/[^/]+)$#\1#')}"
 SOURCE_REPO="${SOURCE_REPO:-unknown/repo}"
 ASSET_CONTEXT="${ASSET_CONTEXT:-misc}"
 
-command -v gh >/dev/null 2>&1 || { echo >&2 "gh-absent"; exit 2; }
-gh auth status >/dev/null 2>&1 || { echo >&2 "gh-unauthenticated"; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo >&2 "error: jq is required"; exit 1; }
 [[ -f "$IMAGE" ]] || { echo >&2 "error: file not found: $IMAGE"; exit 1; }
 
 # ── Freshness guard (exit 3) ──
-# Root cause of the #915/#996 broken-image incident: a stale checkout ran the pre-#1046 version
-# of this script, which uploaded to the deprecated (private, camo-unreachable) Release CDN.
-# Outward writes must follow the CURRENT origin/main contract, so refuse to run when this file
-# differs from it (this now tracks the PLUGIN's repo — kept fresh via `claude plugin update`).
-# Override for local development of this script: ALLOW_STALE_UPLOADER=1.
+# #915/#996: a stale checkout ran a pre-#1046 uploader that wrote to a camo-unreachable channel.
+# Outward writes must follow the CURRENT origin/main contract (this tracks the PLUGIN's repo —
+# kept fresh via `claude plugin update`). Override for local dev of this script: ALLOW_STALE_UPLOADER=1.
 SCRIPT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 if [[ "${ALLOW_STALE_UPLOADER:-}" != "1" ]] \
    && REPO_ROOT=$(git -C "$(dirname "$SCRIPT_ABS")" rev-parse --show-toplevel 2>/dev/null); then
@@ -89,7 +80,7 @@ if [[ "${ALLOW_STALE_UPLOADER:-}" != "1" ]] \
   fi
 fi
 
-# Unique filename; timestamp prefix prevents collisions and enforces append-only history
+# Unique filename; timestamp prefix prevents collisions and enforces append-only history.
 if [[ -n "$CUSTOM_NAME" ]]; then
   FILENAME="$CUSTOM_NAME"
 else
@@ -107,59 +98,117 @@ case "$ASSET_CONTEXT" in
 esac
 SOURCE_URL="${SOURCE_URL:-$DEFAULT_URL}"
 UPLOADER="${UPLOADER:-$(whoami)@$(hostname -s 2>/dev/null || echo local)}"
+INDEX_PATH="${DIR}/index.md"
+INDEX_ROW="| ${FILENAME} | ${SOURCE_URL} | $(date -u +%Y-%m-%dT%H:%M:%SZ) | ${UPLOADER} |"
 
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# put_file <repo-path> <content-file> <commit-message> [<sha>]
-# Contents API via --input file: keeps large base64 payloads off argv (ARG_MAX-safe).
-put_file() {
-  local path="$1" file="$2" message="$3" sha="${4:-}"
-  base64 < "$file" | tr -d '\n' > "$WORKDIR/b64"
-  jq -Rn --arg message "$message" --arg sha "$sha" --rawfile content "$WORKDIR/b64" \
-    '{message: $message, content: $content} + (if $sha != "" then {sha: $sha} else {} end)' \
-    > "$WORKDIR/payload.json"
-  gh api -X PUT "repos/${ASSETS_REPO}/contents/${path}" \
-    --input "$WORKDIR/payload.json" --jq '.commit.sha' >/dev/null
+# ── Channel A: gh contents API (commits to the repo's default branch = main) ──
+channel_gh() {
+  # put_file <repo-path> <content-file> <message> [<sha>]  — --input keeps base64 off argv (ARG_MAX-safe)
+  put_file() {
+    local path="$1" file="$2" message="$3" sha="${4:-}"
+    base64 < "$file" | tr -d '\n' > "$WORKDIR/b64"
+    jq -Rn --arg message "$message" --arg sha "$sha" --rawfile content "$WORKDIR/b64" \
+      '{message: $message, content: $content} + (if $sha != "" then {sha: $sha} else {} end)' \
+      > "$WORKDIR/payload.json"
+    # Retry transient GitHub failures (5xx / "No server is currently available" / secondary rate
+    # limit) — measured: a broad api.github.com 503 incident failed the whole upload otherwise.
+    local i
+    for i in 1 2 3 4 5; do
+      # No --jq: a 5xx returns an HTML error page, and --jq would fail with an opaque
+      # "invalid character '<'" that the retry match below can't recognize. We discard the
+      # success body anyway, so let the raw gh exit code + stderr drive the retry.
+      gh api -X PUT "repos/${ASSETS_REPO}/contents/${path}" --input "$WORKDIR/payload.json" >/dev/null 2>"$WORKDIR/gherr" && return 0
+      grep -qiE "HTTP 5|No server is currently available|submitted too quickly|rate limit|abuse|invalid character" "$WORKDIR/gherr" || { cat "$WORKDIR/gherr" >&2; return 1; }
+      sleep $((i * 2))
+    done
+    cat "$WORKDIR/gherr" >&2; return 1
+  }
+  put_file "$ASSET_PATH" "$IMAGE" "assets(${DIR}): ${FILENAME}"
+  # Append the index row (read-modify-write with sha; one retry absorbs a concurrent append).
+  append_index() {
+    local sha
+    if gh api "repos/${ASSETS_REPO}/contents/${INDEX_PATH}" > "$WORKDIR/index.json" 2>/dev/null; then
+      sha=$(jq -r '.sha' "$WORKDIR/index.json")
+      jq -r '.content' "$WORKDIR/index.json" | base64 -d > "$WORKDIR/index.md"
+      printf '%s\n' "$INDEX_ROW" >> "$WORKDIR/index.md"
+    else
+      sha=""
+      printf '# %s\n\n| file | source | uploaded | by |\n|---|---|---|---|\n%s\n' "$DIR" "$INDEX_ROW" > "$WORKDIR/index.md"
+    fi
+    put_file "$INDEX_PATH" "$WORKDIR/index.md" "assets(${DIR}): index ${FILENAME}" "$sha"
+  }
+  append_index || { sleep 1; append_index; }
 }
 
-put_file "$ASSET_PATH" "$IMAGE" "assets(${DIR}): ${FILENAME}"
+# ── Channel B: git push into a local clone of the asset repo (cloud routines; #1334) ──
+# Locate the clone (raw.githubusercontent only serves `main`, so we force the clone onto main and
+# reset to origin before pushing — some sessions leave it on a stale branch, #1334).
+channel_git_push() {
+  local root="$1" img_dest="${1}/${ASSET_PATH}" idx_dest="${1}/${INDEX_PATH}"
+  ( cd "$root"
+    git fetch origin main >&2 2>&1 || true
+    git checkout main >&2 2>&1 || git checkout -B main origin/main >&2 2>&1 || true
+    git reset --hard origin/main >&2 2>&1 || true
+    git config user.email "agent@arcblock.io" 2>/dev/null || true
+    git config user.name "ARC Agent" 2>/dev/null || true )
+  mkdir -p "$(dirname "$img_dest")"
+  cp "$IMAGE" "$img_dest"
+  if [[ -f "$idx_dest" ]]; then printf '%s\n' "$INDEX_ROW" >> "$idx_dest"
+  else printf '# %s\n\n| file | source | uploaded | by |\n|---|---|---|---|\n%s\n' "$DIR" "$INDEX_ROW" > "$idx_dest"; fi
+  ( cd "$root"
+    git add "$DIR/" >&2 2>&1 || true
+    git commit -m "assets(${DIR}): ${FILENAME}" --allow-empty >&2 2>&1 || true
+    # push with rebase-retry: a concurrent push leaves the local clone behind, and a bare retry
+    # re-rejects identically until it's rebased (#1334-adjacent, measured on concurrent sweeps).
+    for attempt in 1 2 3 4; do
+      git push origin main >&2 2>&1 && exit 0
+      [[ $attempt -eq 4 ]] && { echo >&2 "error: git push to ${ASSETS_REPO} failed after 4 tries"; exit 1; }
+      sleep $((attempt * 2)); git fetch origin main >&2 2>&1 || true
+      git rebase origin/main >&2 2>&1 || git rebase --abort 2>/dev/null || true
+    done )
+}
 
-# Append a row to the directory's index.md (reverse lookup: asset → source).
-# Read-modify-write with sha; one retry absorbs a concurrent append.
-append_index() {
-  local index_path="${DIR}/index.md" row sha
-  row="| ${FILENAME} | ${SOURCE_URL} | $(date -u +%Y-%m-%dT%H:%M:%SZ) | ${UPLOADER} |"
-  if gh api "repos/${ASSETS_REPO}/contents/${index_path}" > "$WORKDIR/index.json" 2>/dev/null; then
-    sha=$(jq -r '.sha' "$WORKDIR/index.json")
-    jq -r '.content' "$WORKDIR/index.json" | base64 -d > "$WORKDIR/index.md"
-    printf '%s\n' "$row" >> "$WORKDIR/index.md"
-  else
-    sha=""
-    printf '# %s\n\n| file | source | uploaded | by |\n|---|---|---|---|\n%s\n' \
-      "$DIR" "$row" > "$WORKDIR/index.md"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  channel_gh
+else
+  ASSETS_CLONE="${ASSETS_REPO_DIR:-}"
+  if [[ -z "$ASSETS_CLONE" ]]; then
+    for c in "${HOME}/loop-agent-assets" /home/user/loop-agent-assets /workspace/loop-agent-assets; do
+      [[ -d "$c/.git" ]] && { ASSETS_CLONE="$c"; break; }
+    done
   fi
-  put_file "$index_path" "$WORKDIR/index.md" "assets(${DIR}): index ${FILENAME}" "$sha"
-}
-append_index || { sleep 1; append_index; }
+  if [[ -z "$ASSETS_CLONE" || ! -d "$ASSETS_CLONE/.git" ]]; then
+    echo >&2 "error: no gh auth AND no ${ASSETS_REPO} clone (set ASSETS_REPO_DIR or mount it as a git source) — caller should fall back to SendUserFile."
+    exit 2
+  fi
+  channel_git_push "$ASSETS_CLONE"
+fi
 
-BRANCH=$(gh api "repos/${ASSETS_REPO}" --jq '.default_branch' 2>/dev/null || echo main)
-RAW_URL="https://cdn.jsdelivr.net/gh/${ASSETS_REPO}@${BRANCH}/${ASSET_PATH}"
+RAW_URL="https://raw.githubusercontent.com/${ASSETS_REPO}/main/${ASSET_PATH}"
 
-# ── Anonymous-reachability gate (exit 4) ──
-# GitHub embeds comment images through the camo proxy, which fetches the URL WITHOUT
-# credentials. An upload that only works authenticated (private repo, wrong channel) renders as
-# a broken image for every reader — so never print a URL that a credential-less fetch cannot
-# see. Retries absorb jsdelivr CDN propagation lag after the contents-API commit.
-CODE=000
+# ── Anonymous-reachability + content-type gate (exit 4) ──
+# GitHub's camo proxy fetches embedded images WITHOUT credentials, so an upload only visible when
+# authenticated renders broken for every reader. AND the bytes must actually be an image: a double
+# base64-encode (the #1079 MCP-file-write corruption) yields HTTP 200 but content-type text/plain,
+# embedding as a string of gibberish. Gate on BOTH. Retries absorb post-commit CDN propagation lag.
+CODE=000; CT=""
 for wait in 1 2 3 5 8; do
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$RAW_URL" || echo 000)
-  [[ "$CODE" == "200" ]] && break
+  # curl's -w output MUST end in \n: without it `read` returns non-zero on the unterminated last
+  # line and, under `set -e`, silently kills the script here — the asset uploads fine but the URL
+  # is never returned (measured: mis-attributed to a GitHub 503 twice). `|| true` is a second guard.
+  read -r CODE CT < <(curl -sSL -o /dev/null -w '%{http_code} %{content_type}\n' --max-time 20 "$RAW_URL" 2>/dev/null || echo "000 ") || true
+  [[ "$CODE" == "200" && "$CT" == image/* ]] && break
   sleep "$wait"
 done
 if [[ "$CODE" != "200" ]]; then
   echo >&2 "error: asset uploaded but NOT anonymously reachable (HTTP ${CODE}): ${RAW_URL}"
-  echo >&2 "  Embedding this URL would render a broken image (camo fetches without auth)."
+  exit 4
+fi
+if [[ "$CT" != image/* ]]; then
+  echo >&2 "error: asset reachable but served as non-image (content-type ${CT}) — likely double-encoded (#1079), do NOT embed: ${RAW_URL}"
   exit 4
 fi
 
