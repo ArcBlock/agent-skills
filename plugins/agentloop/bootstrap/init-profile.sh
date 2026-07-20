@@ -115,7 +115,7 @@ Add your repo's own work-type / priority / status labels here so the sweeps know
 | \`capability_probe_script\` | <FILL: env-capability probe for \`<!-- requires: -->\` gating; the plugin ships one at \`<plugin_root>/scripts/agent-capabilities.sh\`, or remove> |
 | \`presence_heartbeat_script\` | <FILL: mandatory end-of-round heartbeat script, or remove if no presence board> |
 | \`ui_shot_script\` | <FILL: renderer-level UI screenshot generator, or remove if no UI> |
-| \`ui_upload_script\` | \`<plugin_root>/scripts/gh-upload-image.sh\` — UNIVERSAL (ships with the plugin, auto-detects your repo from git remote); no copy needed. Override only for a different asset host. |
+| \`ui_upload_script\` | \`<plugin_root>/scripts/gh-upload-media.sh\` — UNIVERSAL (ships with the plugin, auto-detects your repo from git remote); no copy needed. Override only for a different asset host. |
 | \`memory_namespace\` | <FILL, or remove> |
 
 ## Companion Skills

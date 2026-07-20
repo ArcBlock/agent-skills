@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# gh-upload-image.sh — upload an image to the shared public asset repo and print a
-# permanently embeddable, camo-safe raw URL. THE ONE universal uploader (issue #1037).
+# gh-upload-media.sh — upload one media file (image OR video) to the shared public asset repo and
+# print a permanently embeddable, camo-safe raw URL. THE ONE universal uploader (issue #1037).
 #
 # UNIVERSAL: ships WITH THE PLUGIN, works in ANY consuming repo with no per-repo setup — it
 # auto-detects SOURCE_REPO from `git remote`, so arc, did, arcblock-site … each get their assets
-# filed under their own slug. A repo references it as `<plugin_root>/scripts/gh-upload-image.sh`
-# (its `ui_upload_script` profile key); the copy a repo keeps at `scripts/gh-upload-image.sh`, if
+# filed under their own slug. A repo references it as `<plugin_root>/scripts/gh-upload-media.sh`
+# (its `ui_upload_script` profile key); the copy a repo keeps at `scripts/gh-upload-media.sh`, if
 # any, is a thin delegator to this one.
+#
+# EMBEDDING IS NOT UNIFORM — the caller must branch on kind (upload is uniform, embed is not):
+#   - image/gif → inline with `![](<raw-url>)` (renders as an image / animated gif).
+#   - video     → GitHub does NOT inline-play a raw.githubusercontent URL via `![]()`. Embed it as a
+#                 LINK (`[▶ recording](<raw-url>)`) or a best-effort `<video src=...>` tag. Never
+#                 `![](x.webm)` — it renders broken.
 #
 # TWO WRITE CHANNELS, auto-selected by environment; the URL it returns is identical either way:
 #   A. `gh` contents API  — when `gh` is authenticated (local + most `gh` environments).
@@ -25,9 +31,9 @@
 #   {source-repo-slug}/{context}/index.md       appended row per asset (reverse lookup)
 #
 # Usage:
-#   <plugin_root>/scripts/gh-upload-image.sh <image-file> [<output-filename>]
+#   <plugin_root>/scripts/gh-upload-media.sh <media-file> [<output-filename>]
 #
-# Output (stdout): the raw URL, verified anonymously reachable AND served as image/*.
+# Output (stdout): the raw URL, verified anonymously reachable AND served as image/* or video/*.
 #
 # Environment variables:
 #   ASSETS_REPO      asset repo slug,               default: ArcBlock/loop-agent-assets (shared)
@@ -40,14 +46,14 @@
 # Requires: jq. Channel A also needs `gh` (authenticated); channel B needs a local asset-repo clone.
 #
 # Exit codes:
-#   0  uploaded; stdout = raw URL, verified anonymously reachable + content-type image/*
+#   0  uploaded; stdout = raw URL, verified anonymously reachable + content-type image/* or video/*
 #   2  neither channel usable (no `gh` AND no asset-repo clone) — caller falls back (SendUserFile)
 #   3  freshness guard: this script differs from its repo's origin/main (stale — #915/#996)
-#   4  uploaded but the raw URL is NOT anonymously reachable, or served as non-image (#1079)
+#   4  uploaded but the raw URL is NOT anonymously reachable, or served as non-media (#1079)
 
 set -euo pipefail
 
-IMAGE="${1:?Usage: $0 <image-file> [output-filename]}"
+MEDIA="${1:?Usage: $0 <media-file> [output-filename]}"
 CUSTOM_NAME="${2:-}"
 ASSETS_REPO="${ASSETS_REPO:-ArcBlock/loop-agent-assets}"
 # SOURCE_REPO: default to the CALLING repo (cwd's git remote), so assets file under the right slug
@@ -57,7 +63,7 @@ SOURCE_REPO="${SOURCE_REPO:-unknown/repo}"
 ASSET_CONTEXT="${ASSET_CONTEXT:-misc}"
 
 command -v jq >/dev/null 2>&1 || { echo >&2 "error: jq is required"; exit 1; }
-[[ -f "$IMAGE" ]] || { echo >&2 "error: file not found: $IMAGE"; exit 1; }
+[[ -f "$MEDIA" ]] || { echo >&2 "error: file not found: $MEDIA"; exit 1; }
 
 # ── Freshness guard (exit 3) ──
 # #915/#996: a stale checkout ran a pre-#1046 uploader that wrote to a camo-unreachable channel.
@@ -84,7 +90,7 @@ fi
 if [[ -n "$CUSTOM_NAME" ]]; then
   FILENAME="$CUSTOM_NAME"
 else
-  FILENAME="$(date -u +%Y%m%d-%H%M%S)-$(basename "$IMAGE")"
+  FILENAME="$(date -u +%Y%m%d-%H%M%S)-$(basename "$MEDIA")"
 fi
 
 SLUG="${SOURCE_REPO##*/}"
@@ -126,7 +132,7 @@ channel_gh() {
     done
     cat "$WORKDIR/gherr" >&2; return 1
   }
-  put_file "$ASSET_PATH" "$IMAGE" "assets(${DIR}): ${FILENAME}"
+  put_file "$ASSET_PATH" "$MEDIA" "assets(${DIR}): ${FILENAME}"
   # Append the index row (read-modify-write with sha; one retry absorbs a concurrent append).
   append_index() {
     local sha
@@ -147,15 +153,15 @@ channel_gh() {
 # Locate the clone (raw.githubusercontent only serves `main`, so we force the clone onto main and
 # reset to origin before pushing — some sessions leave it on a stale branch, #1334).
 channel_git_push() {
-  local root="$1" img_dest="${1}/${ASSET_PATH}" idx_dest="${1}/${INDEX_PATH}"
+  local root="$1" media_dest="${1}/${ASSET_PATH}" idx_dest="${1}/${INDEX_PATH}"
   ( cd "$root"
     git fetch origin main >&2 2>&1 || true
     git checkout main >&2 2>&1 || git checkout -B main origin/main >&2 2>&1 || true
     git reset --hard origin/main >&2 2>&1 || true
     git config user.email "agent@arcblock.io" 2>/dev/null || true
     git config user.name "ARC Agent" 2>/dev/null || true )
-  mkdir -p "$(dirname "$img_dest")"
-  cp "$IMAGE" "$img_dest"
+  mkdir -p "$(dirname "$media_dest")"
+  cp "$MEDIA" "$media_dest"
   if [[ -f "$idx_dest" ]]; then printf '%s\n' "$INDEX_ROW" >> "$idx_dest"
   else printf '# %s\n\n| file | source | uploaded | by |\n|---|---|---|---|\n%s\n' "$DIR" "$INDEX_ROW" > "$idx_dest"; fi
   ( cd "$root"
@@ -190,25 +196,26 @@ fi
 RAW_URL="https://raw.githubusercontent.com/${ASSETS_REPO}/main/${ASSET_PATH}"
 
 # ── Anonymous-reachability + content-type gate (exit 4) ──
-# GitHub's camo proxy fetches embedded images WITHOUT credentials, so an upload only visible when
-# authenticated renders broken for every reader. AND the bytes must actually be an image: a double
+# GitHub's camo proxy fetches embedded media WITHOUT credentials, so an upload only visible when
+# authenticated renders broken for every reader. AND the bytes must actually be media: a double
 # base64-encode (the #1079 MCP-file-write corruption) yields HTTP 200 but content-type text/plain,
-# embedding as a string of gibberish. Gate on BOTH. Retries absorb post-commit CDN propagation lag.
+# embedding as a string of gibberish. Gate on BOTH — accept image/* OR video/* (both are real binary
+# media; text/* = corruption). Retries absorb post-commit CDN propagation lag.
 CODE=000; CT=""
 for wait in 1 2 3 5 8; do
   # curl's -w output MUST end in \n: without it `read` returns non-zero on the unterminated last
   # line and, under `set -e`, silently kills the script here — the asset uploads fine but the URL
   # is never returned (measured: mis-attributed to a GitHub 503 twice). `|| true` is a second guard.
   read -r CODE CT < <(curl -sSL -o /dev/null -w '%{http_code} %{content_type}\n' --max-time 20 "$RAW_URL" 2>/dev/null || echo "000 ") || true
-  [[ "$CODE" == "200" && "$CT" == image/* ]] && break
+  [[ "$CODE" == "200" && ( "$CT" == image/* || "$CT" == video/* ) ]] && break
   sleep "$wait"
 done
 if [[ "$CODE" != "200" ]]; then
   echo >&2 "error: asset uploaded but NOT anonymously reachable (HTTP ${CODE}): ${RAW_URL}"
   exit 4
 fi
-if [[ "$CT" != image/* ]]; then
-  echo >&2 "error: asset reachable but served as non-image (content-type ${CT}) — likely double-encoded (#1079), do NOT embed: ${RAW_URL}"
+if [[ "$CT" != image/* && "$CT" != video/* ]]; then
+  echo >&2 "error: asset reachable but served as non-media (content-type ${CT}) — likely double-encoded (#1079), do NOT embed: ${RAW_URL}"
   exit 4
 fi
 

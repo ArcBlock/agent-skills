@@ -34,12 +34,12 @@ cron/fleet 从**镜像 clone**（`~/.claude/plugins/marketplaces/arcblock-agent-
   de-arc 化的 skill 在 face/companion-gated 步骤里撞 dangling `<占位符>`。**skill 引用的键集 ≡
   init-profile.sh scaffold 的键集**，两者不能分叉（本条正是补一次这种分叉后立的规矩）。
 - **通用脚本 ship 进插件 `scripts/`，repos 引用不拷贝**：`agent-identity.sh`、`agent-capabilities.sh`、
-  `gh-upload-image.sh`（单图上传）、`gh-upload-dir.sh`（整目录截图 → `filename\turl` map，内部循环调
-  gh-upload-image）都是 UNIVERSAL（任何仓库同样跑，如 gh-upload 自动从 git remote 探 source repo）。
+  `gh-upload-media.sh`（单个媒体:图片/视频）、`gh-upload-dir.sh`（整目录媒体 → `filename\turl` map，内部循环调
+  gh-upload-media）都是 UNIVERSAL（任何仓库同样跑，如 gh-upload 自动从 git remote 探 source repo）。
   canonical 住 `<plugin_root>/scripts/`，消费仓库的同名 `scripts/x.sh`（若有）是薄 delegator。判据同上：
   「换个仓库这脚本会不会错」——不会 = 进插件 `scripts/`。别让每个仓库各拷一份（会漂移，正是 #1037 修的）。
-  **反例教训**：`gh-upload-dir` 之前只有 arc 有（`img-upload/upload.sh`），于是 arcblock-site 的
-  ui-verify 把同一段 `for f in *.png; do gh-upload-image "$f"; done` 又抄了一遍（还带细微不一致）——
+  **反例教训**：目录循环上传之前只有 arc 有（旧 `img-upload/upload.sh`），于是 arcblock-site 的
+  ui-verify 把同一段 `for f in *.png; do gh-upload-media "$f"; done` 又抄了一遍（还带细微不一致）——
   did 建 ui-verify 就是第三份。目录循环够通用 = 必须进插件,消费方零复制。
 - **现状**：skills 里仍残留 arc 专属 case-law（issue 号、路径）。去 arc 化是 #1037 的持续目标。
   **动到某个 skill 时，倾向把 arc 专属项挪进 repo-profile，而不是再加一条**。新写的判断逻辑
@@ -97,7 +97,7 @@ skill 无命名空间，别硬加前缀）。
 
 | 引用对象 | slash command | markdown 相对链接（从插件 skill 出发） |
 |---|---|---|
-| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / verification / issue-graph / impact-check / img-upload …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
+| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / verification / issue-graph / impact-check / media-upload …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
 | **消费仓库 project skill**（住 `.claude/skills/`，如 ui-verify / e2e-verify / e2e-gate / deploy / plan-status） | 裸 `/ui-verify` ✅ | `../../../../skills/<skill>/SKILL.md` |
 
 - 反向同理：`.claude/skills/` 下的 project skill 引用**插件 skill** 时，slash command 要 `/agentloop:<skill>`，
