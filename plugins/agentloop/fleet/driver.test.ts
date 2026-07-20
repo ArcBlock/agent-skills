@@ -13,8 +13,10 @@ import {
   loadEnvFile,
   logPaths,
   permissionFlags,
+  pidsWithCwdUnder,
   planRuns,
   type RepoEntry,
+  reapGroup,
   referenceEnvKey,
   renderPrompt,
   resolveCovered,
@@ -420,6 +422,79 @@ describe("referenceRepos (a repo that must READ another repo to work)", () => {
     // …and nothing reaches into the base clone on the reference's behalf.
     expect(seen.some((c) => c.includes(`${root}/base/arc `))).toBe(false);
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("process hygiene (a round's descendants must not outlive it)", () => {
+  it("signals the GROUP, not the pid — that is what reaches grandchildren", () => {
+    const sent: { target: number; sig: string }[] = [];
+    reapGroup(
+      4242,
+      () => {},
+      (t, s) => {
+        sent.push({ target: t, sig: s as string });
+      },
+      999,
+    );
+    // Negative target = process group. A positive one would leave every grandchild alive,
+    // which is exactly the bug: `claude` exits, its `bun test` child does not.
+    expect(sent.every((s) => s.target === -4242)).toBe(true);
+    expect(sent.map((s) => s.sig)).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("REFUSES to reap when the child shares the driver's group (it would kill the driver)", () => {
+    const sent: number[] = [];
+    let logged = "";
+    reapGroup(
+      777,
+      (s) => {
+        logged += s;
+      },
+      (t) => {
+        sent.push(t);
+      },
+      777,
+    );
+    expect(sent).toEqual([]); // measured: without `detached`, grandchildren sit in OUR group
+    expect(logged).toContain("SKIPPED");
+  });
+
+  it("stops at the first ESRCH — an empty group is the healthy path, not an error", () => {
+    const sent: string[] = [];
+    expect(() =>
+      reapGroup(
+        1234,
+        () => {},
+        (_t, s) => {
+          sent.push(s as string);
+          throw new Error("ESRCH");
+        },
+        999,
+      ),
+    ).not.toThrow();
+    expect(sent).toEqual(["SIGTERM"]); // no pointless SIGKILL at a group that is already gone
+  });
+
+  it("counts residue by cwd prefix, and does not mistake a sibling checkout for it", () => {
+    const lsof = [
+      "p101",
+      "n/co/ArcBlock__arc__issue-sweep", // the checkout itself
+      "p102",
+      "n/co/ArcBlock__arc__issue-sweep/platforms/swift", // nested — counts
+      "p103",
+      "n/co/ArcBlock__arc__issue-sweep-OTHER", // prefix-similar sibling — must NOT count
+      "p104",
+      "n/co/ArcBlock__did__issue-sweep", // another repo's live round — must NOT count
+    ].join("\n");
+    const pids = pidsWithCwdUnder("/co/ArcBlock__arc__issue-sweep", () => ({
+      code: 0,
+      out: lsof,
+    }));
+    expect(pids).toEqual([101, 102]);
+  });
+
+  it("reports zero residue as absent, not as a noisy zero", () => {
+    expect(pidsWithCwdUnder("/co/nothing-here", () => ({ code: 0, out: "" }))).toEqual([]);
   });
 });
 

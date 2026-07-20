@@ -334,6 +334,59 @@ export async function renderPrompt(promptPath: string, runner: string): Promise<
   return tpl.replaceAll("{{RUNNER}}", runner);
 }
 
+// ── process hygiene ─────────────────────────────────────────────────────────
+// A round's job ends when the round ends. Nothing it started may outlive it.
+//
+// It did, for a long time. `await proc.exited` waits for `claude` and nothing else, so
+// anything claude's Bash tool started — a `bun test` that blew past its own 2-minute
+// timeout, a `pnpm dev` server — was re-parented to init and ran forever. Measured on a
+// live fleet: 18h and 29h, ~1.5 cores burned, while the rounds that spawned them recorded
+// `outcome=ok, exitCode=0`. No crash, no signal, nothing to notice.
+
+/** PIDs whose cwd is inside `path`. One `lsof` over the process table — NOT `lsof +D`,
+ *  which walks the directory tree and is unusable on a multi-GB checkout. */
+export function pidsWithCwdUnder(path: string, sh: Sh = realSh): number[] {
+  const prefix = path.replace(/\/+$/, "");
+  const r = sh(`lsof -d cwd -Fpn 2>/dev/null || true`);
+  const out: number[] = [];
+  let pid = 0;
+  for (const line of r.out.split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1)) || 0;
+    else if (line.startsWith("n") && pid) {
+      const cwd = line.slice(1);
+      if (cwd === prefix || cwd.startsWith(`${prefix}/`)) out.push(pid);
+    }
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * Kill the round's process group — every descendant, at any depth, in one signal.
+ *
+ * Requires the child to have been spawned `detached` (its own group). Measured: without it
+ * the grandchildren share the DRIVER's group, so `kill(-pgid)` would kill the driver too —
+ * group-reaping is not merely ineffective there, it is unsafe. The guard below refuses that
+ * case rather than trusting the caller.
+ */
+export function reapGroup(
+  pid: number,
+  log: (s: string) => void,
+  kill: (target: number, sig: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
+  ownPgid: number = process.pid,
+): void {
+  if (pid === ownPgid) {
+    log(`# reap SKIPPED — child shares the driver's process group (pid ${pid})\n`);
+    return;
+  }
+  for (const sig of ["SIGTERM", "SIGKILL"] as NodeJS.Signals[]) {
+    try {
+      kill(-pid, sig); // negative pid = the whole group
+    } catch {
+      return; // ESRCH: group already empty — the normal, healthy path
+    }
+  }
+}
+
 const realSh: Sh = (cmd, env) => {
   const p = Bun.spawnSync(["bash", "-c", cmd], env ? { env } : undefined);
   const out = new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
@@ -433,6 +486,17 @@ export interface RunRecord {
   exitCode: number | null;
   ms: number;
   detail: string;
+  /**
+   * Processes still living in the checkout AFTER the round reaped its own process group.
+   * Non-zero means something escaped the reap (re-parented itself, or predates this driver
+   * version) and is now burning the machine unattended.
+   *
+   * This field exists because the leak that motivated it was INVISIBLE: rounds reported
+   * `outcome=ok, exitCode=0` while leaving a `bun test` at 98% CPU for 18h and a `pnpm dev`
+   * tree for 29h. Every signal said healthy. Reaping fixes the leaks we know about; counting
+   * is what makes the next unknown one show up on its own.
+   */
+  residualProcs?: number;
 }
 export const summaryLine = (r: RunRecord): string => JSON.stringify(r);
 
@@ -528,7 +592,14 @@ export async function executeRun(
   cfg: DeploymentConfig,
   sh: Sh = realSh,
   mirror = true,
-): Promise<{ ok: boolean; detail: string; logPath: string; exitCode: number | null; ms: number }> {
+): Promise<{
+  ok: boolean;
+  detail: string;
+  logPath: string;
+  exitCode: number | null;
+  ms: number;
+  residualProcs?: number;
+}> {
   const started = Date.now();
   const { runLog } = logPaths(
     cfg.logDir ?? defaultLogDir(cfg.checkoutBase),
@@ -541,9 +612,15 @@ export async function executeRun(
   write(
     `\n==== ${new Date(started).toISOString()} · ${run.slug} · ${run.skill} · runner=${run.runner} ====\n`,
   );
-  const finish = (r: { ok: boolean; detail: string; exitCode: number | null }) => {
+  const finish = (r: {
+    ok: boolean;
+    detail: string;
+    exitCode: number | null;
+    residualProcs?: number;
+  }) => {
     const ms = Date.now() - started;
-    write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail} · ${ms}ms ----\n`);
+    const res = r.residualProcs ? ` · ⚠ ${r.residualProcs} residual proc(s)` : "";
+    write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail}${res} · ${ms}ms ----\n`);
     closeSync(fd);
     return { ...r, logPath: runLog, ms };
   };
@@ -638,6 +715,10 @@ export async function executeRun(
       stdin: "ignore", // cron has no stdin; a read would block the round forever
       stdout: "pipe",
       stderr: "pipe",
+      // Own process group, so the round's whole descendant tree can be reaped with one
+      // signal below. Without it those descendants sit in the DRIVER's group and killing
+      // the group would kill the driver — see reapGroup.
+      detached: true,
     },
   );
   const tee = async (stream: ReadableStream<Uint8Array> | undefined) => {
@@ -647,10 +728,23 @@ export async function executeRun(
       writeSync(fd, chunk); // the isolated per-run log — always the clean source
     }
   };
-  await Promise.all([tee(proc.stdout), tee(proc.stderr)]);
-  const exitCode = await proc.exited;
+  let exitCode: number | null = null;
+  try {
+    await Promise.all([tee(proc.stdout), tee(proc.stderr)]);
+    exitCode = await proc.exited;
+  } finally {
+    // `finally`, not the happy path: a round that throws leaks exactly like one that
+    // succeeds, and the leak we found came from rounds that SUCCEEDED.
+    reapGroup(proc.pid, write);
+  }
+  // Counted after the reap, so a live sweep is never mistaken for residue: whatever is
+  // still here escaped a signal aimed at it.
+  const residual = pidsWithCwdUnder(run.checkoutPath, sh);
+  if (residual.length)
+    write(`# ⚠ ${residual.length} process(es) survived the reap: ${residual.join(", ")}\n`);
   return finish({
     ok: exitCode === 0,
+    residualProcs: residual.length,
     detail: `checkout ${co.action}; claude exit ${exitCode}`,
     exitCode,
   });
@@ -794,6 +888,7 @@ if (import.meta.main) {
           exitCode: res.exitCode,
           ms: res.ms,
           detail: res.detail,
+          ...(res.residualProcs ? { residualProcs: res.residualProcs } : {}),
         })}\n`,
       );
       if (res.ok) recordRun(sPath, p.slug, p.skillLocal, now); // stamp only on success → a failed round retries next cron
