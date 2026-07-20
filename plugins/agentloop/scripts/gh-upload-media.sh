@@ -33,7 +33,7 @@
 # Usage:
 #   <plugin_root>/scripts/gh-upload-media.sh <media-file> [<output-filename>]
 #
-# Output (stdout): the raw URL, verified anonymously reachable AND served as image/* or video/*.
+# Output (stdout): the raw URL, verified anonymously reachable AND served as real media (not text/*).
 #
 # Environment variables:
 #   ASSETS_REPO      asset repo slug,               default: ArcBlock/loop-agent-assets (shared)
@@ -46,10 +46,10 @@
 # Requires: jq. Channel A also needs `gh` (authenticated); channel B needs a local asset-repo clone.
 #
 # Exit codes:
-#   0  uploaded; stdout = raw URL, verified anonymously reachable + content-type image/* or video/*
+#   0  uploaded; stdout = raw URL, verified anonymously reachable + non-text content-type
 #   2  neither channel usable (no `gh` AND no asset-repo clone) — caller falls back (SendUserFile)
 #   3  freshness guard: this script differs from its repo's origin/main (stale — #915/#996)
-#   4  uploaded but the raw URL is NOT anonymously reachable, or served as non-media (#1079)
+#   4  uploaded but the raw URL is NOT anonymously reachable, or served as text = corrupted (#1079)
 
 set -euo pipefail
 
@@ -197,25 +197,30 @@ RAW_URL="https://raw.githubusercontent.com/${ASSETS_REPO}/main/${ASSET_PATH}"
 
 # ── Anonymous-reachability + content-type gate (exit 4) ──
 # GitHub's camo proxy fetches embedded media WITHOUT credentials, so an upload only visible when
-# authenticated renders broken for every reader. AND the bytes must actually be media: a double
-# base64-encode (the #1079 MCP-file-write corruption) yields HTTP 200 but content-type text/plain,
-# embedding as a string of gibberish. Gate on BOTH — accept image/* OR video/* (both are real binary
-# media; text/* = corruption). Retries absorb post-commit CDN propagation lag.
+# authenticated renders broken for every reader. AND the bytes must be real media, not corrupted: a
+# double base64-encode (the #1079 MCP-file-write corruption) yields HTTP 200 but content-type text/*
+# (an ASCII string). GitHub serves images as image/* but video / unclassified binaries often as
+# application/octet-stream, so the gate is permissive on TYPE, strict on the one corruption
+# signature: reachable AND not text/*. Retries absorb post-commit CDN propagation lag.
 CODE=000; CT=""
 for wait in 1 2 3 5 8; do
   # curl's -w output MUST end in \n: without it `read` returns non-zero on the unterminated last
   # line and, under `set -e`, silently kills the script here — the asset uploads fine but the URL
   # is never returned (measured: mis-attributed to a GitHub 503 twice). `|| true` is a second guard.
   read -r CODE CT < <(curl -sSL -o /dev/null -w '%{http_code} %{content_type}\n' --max-time 20 "$RAW_URL" 2>/dev/null || echo "000 ") || true
-  [[ "$CODE" == "200" && ( "$CT" == image/* || "$CT" == video/* ) ]] && break
+  # Accept ANY real binary media type, reject only text/*. GitHub raw serves images as image/* but
+  # video (and binaries it can't classify) often as application/octet-stream — NOT video/* (measured:
+  # a .webm came back application/octet-stream). The one thing the #1079 double-base64 corruption
+  # produces is text/* (an ASCII string). So the honest gate is "reachable AND not text/*".
+  [[ "$CODE" == "200" && -n "$CT" && "$CT" != text/* ]] && break
   sleep "$wait"
 done
 if [[ "$CODE" != "200" ]]; then
   echo >&2 "error: asset uploaded but NOT anonymously reachable (HTTP ${CODE}): ${RAW_URL}"
   exit 4
 fi
-if [[ "$CT" != image/* && "$CT" != video/* ]]; then
-  echo >&2 "error: asset reachable but served as non-media (content-type ${CT}) — likely double-encoded (#1079), do NOT embed: ${RAW_URL}"
+if [[ -z "$CT" || "$CT" == text/* ]]; then
+  echo >&2 "error: asset reachable but served as text (content-type ${CT:-empty}) — double-encoded (#1079), do NOT embed: ${RAW_URL}"
   exit 4
 fi
 
