@@ -50,6 +50,23 @@ claude plugin list | grep -A1 agentloop
 
 **装完重启 Claude Code**,否则新 skill 不会被加载。
 
+### 如果你用 Codex
+
+同一个 marketplace,换个命令,skill 名字和用法完全一样(`/agentloop:<skill>`):
+
+```bash
+codex plugin marketplace add https://github.com/ArcBlock/agent-skills.git
+codex plugin install agentloop@arcblock-agent-skills
+codex plugin list          # 验证
+```
+
+同样**装完重启**。下面第 2 步往后的所有内容,两边都一样 —— fleet driver 是 `bun` 脚本,
+不依赖具体哪个 CLI。
+
+> ⚠️ 注意:fleet **无人值守跑起来之后**调的是 `claude` 二进制 —— driver 里写死的
+> (`fleet/driver.ts` 的 `Bun.spawn(["claude", "-p", …])`),目前不可配置。所以用 Codex
+> 装插件只覆盖**交互式**用法;要让 cron 那条回路跑起来,机器上仍必须装有可用的 `claude`。
+
 ---
 
 ## 第 2 步 · 跑安装 skill

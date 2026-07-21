@@ -12,7 +12,8 @@ engine's own reference: what it contains, how a change reaches the fleet, and ho
 ## What's in the plugin
 
 ```
-.claude-plugin/plugin.json     # manifest (name: agentloop)
+.claude-plugin/plugin.json     # manifest for Claude Code (name: agentloop) — the one you edit
+.codex-plugin/plugin.json      # same manifest for Codex — GENERATED on publish, never hand-edited
 SETUP.md                       # first-install path (start here to RUN it)
 lib/report.ts                  # CheckResult contract + deterministic run/render helpers
 lib/comment.ts                 # sticky PR-comment upsert (marker-keyed, gh REST)
@@ -36,6 +37,35 @@ skills/*/SKILL.md              # the skills themselves (see below)
 These skills still contain arc-specific case-law and paths; de-arc-ifying them into
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and
 loaded into any repo via `--plugin-dir`.
+
+## Two runtimes: Claude Code and Codex
+
+The plugin loads in **both**, from the same marketplace repo, with the same skill names
+(`/agentloop:<skill>` either way). The two plugin systems use near-identical schemas — the
+only difference is which directory each looks in for the manifest:
+
+| | Claude Code | Codex |
+|---|---|---|
+| plugin manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` |
+| marketplace manifest | `.claude-plugin/marketplace.json` | `.agents/plugins/marketplace.json` |
+| install | `claude plugin marketplace add ArcBlock/agent-skills` | `codex plugin marketplace add ArcBlock/agent-skills` |
+| | `claude plugin install agentloop@arcblock-agent-skills` | `codex plugin install agentloop@arcblock-agent-skills` |
+
+`skills/`, `lib/`, `fleet/`, `scripts/` are read by both unchanged — nothing in them is
+runtime-specific.
+
+**The Codex manifest is generated, not maintained.** `scripts/publish-agentloop.sh` copies
+`.claude-plugin/plugin.json` → `.codex-plugin/plugin.json` on every publish, and both the
+script and `lib/manifest.test.ts` fail if the two ever diverge. Edit only the Claude one.
+
+> A symlink would remove the duplication at the source, and was tried first — but
+> `codex plugin add` does not follow it: `.codex-plugin` ends up **absent** from Codex's
+> install cache while the plugin still appears to load (Codex reads the manifest from the
+> source at install time). It looks fine until something reads the cache, so a real
+> generated file plus a failing test beats a symlink here.
+
+Only `agentloop` is listed in the Codex marketplace manifest — the other plugins in
+`agent-skills` have no `.codex-plugin/`, and listing them would offer installs that break.
 
 ## Publishing / Release (how a change here reaches the fleet)
 
