@@ -1,16 +1,19 @@
 ---
-name: bootstrap
-description: One-time setup for a repo adopting the agentloop plugin — scaffold repo-profile, create the controlled GitHub labels, scaffold the verification gate, and preflight the environment. Run this once when onboarding a new repo to the loop-engine skills. Does NOT schedule routines (that's the repo's own infra).
+name: repo-setup
+description: One-time setup that makes a repo consumable by the agentloop skills — scaffold repo-profile, create the controlled GitHub labels, scaffold the verification gate, and preflight the environment. Run this once when onboarding a new repo to the loop-engine skills. Does NOT schedule routines (that's the repo's own infra).
 ---
 
-# Bootstrap — adopt the agentloop plugin in a repo
+# Repo Setup — adopt the agentloop plugin in a repo
 
 Run once per repo to go from "plugin installed" to "loop skills can actually run here".
 The supporting environment the sweep/review skills assume (a repo-profile, the coordination
 labels, a verify gate, a working toolchain + gh auth) is otherwise **implicit** — this makes it
-explicit and reproducible. All scripts live in `<plugin_root>/bootstrap/` and are idempotent.
+explicit and reproducible. All scripts live in `<plugin_root>/bootstrap/` and are idempotent
+(the directory keeps its name: there it means "the scripts that bootstrap a repo", which is
+unambiguous — the skill was renamed because `/agentloop:bootstrap` alone did not say *what*
+it bootstrapped, and now pairs with `/agentloop:fleet-setup`).
 
-Bootstrap is **hybrid by design**. The split, and why it matters:
+This is **hybrid by design**. The split, and why it matters:
 
 - **Deterministic scripts** lay down structure and auto-detect what can be *mechanically probed*
   (repo_slug, plugin_root, default_branch, package_manager, the fixed label set, the env
@@ -20,7 +23,7 @@ Bootstrap is **hybrid by design**. The split, and why it matters:
   you a stable skeleton; you supply the parts a script can't reliably infer.
 
 > This is **adoption**, not **scheduling**. How you run the skills on an interval (cron / CI /
-> a cloud routine system) is your repo's own infra — see `docs/scheduling-recipe.md`. Bootstrap
+> a cloud routine system) is your repo's own infra — see `docs/scheduling-recipe.md`. Repo-setup
 > deliberately does not touch that.
 
 ## The flow (run from the consuming repo root, in order)

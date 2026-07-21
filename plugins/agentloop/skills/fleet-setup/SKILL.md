@@ -55,7 +55,7 @@ the human — the API has no delete).
    `runner:<name>` identity line and `ARC_AGENT_RUNNER`.
 2. **repos + skills** (header "Repos", multiSelect): the covered set. Default = existing catalog
    if present, else the clones detected under the base dir, with `issue-sweep`+`pr-sweep` each.
-   (A repo must have been through `/agentloop:bootstrap` — repo-profile + labels — first.)
+   (A repo must have been through `/agentloop:repo-setup` — repo-profile + labels — first.)
    **If a covered repo's conventions live in ANOTHER covered repo** — a content/blocklet repo
    whose page format and examples belong to the repo that builds it — give it
    `referenceRepos`, or its agent works blind and re-invents conventions that already exist.
@@ -154,5 +154,5 @@ Plus:
 - **Crontab uses a marker block** (`# agentloop-fleet:begin/end`) — never `crontab -r`.
 - **`--plugin-dir` is mandatory for headless** and fails SILENTLY on a bad path; the cron rows point
   at the marketplace clone the installer detected, whose existence Step 0 verified.
-- **A covered repo must be bootstrapped first** (`/agentloop:bootstrap`) — repo-profile + labels —
+- **A covered repo must have been through `/agentloop:repo-setup` first** — repo-profile + labels —
   or the sweep skills can't find its toolchain.

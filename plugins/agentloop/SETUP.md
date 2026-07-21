@@ -29,7 +29,7 @@ git clone git@github.com:ArcBlock/did.git
 
 第 3 项不是硬性要求(安装器也能自己 clone),但**强烈建议**:有本地 clone 时会用 worktree 模式复用 git object store,省几个 G 磁盘,每轮 checkout 也快得多。
 
-**被覆盖的 repo 必须先跑过 `/agentloop:bootstrap`**(它会建 repo-profile + label + verify gate)。ArcBlock 的 arc / did / blockchain / arcblock-site 都已经跑过了。
+**被覆盖的 repo 必须先跑过 `/agentloop:repo-setup`**(它会建 repo-profile + label + verify gate)。ArcBlock 的 arc / did / blockchain / arcblock-site 都已经跑过了。
 
 ---
 

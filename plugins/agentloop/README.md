@@ -31,7 +31,7 @@ skills/*/SKILL.md              # the skills themselves (see below)
 
 **Skills:** loop — `issue-sweep` `issue-review` `pr-sweep` `pr-review` `impact-check`
 `design-review` `build-phases` `issue-graph`; gate — `verification`; fleet — `fleet-setup`
-`fleet-report`; adoption — `bootstrap`; utility — `media-upload`.
+`fleet-report`; adoption — `repo-setup`; utility — `media-upload`.
 
 These skills still contain arc-specific case-law and paths; de-arc-ifying them into
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and
@@ -114,8 +114,8 @@ bun fleet/setup.ts --runner me --repos "ArcBlock/arc=issue-sweep,pr-sweep@120" \
 bun fleet/setup.ts … same … --local --apply                                       # write + install
 ```
 
-`fleet-setup` is the scheduling counterpart to `/agentloop:bootstrap` (which adopts a repo —
-repo-profile + labels + verify gate — but deliberately schedules nothing).
+`repo-setup` makes a repo consumable (repo-profile + labels + verify gate); `fleet-setup`
+schedules the loop over repos that already are. Run them in that order.
 
 ### 1. Two config files — live, per-deployment, NOT committed
 
@@ -264,7 +264,7 @@ plugin never has to remember a per-skill variant.
 | issue-review | `--dry-run` | preview; no comment/spin-off/label; **no lock**. (`--no-post` = deprecated alias) |
 | verification | `--dry-run` | alias of `--comment-dry-run`. The **checks always run** (no side effect); dry-run only suppresses posting the report, printing it instead |
 | issue-graph `producer.ts` | `--dry-run` | print the intended graph writes |
-| bootstrap `sync-labels.sh` | `--dry-run` | preview the coordination labels; create nothing |
+| repo-setup `sync-labels.sh` | `--dry-run` | preview the coordination labels; create nothing |
 
 **Two deliberate exceptions (not inconsistencies):**
 
