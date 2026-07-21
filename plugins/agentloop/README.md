@@ -48,8 +48,9 @@ only difference is which directory each looks in for the manifest:
 |---|---|---|
 | plugin manifest | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` |
 | marketplace manifest | `.claude-plugin/marketplace.json` | `.agents/plugins/marketplace.json` |
-| install | `claude plugin marketplace add ArcBlock/agent-skills` | `codex plugin marketplace add ArcBlock/agent-skills` |
-| | `claude plugin install agentloop@arcblock-agent-skills` | `codex plugin install agentloop@arcblock-agent-skills` |
+| add marketplace | `claude plugin marketplace add <url>` | `codex plugin marketplace add <url>` |
+| install plugin | `claude plugin install agentloop@arcblock-agent-skills` | `codex plugin **add** agentloop@arcblock-agent-skills` |
+| install cache | `~/.claude/plugins/marketplaces/…` | `~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/` |
 
 `skills/`, `lib/`, `fleet/`, `scripts/` are read by both unchanged — nothing in them is
 runtime-specific.

@@ -56,8 +56,8 @@ claude plugin list | grep -A1 agentloop
 
 ```bash
 codex plugin marketplace add https://github.com/ArcBlock/agent-skills.git
-codex plugin install agentloop@arcblock-agent-skills
-codex plugin list          # 验证
+codex plugin add agentloop@arcblock-agent-skills   # 注意是 add,Codex 没有 install 子命令
+codex plugin list                                  # 验证
 ```
 
 同样**装完重启**。下面第 2 步往后的所有内容,两边都一样 —— fleet driver 是 `bun` 脚本,
