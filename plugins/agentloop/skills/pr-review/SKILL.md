@@ -102,6 +102,19 @@ gh api repos/{owner}/{repo}/pulls/<n>/comments --paginate \
 gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate \
   --jq '.[]|select(.body!="")|{user:.user.login, state, t:.submitted_at, body}'  # ③ review 总评(approve/request-changes 正文)
 ```
+
+> **★ 三面检查对工具无关——`gh api` 只是其中一种实现,换成 MCP 等其他工具时,以下三个调用
+> 本轮必须都有对应产出(哪怕是"无结果"),缺一路 = Step 0 未完成**:
+>
+> | 面 | `gh` | MCP 等价(`gh` 不可用时) |
+> |---|---|---|
+> | ①会话评论 | `gh pr view <n> --comments` | `pull_request_read(method="get_comments")` |
+> | ②inline 代码行评论 | `gh api pulls/<n>/comments` | `pull_request_read(method="get_review_comments")` |
+> | ③review 总评(**含 `state`**) | `gh api pulls/<n>/reviews` | `pull_request_read(method="get_reviews")` |
+>
+> ③ 的 `state` 字段(`APPROVED`/`CHANGES_REQUESTED`/`COMMENTED`)必须显式记下、不能只看 `body` 文本——
+> 一条 `CHANGES_REQUESTED` 是比普通评论更强的信号,merge 前另有独立硬闸拦([pr-sweep Step 5](../pr-sweep/SKILL.md))。
+
 PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲突检测的主键)。读关联 issue(`gh issue view <N>`)拿"这个 PR 到底要解决什么"。
 
 > **`agent:hold`(人类保留 = 终态冻结,不是处理冻结):** Step 0 已取到 `labels`;若见 PR 带 `agent:hold`——**显式手工 `/agentloop:pr-review <n>` 只提示不挡**(人点名就是要看;且本 skill 默认 read-only、永不 merge,风险低)。hold 的含义是"没人反馈之前别合/别关",**不是"别处理"**:review 照常做,**人类在 hold PR 上的新评论必须读并响应**(那往往是修改要求或拍板条件)。verdict 上的体现:即使全绿,也写 `MERGE (held)` 并注明"等人摘 `agent:hold` 后才可合";若人类评论给了明确修改要求 → 按 `COMMENT`/`BLOCK` 处理并把"响应人类反馈"作为下一步(--post 模式可直接在 PR 分支实现人类明确要求的改动)。真正执行合并闸拦截(带 hold 一律不合)的是 [`pr-sweep`](../pr-sweep/SKILL.md)。只人加只人摘,agent 永不自动摘。

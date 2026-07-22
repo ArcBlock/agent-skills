@@ -3,11 +3,15 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import {
+  buildArgv,
   cadenceDue,
   checkoutBaseStatus,
   checkoutDir,
+  codexPermissionFlags,
   type DeploymentConfig,
   defaultLogDir,
+  engineModelFlags,
+  enginePermissionFlags,
   executeRun,
   expandHome,
   loadEnvFile,
@@ -17,6 +21,7 @@ import {
   pidsWithCwdUnder,
   planRuns,
   type RepoEntry,
+  type ResolvedEngine,
   RUN_REPORT_ENV,
   readRunProduct,
   reapGroup,
@@ -24,6 +29,7 @@ import {
   referenceEnvKey,
   renderPrompt,
   resolveCovered,
+  resolveEngine,
   rotateIfLarge,
   runEnv,
   settleResidual,
@@ -904,6 +910,138 @@ describe("model", () => {
 
   it("omits the flag entirely when unset (CLI default)", () => {
     expect(planRuns(CATALOG, base({ cover: ["ArcBlock/arc"] }))[0].modelFlags).toEqual([]);
+  });
+});
+
+describe("engine (claude default + codex) — verified against the live write-back probe", () => {
+  const CLAUDE: ResolvedEngine = { kind: "claude", bin: "claude" };
+  const CODEX: ResolvedEngine = { kind: "codex", bin: "codex" };
+  const argvOpts = (over = {}) => ({
+    prompt: "PROMPT",
+    root: "/root",
+    refPaths: [],
+    permFlags: [],
+    modelFlags: [],
+    ...over,
+  });
+
+  it("resolveEngine defaults to claude when nothing is set (back-compat: zero config change)", () => {
+    expect(resolveEngine(base())).toEqual({ kind: "claude", bin: "claude" });
+  });
+
+  it("resolveEngine: the legacy top-level model still applies to claude with no engine.model", () => {
+    expect(resolveEngine(base({ model: "claude-opus-4-8" }))).toEqual({
+      kind: "claude",
+      bin: "claude",
+      model: "claude-opus-4-8",
+    });
+  });
+
+  it("resolveEngine: a per-repo engine overrides the deployment default", () => {
+    const cfg = base({ engine: { kind: "claude" } });
+    expect(resolveEngine(cfg, { engine: { kind: "codex", model: "gpt-x" } })).toEqual({
+      kind: "codex",
+      bin: "codex",
+      model: "gpt-x",
+    });
+  });
+
+  it("resolveEngine: legacy top-level model does NOT leak into codex (id namespaces differ)", () => {
+    expect(resolveEngine(base({ model: "claude-opus-4-8", engine: { kind: "codex" } }))).toEqual({
+      kind: "codex",
+      bin: "codex",
+    });
+  });
+
+  it("resolveEngine: bin defaults to the kind, and is overridable", () => {
+    expect(resolveEngine(base({ engine: { kind: "codex", bin: "/opt/codex" } })).bin).toBe(
+      "/opt/codex",
+    );
+  });
+
+  it("codex permission dialect maps the same three postures (skip == unrestricted)", () => {
+    expect(codexPermissionFlags("skip")).toEqual(["--dangerously-bypass-approvals-and-sandbox"]);
+    expect(codexPermissionFlags("default")).toEqual(["-s", "read-only"]);
+    expect(codexPermissionFlags(undefined)).toEqual(["-s", "workspace-write"]); // acceptEdits
+  });
+
+  it("enginePermissionFlags routes to the right dialect per engine", () => {
+    expect(enginePermissionFlags("claude", "skip")).toEqual(["--dangerously-skip-permissions"]);
+    expect(enginePermissionFlags("codex", "skip")).toEqual([
+      "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+  });
+
+  it("engineModelFlags uses --model for claude and -m for codex", () => {
+    expect(engineModelFlags({ kind: "claude", bin: "claude", model: "m1" })).toEqual([
+      "--model",
+      "m1",
+    ]);
+    expect(engineModelFlags({ kind: "codex", bin: "codex", model: "m2" })).toEqual(["-m", "m2"]);
+    expect(engineModelFlags(CODEX)).toEqual([]); // no model → no flag
+  });
+
+  it("buildArgv(claude) is byte-for-byte the pre-refactor invocation (regression guard)", () => {
+    expect(buildArgv(CLAUDE, argvOpts({ permFlags: ["--dangerously-skip-permissions"] }))).toEqual([
+      "claude",
+      "-p",
+      "PROMPT",
+      "--plugin-dir",
+      "/root",
+      "--add-dir",
+      "/root",
+      "--dangerously-skip-permissions",
+    ]);
+  });
+
+  it("buildArgv(codex): `exec <prompt>`, NO --plugin-dir/-p, prompt is positional", () => {
+    const argv = buildArgv(
+      CODEX,
+      argvOpts({ permFlags: ["--dangerously-bypass-approvals-and-sandbox"] }),
+    );
+    expect(argv).toEqual([
+      "codex",
+      "exec",
+      "PROMPT",
+      "--add-dir",
+      "/root",
+      "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(argv).not.toContain("--plugin-dir");
+    expect(argv).not.toContain("-p");
+  });
+
+  it("buildArgv: --add-dir carries the references identically on both engines", () => {
+    const refs = { refPaths: ["/ref/a", "/ref/b"] };
+    for (const eng of [CLAUDE, CODEX]) {
+      const argv = buildArgv(eng, argvOpts(refs));
+      expect(argv).toContain("/ref/a");
+      expect(argv).toContain("/ref/b");
+      // one --add-dir per reference, plus the root (root only gets --add-dir'd, never --plugin-dir on codex)
+      expect(argv.filter((a) => a === "--add-dir").length).toBe(3);
+    }
+  });
+
+  it("planRuns(codex): the readable command reflects `codex exec`, not claude", () => {
+    const plan = planRuns(
+      CATALOG,
+      base({ cover: ["ArcBlock/arc"], engine: { kind: "codex", model: "gpt-x" } }),
+    );
+    expect(plan[0].engine).toEqual({ kind: "codex", bin: "codex", model: "gpt-x" });
+    expect(plan[0].command).toContain("codex exec --add-dir");
+    expect(plan[0].command).not.toContain("--plugin-dir");
+    expect(plan[0].command).toContain("-m gpt-x");
+    expect(plan[0].modelFlags).toEqual(["-m", "gpt-x"]);
+  });
+
+  it("planRuns: a per-repo engine override coexists with a claude default in one plan", () => {
+    const cfg = base({
+      cover: ["ArcBlock/arc", "ArcBlock/did"],
+      overrides: { "ArcBlock/did": { engine: { kind: "codex" } } },
+    });
+    const byRepo = Object.fromEntries(planRuns(CATALOG, cfg).map((p) => [p.slug, p.engine.kind]));
+    expect(byRepo["ArcBlock/arc"]).toBe("claude");
+    expect(byRepo["ArcBlock/did"]).toBe("codex");
   });
 });
 

@@ -170,6 +170,12 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) || ( -n "$rfr
 人机判据的 TS 参照实现(带回归测试):`issue-sweep/test/sweep-golden/lib.ts` 的
 `isAiAgentComment` / `scripts/team-report.ts` 的 `isHumanComment`——改判据先改那两处 + 测试,再同步这里。)
 
+> **`gh` 不可用时的等价调用** = `pull_request_read` 的 `get_comments`/`get_review_comments`/`get_reviews`
+> 三个 method(与 [pr-review Step 0](../pr-review/SKILL.md) 同一张对照表)——**这三个 method 的产出都要
+> 出现在本轮记录里,不能只调一两个就当三面查完**。且**注意本节脚本只把 `.body`/`.t` 揉进 `hu`/`ai` 做
+> 新鲜度判定,不读 `.state`**——「有没有 CHANGES_REQUESTED」不是这里判的,是本文件下方 **Step 5** 的
+> 独立 Review 闸判的;这里只回答"要不要重新起 review",不回答"能不能合"。
+
 > **★ sha 优先于时间戳(#1812 复盘):** 若最后一条 AI verdict 的 `sweep-trace` 带 `sha` 字段
 > ([pr-review Step 0.6](../pr-review/SKILL.md)),直接比 `sha == headRefOid`——精确、跨 runner
 > 可机器判重;上面的时间戳比对仅作旧格式(无 sha)时的回退。**但 sha 相等只短路判据 2(新
@@ -270,6 +276,16 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
   comment(SHA==HEAD 且 PASS/NA);它自己跑 `scope.ts` 独立判后端命中,纯文档/UI/前端/测试 PR
   自动记 `e2e-gate`=N/A、不阻挡。exit 1 的新增原因:后端面命中却无 `e2e-gate` comment / `e2e-gate`
   result=FAIL / `e2e-gate` SHA 过期。`additional_merge_gates` 为空的仓库没有这层,只看 verification 闸。且
+- **★ Review 闸(与 verification 闸同级,独立于 `mergeable_state` 的判读)**:
+  merge 前**独立重新**取一次 `pulls/<n>/reviews`(或 MCP `pull_request_read(method="get_reviews")`),
+  按 reviewer 取每人**最新一条** review 的 `state`。任一人类 reviewer 的最新 state 为
+  `CHANGES_REQUESTED` 且未被同一人后续的 `APPROVED` 覆盖 → **硬止,不自动合**——即使 Step 3
+  verification 全绿、无论 GitHub 的 `mergeable_state` 显示什么(该字段不透明,不能拿它反推
+  有没有 `CHANGES_REQUESTED`,也不能反过来假设它没报异常就等于没有,只认这次独立 fetch 的结果)。
+  命中时按标准升级路径处理(comment 里贴出该 review 的 `state`+`body`,通常打
+  `pr-sweep:awaiting-direction`:reviewer 提出的是要不要按其要求改范围的方向问题,不是可以
+  自决的机械修复)。**这道闸独立于 Step 0/pr-review 是否已查过三面**——两处都要有,任一处漏了
+  另一处仍能拦住,不互相依赖。且
 - **PR 不带 `agent:hold`**(人类保留;hold 期间 review/响应照常但**合并一律冻结**——这里是合并前的硬闸,带 hold 一律不合,即使风险档是 🟢、即使 verdict 是 MERGE。verdict 写成 `MERGE (held)` 等人摘 label);且
 - **★ UI 证据闸(与 pre-merge 同级的 SHA 匹配硬门)**:diff 命中 profile **UI Face Paths** →
   merge 前必须有 **对当前 PR HEAD** 的 `<ui_shot_script>` / `ui-verify` 截图证据(PR 里已内嵌且截图之后无新 push)。

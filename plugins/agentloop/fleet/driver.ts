@@ -46,6 +46,41 @@ import {
  */
 export const expandHome = (p: string): string => (p.startsWith("~/") ? homedir() + p.slice(1) : p);
 
+/**
+ * Which CLI drives a run. The fleet was born claude-only; codex support was added after a
+ * live probe proved a REAL sweep — create files → commit → push → open a draft PR, with the
+ * verification gate run and honestly attributed — runs end-to-end on `codex exec` using the
+ * SAME shipped prompt, unchanged. The two CLIs differ in only a handful of flags (see
+ * buildArgv); everything else in the driver (checkout, reap, TEE, the run-report contract,
+ * the per-(repo,skill) lock) is engine-agnostic.
+ *
+ * The one real asymmetry is plugin loading: claude takes `--plugin-dir <root>` per invocation
+ * (zero install), whereas `codex exec` loads only GLOBALLY-installed plugins (`codex plugin
+ * add`). A codex deployment must therefore have the plugin installed and `agentloopRoot`
+ * pointed at that install — wiring the installer to guarantee that is a later step; this type
+ * only picks the CLI and its dialect.
+ */
+export interface EngineConfig {
+  /** "claude" (default) or "codex". */
+  kind: "claude" | "codex";
+  /** Override the binary name/path. Default = kind ("claude" / "codex"). */
+  bin?: string;
+  /**
+   * Model for this engine's headless run — ENGINE-SPECIFIC (claude: `claude-opus-4-8`;
+   * codex: its own ids). This is why model cannot live once at the deployment level: the two
+   * id namespaces don't overlap. When omitted for claude, the legacy `DeploymentConfig.model`
+   * still applies (back-compat); codex has no legacy fallback.
+   */
+  model?: string;
+}
+
+/** An EngineConfig with every field resolved: kind's default bin, effective model. */
+export interface ResolvedEngine {
+  kind: EngineConfig["kind"];
+  bin: string;
+  model?: string;
+}
+
 export interface RepoEntry {
   /** owner/name */
   slug: string;
@@ -88,6 +123,12 @@ export interface RepoEntry {
    * scribbles there is discarded rather than accumulated.
    */
   referenceRepos?: string[];
+  /**
+   * Override the deployment's engine for THIS repo — e.g. run one repo on codex while the
+   * rest stay on claude, to compare them under a live schedule. Falls back to
+   * `DeploymentConfig.engine`, then claude. See EngineConfig.
+   */
+  engine?: EngineConfig;
 }
 
 export interface DeploymentConfig {
@@ -157,7 +198,18 @@ export interface DeploymentConfig {
    * expands to that run's checkout path.
    */
   skillEnv?: Record<string, Record<string, string>>;
-  /** Model for the headless run, e.g. `claude-opus-4-8`. Omit to use the CLI default. */
+  /**
+   * Default CLI engine for every run of this deployment. Omit for claude — the original,
+   * unchanged behaviour. A repo can override via `RepoEntry.engine`. See EngineConfig for the
+   * claude/codex asymmetry (notably: a codex deployment needs the plugin globally installed).
+   */
+  engine?: EngineConfig;
+  /**
+   * Model for the headless run, e.g. `claude-opus-4-8`. Omit to use the CLI default.
+   * LEGACY / claude-only: with no `engine`, or `engine.kind === "claude"` and no
+   * `engine.model`, this is the claude model. For codex, set `engine.model` instead — the id
+   * namespaces don't overlap, so a single shared field can't serve both.
+   */
   model?: string;
   /** Where run logs go (per-(repo,skill) .log + fleet.jsonl). Default <checkoutBase>/logs. */
   logDir?: string;
@@ -192,6 +244,8 @@ export interface PlannedRun {
   runner: string;
   promptPath: string;
   policy: CheckoutPolicy;
+  /** The resolved engine driving this run (repo override → deployment default → claude). */
+  engine: ResolvedEngine;
   permFlags: string[];
   modelFlags: string[];
   setupCommand?: string;
@@ -208,6 +262,88 @@ export function permissionFlags(mode: DeploymentConfig["permissionMode"]): strin
   if (mode === "skip") return ["--dangerously-skip-permissions"];
   if (mode === "default") return [];
   return ["--permission-mode", "acceptEdits"]; // default
+}
+
+/** codex's dialect of the same postures. "skip" == claude's --dangerously-skip-permissions:
+ *  unrestricted, no approval prompts — the posture the proven routines use and the only one a
+ *  fresh checkout can actually work under (VERIFIED by the write-back probe). The others map
+ *  to codex's sandbox policy; `codex exec` is non-interactive, so approvals never block. */
+export function codexPermissionFlags(mode: DeploymentConfig["permissionMode"]): string[] {
+  if (mode === "skip") return ["--dangerously-bypass-approvals-and-sandbox"];
+  if (mode === "default") return ["-s", "read-only"];
+  return ["-s", "workspace-write"]; // acceptEdits (default)
+}
+
+/** Permission flags for a resolved engine + posture. */
+export function enginePermissionFlags(
+  kind: ResolvedEngine["kind"],
+  mode: DeploymentConfig["permissionMode"],
+): string[] {
+  return kind === "codex" ? codexPermissionFlags(mode) : permissionFlags(mode);
+}
+
+/** Model flags for a resolved engine (claude: `--model`, codex: `-m`). */
+export function engineModelFlags(engine: ResolvedEngine): string[] {
+  if (!engine.model) return [];
+  return engine.kind === "codex" ? ["-m", engine.model] : ["--model", engine.model];
+}
+
+/** Resolve the effective engine for a repo: repo override → deployment default → claude.
+ *  The legacy top-level `cfg.model` is honoured ONLY for claude with no explicit
+ *  `engine.model` — that is the one place it ever meant "the claude model"; codex has no
+ *  such legacy fallback. */
+export function resolveEngine(
+  cfg: DeploymentConfig,
+  repo?: Pick<RepoEntry, "engine">,
+): ResolvedEngine {
+  const e = repo?.engine ?? cfg.engine ?? { kind: "claude" as const };
+  const model = e.model ?? (e.kind === "claude" ? cfg.model : undefined);
+  return { kind: e.kind, bin: e.bin ?? e.kind, model };
+}
+
+/** The real spawn argv for one run — SINGLE SOURCE OF TRUTH for both executeRun's spawn and
+ *  the dry-run command string. claude and codex differ in only these flags:
+ *   - claude loads the plugin per-invocation with `--plugin-dir <root>` and passes the prompt
+ *     via `-p`; codex has no plugin-dir flag (its plugin is installed globally) and takes the
+ *     prompt as `exec`'s positional argument.
+ *   - `--add-dir` is IDENTICAL on both — it grants the skill's own scripts under <root> plus
+ *     each read-only reference repo.
+ *   - permission/model flags are each engine's dialect (permFlags/modelFlags, precomputed). */
+export function buildArgv(
+  engine: ResolvedEngine,
+  o: {
+    prompt: string;
+    root: string;
+    refPaths: string[];
+    permFlags: string[];
+    modelFlags: string[];
+  },
+): string[] {
+  const refAddDirs = o.refPaths.flatMap((p) => ["--add-dir", p]);
+  if (engine.kind === "codex") {
+    return [
+      engine.bin,
+      "exec",
+      o.prompt,
+      "--add-dir",
+      o.root,
+      ...refAddDirs,
+      ...o.permFlags,
+      ...o.modelFlags,
+    ];
+  }
+  return [
+    engine.bin,
+    "-p",
+    o.prompt,
+    "--plugin-dir",
+    o.root,
+    "--add-dir",
+    o.root,
+    ...refAddDirs,
+    ...o.permFlags,
+    ...o.modelFlags,
+  ];
 }
 
 /** owner/name (× skill, if the deployment wants a tree per routine) → a safe checkout dir. */
@@ -274,7 +410,6 @@ export function planRuns(
   onlySkill?: string,
 ): PlannedRun[] {
   const root = pluginRoot(cfg);
-  const permFlags = permissionFlags(cfg.permissionMode);
   const raw = cfg.checkout ?? { mode: "clone" };
   const policy: CheckoutPolicy =
     raw.mode === "worktree" ? { ...raw, baseDir: expandHome(raw.baseDir) } : raw;
@@ -287,6 +422,17 @@ export function planRuns(
     .filter((r) => r.skills.length);
   const plan: PlannedRun[] = [];
   for (const r of repos) {
+    // Engine is a per-repo axis (RepoEntry.engine overrides the deployment default), so its
+    // permission/model dialect is resolved here, once per repo, not once for the whole plan.
+    const engine = resolveEngine(cfg, r);
+    const permFlags = enginePermissionFlags(engine.kind, cfg.permissionMode);
+    const modelFlags = engineModelFlags(engine);
+    // The CLI-specific head of the readable dry-run command (the argv itself is built by
+    // buildArgv in executeRun — this string just has to match its shape for auditing).
+    const cliHead =
+      engine.kind === "codex"
+        ? `${engine.bin} exec --add-dir ${root}`
+        : `${engine.bin} -p --plugin-dir ${root} --add-dir ${root}`;
     for (const s of r.skills) {
       const checkoutPath = checkoutDir(
         expandHome(cfg.checkoutBase),
@@ -294,7 +440,6 @@ export function planRuns(
         cfg.checkoutPerSkill ? s : undefined,
       );
       const promptPath = `${promptDir}/${s}.md`;
-      const modelFlags = cfg.model ? ["--model", cfg.model] : [];
       // Shown in the dry-run so the plan is auditable, but NEVER the values: envFile is
       // where the tokens are.
       const envNote = [
@@ -312,9 +457,10 @@ export function planRuns(
       const refFlags = referenceRepos.flatMap((ref) => ["--add-dir", ref.path]);
       const command =
         `cd ${checkoutPath} && ${envNote ? `${envNote} ` : ""}ARC_UNATTENDED=1 AGENTLOOP_ROOT=${root} ARC_AGENT_RUNNER=${cfg.runner} ` +
-        `claude -p --plugin-dir ${root} --add-dir ${root} ${refFlags.join(" ")}${refFlags.length ? " " : ""}${[...permFlags, ...modelFlags].join(" ")} @${s}.md`;
+        `${cliHead} ${refFlags.join(" ")}${refFlags.length ? " " : ""}${[...permFlags, ...modelFlags].join(" ")} @${s}.md`;
       plan.push({
         referenceRepos,
+        engine,
         permFlags,
         modelFlags,
         setupCommand: r.setupCommand,
@@ -931,18 +1077,13 @@ export async function executeRun(
   // the per-run log. A single --skill invocation covers many repos; without a per-(repo,skill)
   // file their output is one undifferentiated blob and you cannot tell which repo did what.
   const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
+    buildArgv(run.engine, {
       prompt,
-      "--plugin-dir",
-      run.root,
-      "--add-dir",
-      run.root,
-      ...run.referenceRepos.flatMap((ref) => ["--add-dir", ref.path]),
-      ...run.permFlags,
-      ...run.modelFlags,
-    ],
+      root: run.root,
+      refPaths: run.referenceRepos.map((ref) => ref.path),
+      permFlags: run.permFlags,
+      modelFlags: run.modelFlags,
+    }),
     {
       cwd: run.checkoutPath,
       env,

@@ -40,11 +40,12 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `agentloopRoot` | | this plugin's dir | `AGENTLOOP_ROOT` + `--plugin-dir`. **Must be ABSOLUTE** — `~` is NOT expanded here (it isn't shell-evaluated). Point it at the marketplace clone the cron reads. |
 | `checkout` | | `{ mode: "clone" }` | `{ mode: "worktree", baseDir }` reuses existing clones (preferred on a dev machine) — see Checkout modes |
 | `checkoutPerSkill` | | `false` | give each (repo × skill) its own tree — set `true` when a repo runs >1 skill on a schedule, else the skills serialize and chained sweeps miss the cadence window |
-| `permissionMode` | | `acceptEdits` | `skip` = `--dangerously-skip-permissions`, the workable posture for fresh checkouts — see Permission posture |
+| `permissionMode` | | `acceptEdits` | `skip` = `--dangerously-skip-permissions` (codex: `--dangerously-bypass-approvals-and-sandbox`), the workable posture for fresh checkouts — see Permission posture |
+| `engine` | | `{ kind: "claude" }` | which CLI drives runs — `{ kind: "claude" \| "codex", bin?, model? }`. Omit for the original claude behaviour. **codex needs the plugin GLOBALLY installed** (`codex plugin add`) and `agentloopRoot` pointed at that install (no per-invocation `--plugin-dir` on codex) — see Engine. A repo overrides via its own `engine`. |
 | `envFile` | | — | shell file sourced before every run — **where credentials live** (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Effectively required for a scheduled deployment; a round that sources 0 vars aborts LOUD |
 | `env` | | — | extra env for **every step** of a run — checkout (`git clone`/`fetch`), `setupCommand`, and the skill; `{{CHECKOUT}}` expands to the run's checkout path. Use it for anything those steps must see (`npm_config_store_dir`, registry/proxy, `GIT_SSH_COMMAND`): pointing a store-dir at the wrong disk fails *silently* — the install still "succeeds", just against the wrong config |
 | `skillEnv` | | — | per-skill env keyed by skill local name — how two concurrent skills avoid colliding (daemon ports / `ARC_HOME`); `{{CHECKOUT}}` expands. **Needed for any repo whose skills boot a daemon** (arc: issue-sweep :4910/:8797, pr-sweep :4920/:8807) |
-| `model` | | CLI default | `--model` (e.g. `claude-sonnet-5`) |
+| `model` | | CLI default | LEGACY/claude — the claude model (`--model`, e.g. `claude-sonnet-5`). For codex set `engine.model` (emitted as `-m`); the id namespaces don't overlap, so one shared field can't serve both |
 | `parallel` | | `false` | run the covered repos of one skill concurrently (a slow arc won't block did/site); costs N sessions + N× API burst on one token |
 | `staggerSeconds` | | `30` | seconds to space apart each repo's START (API-burst courtesy). Serial: waits between runs. Parallel: launches repo _i_ at _i_×stagger, all still concurrent. `0` = all at once |
 | `logDir` | | `<checkoutBase>/logs` | per-(repo,skill) `.log` + `fleet.jsonl` |
@@ -60,6 +61,7 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `cloneUrl` | | clone URL (clone-on-demand; optional if the checkout already exists) |
 | `cadenceMinutes` | | per-repo throttle — the driver skips a (repo,skill) that ran within this window (stamped on SUCCESS only; `--force` ignores). `120` = every 2 h under an hourly cron |
 | `setupCommand` | | run inside the checkout after materialize, before the skill — dependency install (`pnpm install …`); runs every round (cheap on a warm tree) |
+| `engine` | | override the deployment `engine` for THIS repo — `{ kind: "claude" \| "codex", bin?, model? }`. Run one repo on codex while the rest stay claude (e.g. to compare them under a live schedule) |
 | `referenceRepos` | | other **catalog** slugs this repo must be able to READ — shallow-cloned once to `<checkoutBase>/.reference/<owner>__<name>` (shared by all referrers, reset each round) and handed to the skill as extra `--add-dir` roots. For a repo whose conventions/examples live elsewhere (a content repo built by another repo's CLI). Always cloned, never a worktree — `--add-dir` grants **write**, and an unattended agent must not get a writable path into a developer's tree. Unknown slug throws; a failed mount fails the round rather than running blind |
 
 ### Reading the telemetry — `scripts/fleet-report.ts`
@@ -172,7 +174,36 @@ Two measured facts decide this choice (both verified by isolated experiment, not
 
 Every run also gets `ARC_UNATTENDED=1`, which arms the repo hook that hard-denies
 `AskUserQuestion` / `Workflow` / `EnterPlanMode` — a waiting tool call would hang the run
-forever.
+forever. (Those are Claude Code tools; `codex exec` is non-interactive by construction and,
+under the `skip` posture above, never blocks on an approval either — so the same "can't hang
+waiting for a human" guarantee holds, by a different mechanism.)
+
+## Engine (`engine` — claude or codex)
+
+The driver spawns one CLI per run. It was claude-only; codex is now a first-class engine,
+selected per-deployment (`DeploymentConfig.engine`) or per-repo (`RepoEntry.engine`), default
+claude — an existing config with no `engine` behaves exactly as before. This was validated by
+a live write-back probe: a real `issue-sweep` on `codex exec` created three translation files,
+committed, pushed a branch, opened a draft PR (`Fixes #`), ran the verification gate and
+attributed its one failure honestly — using the SAME shipped prompt, unchanged.
+
+The CLIs differ in only a few flags (`buildArgv` is the single source of truth for both the
+spawn and the dry-run string); everything else in the driver is engine-agnostic:
+
+| | claude | codex |
+|---|---|---|
+| prompt | `-p <prompt>` | `exec <prompt>` (positional) |
+| plugin | `--plugin-dir <root>` per invocation | **none** — loaded from the GLOBAL install (`codex plugin add`) |
+| extra roots | `--add-dir` | `--add-dir` (identical) |
+| `permissionMode: skip` | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
+| `permissionMode: acceptEdits` | `--permission-mode acceptEdits` | `-s workspace-write` |
+| model | `--model <id>` | `-m <id>` (own id namespace — set `engine.model`) |
+
+**The one real asymmetry is plugin loading.** claude loads the plugin per-invocation from
+`agentloopRoot`; `codex exec` has no such flag and sees only globally-installed plugins. So a
+codex deployment must (a) `codex plugin add agentloop@<marketplace>` and (b) point
+`agentloopRoot` at that install so the skill's own scripts + `AGENTLOOP_ROOT` resolve. Wiring
+`/agentloop:fleet-setup` to guarantee that install is a follow-up; today, install it by hand.
 
 ## Running
 
