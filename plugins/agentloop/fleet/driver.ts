@@ -99,7 +99,13 @@ export interface DeploymentConfig {
   checkoutBase: string;
   /** which repos this deployment covers: "all" (of the catalog) or an explicit slug list */
   cover: "all" | string[];
-  /** seconds to wait between runs in --run mode (default 30) — API-burst courtesy */
+  /**
+   * Seconds to space apart each repo's START in --run mode (default 30) — API-burst courtesy so
+   * N repos don't hit GitHub at the same instant (exhausting the shared primary quota / tripping
+   * the secondary concurrency limit). Applies in BOTH modes: serial waits this long BETWEEN runs;
+   * parallel launches repo i at i*stagger while every round still runs concurrently. `0` = launch
+   * all at once (the old no-spacing behavior).
+   */
   staggerSeconds?: number;
   /** override the unattended prompt dir (default: this plugin's fleet/prompts). A
    *  deployment can ship its own per-skill prompts (e.g. a dry-run variant for a smoke). */
@@ -1217,10 +1223,24 @@ if (import.meta.main) {
     // Repos of one skill are INDEPENDENT — run them concurrently. Each writes only to its own
     // per-(repo,skill) log (mirror=false) so N outputs don't interleave; the per-repo lock
     // skips any repo a still-running earlier invocation owns.
+    //
+    // Stagger the STARTS (not the durations): repo i is launched i*stagger later, so every round
+    // still overlaps for its full lifetime, but the front-loaded GitHub bursts each round makes at
+    // t0 (issue/PR list, label reads) are spread over staggerSeconds instead of firing at the same
+    // instant across all repos — that simultaneous burst is what exhausts the shared primary quota
+    // and trips the secondary concurrency limit. `staggerSeconds: 0` restores the old all-at-once.
+    const stagger = (cfg.staggerSeconds ?? 30) * 1000;
     console.log(
-      `# parallel: launching up to ${dueRuns.length} repo(s) concurrently (per-repo lock skips any already running)`,
+      `# parallel: launching up to ${dueRuns.length} repo(s) concurrently` +
+        (stagger > 0 && dueRuns.length > 1 ? `, staggering each start by ${stagger / 1000}s` : "") +
+        ` (per-repo lock skips any already running)`,
     );
-    const settled = await Promise.all(dueRuns.map(runOne));
+    const settled = await Promise.all(
+      dueRuns.map(async (p, i) => {
+        if (i > 0 && stagger > 0) await Bun.sleep(i * stagger);
+        return runOne(p);
+      }),
+    );
     for (const o of settled) finish(o);
   } else {
     const stagger = (cfg.staggerSeconds ?? 30) * 1000;

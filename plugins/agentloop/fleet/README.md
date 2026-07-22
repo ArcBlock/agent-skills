@@ -46,7 +46,7 @@ Authoritative schema is `driver.ts` (`DeploymentConfig` / `RepoEntry`); this tab
 | `skillEnv` | | — | per-skill env keyed by skill local name — how two concurrent skills avoid colliding (daemon ports / `ARC_HOME`); `{{CHECKOUT}}` expands. **Needed for any repo whose skills boot a daemon** (arc: issue-sweep :4910/:8797, pr-sweep :4920/:8807) |
 | `model` | | CLI default | `--model` (e.g. `claude-sonnet-5`) |
 | `parallel` | | `false` | run the covered repos of one skill concurrently (a slow arc won't block did/site); costs N sessions + N× API burst on one token |
-| `staggerSeconds` | | `30` | delay between serial runs (ignored when `parallel`) |
+| `staggerSeconds` | | `30` | seconds to space apart each repo's START (API-burst courtesy). Serial: waits between runs. Parallel: launches repo _i_ at _i_×stagger, all still concurrent. `0` = all at once |
 | `logDir` | | `<checkoutBase>/logs` | per-(repo,skill) `.log` + `fleet.jsonl` |
 | `promptDir` | | this plugin's `fleet/prompts` | override the unattended prompt dir (e.g. a dry-run variant) |
 | `overrides` | | — | per-slug `Partial<RepoEntry>` merged on top of the catalog (e.g. narrow `skills` for one repo) |

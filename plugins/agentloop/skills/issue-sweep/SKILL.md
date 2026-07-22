@@ -339,6 +339,38 @@ compare against the issue's declared requirement, marked in its body as:
   add the marker retroactively once a capability gap is discovered (as this issue-sweep run just did
   for several native-parity spin-offs it dispatched with a fully-available Swift+Kotlin toolchain).
 
+#### A capability gap must be PROVEN first-hand THIS run — never inherited (hard rule)
+
+The silent-skip and 🟡 "not verifiable here" dispositions are only sound once you have **actually
+established the gap on the machine you are running on now**. A "capability-gap → leave silent" (or
+🟡/`needs-human-review`) disposition is **inadmissible without a first-hand probe result from THIS
+session** demonstrating the specific gap. The failure this prevents is real: a run declared "no live
+environment here" and silently skipped a whole cluster **without probing** — the probe later showed
+the live env was reachable over HTTP with valid creds; only the headless browser was blocked. Right
+conclusion for part of the cluster, unsound derivation, and it left evidence-comment value on the
+floor.
+
+- **Never infer the gap from second-hand sources.** Not the environment banner, not the "cloud
+  routine" framing, and — the trap — not *other machines' or prior rounds' comments on the very
+  issue you are triaging* ("no CF creds", "can't start daemon", "browser can't reach it"). Those
+  describe a **different runtime at a different time**; this fleet is heterogeneous (the whole
+  premise of this section). A capability claim copied from a comment is not a capability check.
+- **Probe the axis that actually gates the work, not a scalar prior.** Capability is
+  high-dimensional: *live-HTTP reachable* ≠ *headless browser reachable*; *some creds present* ≠
+  *the specific cred this task needs*; *`gh` binary exists* ≠ *`gh` REST works here*. A blanket
+  "cloud sandbox = no live env" is wrong in exactly the details where the decision lives. Run the
+  concrete check for the specific capability (`curl` the live endpoint, launch the headless browser
+  once, test for the exact cred) before claiming it is absent.
+- **Bias toward probing, because a false "can't" is self-concealing.** A false "I can't verify this"
+  exits down the sanctioned silent-skip path and leaves **no trace that a judgment was even made**,
+  so it is never caught or retried. A false "I can" fails loudly and self-corrects. When you do skip
+  for a capability gap, **the probe result IS the required evidence** — cite it, exactly as any other
+  disposition must carry its evidence.
+- **A gap in one capability is not a pass on all analysis.** Browser-blocked ≠ un-analyzable: many
+  "broken UI" issues root-cause cleanly from source + a live *HTTP/diagnostics* read that may be
+  reachable even when the browser is not. Prefer a grounded evidence comment over a silent skip
+  whenever *any* available first-hand signal grounds a root cause.
+
 This is Phase 1 (the probe script + the marker convention). Wiring automatic skip/claim logic into
 Step 1/2's candidate loop, and adopting the same convention in `pr-sweep`, is Phase 2 — not yet done.
 
