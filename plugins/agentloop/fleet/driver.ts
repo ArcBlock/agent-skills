@@ -1127,7 +1127,7 @@ export async function executeRun(
     ok: exitCode === 0,
     residualProcs: residual.length,
     produced,
-    detail: `checkout ${co.action}; claude exit ${exitCode}`,
+    detail: `checkout ${co.action}; ${run.engine.kind} exit ${exitCode}`,
     exitCode,
   });
 }
