@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { DeploymentConfig, RepoEntry } from "./driver.ts";
 import {
   buildCatalog,
@@ -6,8 +8,10 @@ import {
   buildDeployment,
   CRON_BEGIN,
   CRON_END,
+  cmpSemver,
   coveredRepos,
   coveredSkills,
+  detectCodexPluginRoot,
   parseProbedPath,
   parseReposSpec,
   reconcileCrontab,
@@ -91,6 +95,70 @@ describe("buildDeployment", () => {
     });
     expect(d.permissionMode).toBe("acceptEdits");
     expect(d.parallel).toBe(false);
+  });
+  test("no engine by default (absent == claude, back-compat)", () => {
+    expect(buildDeployment(baseInput()).engine).toBeUndefined();
+  });
+  test("emits engine when the input carries one, and reconcile preserves a hand-set engine", () => {
+    expect(
+      buildDeployment(baseInput({ engine: { kind: "codex", model: "gpt-x" } })).engine,
+    ).toEqual({ kind: "codex", model: "gpt-x" });
+    // input omits engine → an existing hand-set engine survives the reconcile
+    expect(buildDeployment(baseInput(), { engine: { kind: "codex" } }).engine).toEqual({
+      kind: "codex",
+    });
+  });
+});
+
+describe("cmpSemver", () => {
+  test("orders by major, then minor, then patch", () => {
+    expect(cmpSemver("0.20.0", "0.19.9")).toBeGreaterThan(0);
+    expect(cmpSemver("1.0.0", "0.99.99")).toBeGreaterThan(0);
+    expect(cmpSemver("0.20.0", "0.20.1")).toBeLessThan(0);
+    expect(cmpSemver("0.20.0", "0.20.0")).toBe(0);
+    expect(cmpSemver("0.9.0", "0.10.0")).toBeLessThan(0); // numeric, not lexical
+  });
+});
+
+describe("detectCodexPluginRoot (codex loads only GLOBALLY-installed plugins)", () => {
+  test("undefined when the codex cache does not exist", () => {
+    const home = mkdtempSync(`${tmpdir()}/codex-none-`);
+    try {
+      expect(detectCodexPluginRoot(home)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("picks the HIGHEST-semver install (old versions persist in the cache)", () => {
+    const home = mkdtempSync(`${tmpdir()}/codex-vers-`);
+    try {
+      const mk = (ver: string) => {
+        const dir = `${home}/.codex/plugins/cache/arcblock-agent-skills/agentloop/${ver}/.claude-plugin`;
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(`${dir}/plugin.json`, JSON.stringify({ name: "agentloop", version: ver }));
+      };
+      mk("0.19.5");
+      mk("0.20.0");
+      mk("0.9.0"); // must NOT win despite sorting last lexically among these
+      expect(detectCodexPluginRoot(home)).toBe(
+        `${home}/.codex/plugins/cache/arcblock-agent-skills/agentloop/0.20.0`,
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("undefined when a marketplace dir exists but has no agentloop install", () => {
+    const home = mkdtempSync(`${tmpdir()}/codex-empty-`);
+    try {
+      mkdirSync(`${home}/.codex/plugins/cache/some-other-mkt/other-plugin/1.0.0`, {
+        recursive: true,
+      });
+      expect(detectCodexPluginRoot(home)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

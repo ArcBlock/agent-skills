@@ -24,9 +24,9 @@
  * native-toolchain allowlist edits (native tools already run under skip). Those are
  * only relevant to the acceptEdits posture; see fleet/README.md.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { DeploymentConfig, RepoEntry } from "./driver.ts";
+import type { DeploymentConfig, EngineConfig, RepoEntry } from "./driver.ts";
 import { expandHome } from "./driver.ts";
 
 // ── marker + fixed shape (mirrors the proven `# agentloop-fleet:` crontab block) ──
@@ -67,6 +67,9 @@ export interface SetupInput {
   cronPath: string; // PATH= line for the crontab block
   envFile?: string;
   model?: string;
+  /** Engine for the generated deployment (default claude). For codex, `agentloopRoot` MUST
+   *  point at the codex cache install — the CLI resolves that via detectCodexPluginRoot. */
+  engine?: EngineConfig;
   permissionMode?: DeploymentConfig["permissionMode"];
   checkout?: DeploymentConfig["checkout"];
   checkoutBase?: string;
@@ -114,6 +117,7 @@ export function buildDeployment(
   set("checkoutPerSkill", input.checkoutPerSkill);
   set("cover", input.cover);
   set("permissionMode", input.permissionMode);
+  set("engine", input.engine);
   set("model", input.model);
   set("envFile", input.envFile);
   set("env", input.env);
@@ -292,6 +296,39 @@ function detectAgentloopRoot(): string {
   const marketplace = `${homedir()}/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop`;
   if (existsSync(`${marketplace}/.claude-plugin/plugin.json`)) return marketplace;
   return new URL("..", import.meta.url).pathname.replace(/\/+$/, "");
+}
+
+/** Compare two `x.y.z` versions numerically. >0 if a is newer. Non-numeric parts sort as 0. */
+export function cmpSemver(a: string, b: string): number {
+  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  return 0;
+}
+
+/** Where `codex plugin add agentloop@…` installed the plugin, as the CURRENT (highest-semver)
+ *  version — that is the one `codex exec` loads. Unlike claude's `--plugin-dir`, codex has NO
+ *  per-invocation plugin dir: it loads only globally-installed plugins, and it keeps old
+ *  version dirs around, so a fixed path goes stale on the next `codex plugin add`. Returning
+ *  the current install lets a codex deployment set `agentloopRoot` to it, keeping the prompt +
+ *  the skill's own scripts (both read from agentloopRoot) on the SAME version codex runs —
+ *  no skew. `undefined` = not installed (the CLI turns that into a loud, actionable error).
+ *  `home` is injectable for tests. Couples to codex's cache layout by necessity; isolated here. */
+export function detectCodexPluginRoot(home: string = homedir()): string | undefined {
+  const base = `${home}/.codex/plugins/cache`;
+  if (!existsSync(base)) return undefined;
+  const found: { dir: string; ver: string }[] = [];
+  for (const mkt of readdirSync(base)) {
+    const pdir = `${base}/${mkt}/agentloop`;
+    if (!existsSync(pdir)) continue;
+    for (const ver of readdirSync(pdir)) {
+      if (existsSync(`${pdir}/${ver}/.claude-plugin/plugin.json`))
+        found.push({ dir: `${pdir}/${ver}`, ver });
+    }
+  }
+  if (!found.length) return undefined;
+  found.sort((a, b) => cmpSemver(b.ver, a.ver)); // highest first
+  return found[0].dir;
 }
 
 /** Strip ANSI/terminal escape sequences and pick the last absolute path a probe printed.
@@ -485,14 +522,43 @@ if (import.meta.main) {
   const runner = arg("--runner");
   if (!runner) {
     console.error(
-      "usage: bun fleet/setup.ts --runner <name> [--repos-json <p> | --repos <spec>] [--env-file <p>] [--model <m>] [--local] [--apply]",
+      "usage: bun fleet/setup.ts --runner <name> [--repos-json <p> | --repos <spec>] [--env-file <p>] [--engine claude|codex] [--model <m>] [--local] [--apply]",
     );
     process.exit(2);
   }
 
   const configDir = arg("--config-dir") ?? "~/.agentloop-fleet";
   const bunPath = arg("--bun-path") ?? detectBunPath();
-  const agentloopRoot = arg("--agentloop-root") ?? detectAgentloopRoot();
+
+  // Engine + agentloopRoot resolve TOGETHER. codex loads only globally-installed plugins, so
+  // its root is the codex cache install (not the claude marketplace clone) and there is nothing
+  // to fall back to if it is missing — fail loud with the fix, exactly as claude would on a
+  // missing marketplace. This alignment keeps the prompt + the skill's scripts (both read from
+  // agentloopRoot) on the SAME version codex loads, so there is no cross-version skew.
+  const engineKind = arg("--engine") as EngineConfig["kind"] | undefined;
+  if (engineKind && engineKind !== "claude" && engineKind !== "codex") {
+    console.error(`--engine must be "claude" or "codex" (got "${engineKind}")`);
+    process.exit(2);
+  }
+  let agentloopRoot: string;
+  let engine: EngineConfig | undefined;
+  if (engineKind === "codex") {
+    const codexRoot = arg("--agentloop-root") ?? detectCodexPluginRoot();
+    if (!codexRoot) {
+      console.error(
+        "--engine codex, but no globally-installed agentloop plugin was found for codex.\n" +
+          "codex has no per-invocation --plugin-dir; install the plugin once, then re-run setup:\n" +
+          "  codex plugin marketplace add https://github.com/ArcBlock/agent-skills.git\n" +
+          "  codex plugin add agentloop@arcblock-agent-skills",
+      );
+      process.exit(2);
+    }
+    agentloopRoot = codexRoot;
+    engine = { kind: "codex", ...(arg("--model") ? { model: arg("--model") as string } : {}) };
+  } else {
+    agentloopRoot = arg("--agentloop-root") ?? detectAgentloopRoot();
+    if (engineKind === "claude") engine = { kind: "claude" };
+  }
   const osName = (arg("--os") ?? (process.platform === "darwin" ? "Darwin" : "Linux")) as
     | "Darwin"
     | "Linux";
@@ -518,7 +584,10 @@ if (import.meta.main) {
     os: osName,
     cronPath: detectCronPath(bunPath),
     envFile: arg("--env-file"),
-    model: arg("--model"),
+    // For codex, --model belongs to engine.model (its own id namespace); don't also emit it as
+    // the legacy claude-level model. For claude, --model stays the legacy field.
+    model: engineKind === "codex" ? undefined : arg("--model"),
+    engine,
     permissionMode: (arg("--permission-mode") as DeploymentConfig["permissionMode"]) ?? undefined,
     checkout: checkoutBaseDir ? { mode: "worktree", baseDir: checkoutBaseDir } : undefined,
     checkoutBase: arg("--checkout-base"),
@@ -554,7 +623,9 @@ if (import.meta.main) {
     `# agentloop fleet setup — runner=${runner}, ${catalog.length} repo(s), skills=${skills.join(",")}`,
   );
   console.log(`# config dir: ${p.dir}  (deployment.json + repos.json)`);
-  console.log(`# agentloopRoot: ${agentloopRoot}`);
+  console.log(
+    `# engine: ${deployment.engine?.kind ?? "claude"}  ·  agentloopRoot: ${agentloopRoot}`,
+  );
 
   if (!apply) {
     console.log(`\n--- deployment.json (would write) ---\n${JSON.stringify(deployment, null, 2)}`);

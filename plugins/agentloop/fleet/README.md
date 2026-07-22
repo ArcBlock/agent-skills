@@ -201,9 +201,23 @@ spawn and the dry-run string); everything else in the driver is engine-agnostic:
 
 **The one real asymmetry is plugin loading.** claude loads the plugin per-invocation from
 `agentloopRoot`; `codex exec` has no such flag and sees only globally-installed plugins. So a
-codex deployment must (a) `codex plugin add agentloop@<marketplace>` and (b) point
-`agentloopRoot` at that install so the skill's own scripts + `AGENTLOOP_ROOT` resolve. Wiring
-`/agentloop:fleet-setup` to guarantee that install is a follow-up; today, install it by hand.
+codex deployment needs the plugin globally installed and `agentloopRoot` pointed at that
+install (so the prompt + the skill's own scripts, both read from `agentloopRoot`, are on the
+same version codex loads — no skew).
+
+`/agentloop:fleet-setup --engine codex` handles the alignment: it resolves the current codex
+install (`detectCodexPluginRoot` — the highest-semver dir under `~/.codex/plugins/cache`) and
+writes it as `agentloopRoot`. It does NOT install the plugin for you (symmetric with claude,
+where setup detects the marketplace clone rather than running `claude plugin install`) — if no
+codex install is found it FAILS LOUD with the two commands to run first:
+
+```bash
+codex plugin marketplace add https://github.com/ArcBlock/agent-skills.git
+codex plugin add agentloop@arcblock-agent-skills
+# then: /agentloop:fleet-setup --engine codex … (re-run after any codex plugin update to re-align)
+```
+
+Re-run setup after a `codex plugin add` update so `agentloopRoot` tracks the new version.
 
 ## Running
 
