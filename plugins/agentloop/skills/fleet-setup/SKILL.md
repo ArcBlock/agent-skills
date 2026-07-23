@@ -104,7 +104,9 @@ bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes c
 
 For **each covered (repo × skill)**, materialize a claude routine from the SAME catalog. Canonical
 name = `<repo-name> <skill> hourly` (e.g. `arc issue-sweep hourly`). Render the prompt:
-`<PLUGIN>/fleet/prompts/<skill>.md` with `{{RUNNER}}` → runner.
+`<PLUGIN>/fleet/prompts/<skill>.md` with `{{RUNNER}}` → runner and
+`{{CONCURRENCY}}` → the cloud-plan entry's `concurrency` (from this repo's
+`skillConcurrency[skill]`, default 3).
 
 - **exists (canonical match)** → `RemoteTrigger {action:"update", trigger_id, job_config}`. **First
   `{action:"get"}` for the full `job_config`** — update is a full replace; reuse the existing

@@ -94,6 +94,12 @@ export interface RepoEntry {
    *  in <checkoutBase>/.fleet-state.json (stamped on success). `--force` ignores it. */
   cadenceMinutes?: number;
   /**
+   * Maximum active workers per skill for THIS repo. The skill decides what a worker means;
+   * issue-sweep uses it as the number of concurrently active issues. Values must be integers
+   * in [1,16]. Omit a skill to use that skill's own default.
+   */
+  skillConcurrency?: Record<string, number>;
+  /**
    * Command run inside the checkout after it is materialized, before the skill starts —
    * dependency install, almost always. A fresh checkout has no `node_modules`, and nothing
    * else installs them: the hand-written routines only worked because their clones had been
@@ -250,12 +256,24 @@ export interface PlannedRun {
   modelFlags: string[];
   setupCommand?: string;
   cadenceMinutes?: number;
+  concurrency?: number;
   /** Read-only repos mounted beside the checkouts and handed to the skill as extra roots. */
   referenceRepos: { slug: string; branch: string; cloneUrl?: string; path: string }[];
   command: string; // readable dry-run representation
 }
 
 const NS = "agentloop";
+
+/** Validate and return one repo×skill worker limit. Undefined means the skill's own default. */
+export function resolveSkillConcurrency(entry: RepoEntry, skill: string): number | undefined {
+  const value = entry.skillConcurrency?.[skill];
+  if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 16)) {
+    throw new Error(
+      `${entry.slug}.skillConcurrency["${skill}"] must be an integer between 1 and 16`,
+    );
+  }
+  return value;
+}
 
 /** CLI flags for a deployment's permission posture (see DeploymentConfig.permissionMode). */
 export function permissionFlags(mode: DeploymentConfig["permissionMode"]): string[] {
@@ -434,6 +452,7 @@ export function planRuns(
         ? `${engine.bin} exec --add-dir ${root}`
         : `${engine.bin} -p --plugin-dir ${root} --add-dir ${root}`;
     for (const s of r.skills) {
+      const concurrency = resolveSkillConcurrency(r, s);
       const checkoutPath = checkoutDir(
         expandHome(cfg.checkoutBase),
         r.slug,
@@ -446,6 +465,7 @@ export function planRuns(
         cfg.envFile ? `. ${cfg.envFile}` : "",
         ...Object.keys(cfg.env ?? {}).map((k) => `${k}=…`),
         ...Object.keys(cfg.skillEnv?.[s] ?? {}).map((k) => `${k}=…`),
+	...(concurrency === undefined ? [] : [`AGENTLOOP_SKILL_CONCURRENCY=${concurrency}`]),
       ]
         .filter(Boolean)
         .join(" ");
@@ -465,6 +485,7 @@ export function planRuns(
         modelFlags,
         setupCommand: r.setupCommand,
         cadenceMinutes: r.cadenceMinutes,
+	concurrency,
         slug: r.slug,
         skill: `${NS}:${s}`,
         skillLocal: s,
@@ -482,10 +503,14 @@ export function planRuns(
   return plan;
 }
 
-/** Load a skill's unattended prompt and substitute {{RUNNER}}. */
-export async function renderPrompt(promptPath: string, runner: string): Promise<string> {
+/** Load a skill's unattended prompt and substitute repo×run values. */
+export async function renderPrompt(
+  promptPath: string,
+  runner: string,
+  concurrency = 3,
+): Promise<string> {
   const tpl = await Bun.file(promptPath).text();
-  return tpl.replaceAll("{{RUNNER}}", runner);
+  return tpl.replaceAll("{{RUNNER}}", runner).replaceAll("{{CONCURRENCY}}", String(concurrency));
 }
 
 // ── process hygiene ─────────────────────────────────────────────────────────
@@ -932,7 +957,10 @@ export const referenceEnvKey = (slug: string): string =>
 
 /** Env for one run: process env < envFile < deployment env < per-skill env. */
 export function runEnv(
-  run: Pick<PlannedRun, "skillLocal" | "checkoutPath" | "root" | "runner"> & {
+  run: Pick<
+    PlannedRun,
+    "skillLocal" | "checkoutPath" | "root" | "runner" | "concurrency" | "setupCommand"
+  > & {
     referenceRepos?: PlannedRun["referenceRepos"];
   },
   cfg: DeploymentConfig,
@@ -949,6 +977,8 @@ export function runEnv(
   merged.ARC_UNATTENDED = "1";
   merged.AGENTLOOP_ROOT = run.root;
   merged.ARC_AGENT_RUNNER = run.runner;
+  if (run.concurrency !== undefined) merged.AGENTLOOP_SKILL_CONCURRENCY = String(run.concurrency);
+  if (run.setupCommand) merged.AGENTLOOP_SETUP_COMMAND = run.setupCommand;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
   // Beside the checkout, never inside it: an in-tree file would dirty `git status` and
   // disarm the repo's own push/verify gates — the same reason the fleet marker lives out.
@@ -1060,7 +1090,7 @@ export async function executeRun(
       return finish({ ok: false, detail: `setup failed: ${tailOf(st.out)}`, exitCode: st.code });
     }
   }
-  const prompt = await renderPrompt(run.promptPath, run.runner);
+  const prompt = await renderPrompt(run.promptPath, run.runner, run.concurrency ?? 3);
   // Flags that are REQUIRED for an unattended run (all three found the hard way):
   //  --add-dir <root>            Bash/Read are sandboxed to the checkout; without it the
   //                              skills' scripts under <root>/skills/**/scripts/ are

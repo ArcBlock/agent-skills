@@ -375,7 +375,7 @@ tombstone 保住反向引用的链接(反例:#253 想删 context-builder,结果 
    - gh 遇 403 secondary limit → 退避重试(≤3 次),仍失败标 `RATE-LIMITED`、不整篇报错(可 resume 补);
    - 估算:N 篇 ≈ N 个 POST,确保 < 500/h;N 很大就分段/降并发拉长时间。
 3. **并发 = 吞吐 × 限速的平衡。** ~10–14 并发 × 每 agent ~2–3min ≈ ~4–5 POST/min(~250–300/h),稳在限速下;别盲目拉高并发触发 80/min burst。
-4. **KB body 单点编辑。** 并行 agent **只读 KB、不写 body**;新事实由主控在每段/每批后统一折叠(见「共享 KB」)。**仅交互式 session** 可用 Workflow 编排(批量跑应 resumable,失败/限速可续);**无人值守 routine 绝不 Workflow、绝不 AskUserQuestion**——串行 inline + 待拍板问题落 comment(见 [`issue-sweep` 无人值守铁律](../issue-sweep/SKILL.md))。
+4. **KB body 单点编辑。** 并行 agent **只读 KB、不写 body**;新事实由主控在每段/每批后统一折叠(见「共享 KB」)。**仅交互式 session** 可用 Workflow 编排(批量跑应 resumable,失败/限速可续);**无人值守 routine 绝不 Workflow、绝不 AskUserQuestion**——由 [`issue-sweep` 的 bounded worker pool](../issue-sweep/SKILL.md) 使用无需确认的 agent fan-out;runtime 不支持时才串行 inline。待拍板问题照常落 comment。
 
 ### Spin-off issue(自动开,不问)
 
@@ -442,7 +442,7 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
 ## Implementation Instructions
 
 ### Step 0 — acquire 并发锁 + 判轮次 + 读 KB 热启动(先做,决定省不省)
-**最先 acquire 并发锁**(见「★ 并发锁」):已被新鲜 `agent:processing` 持有 → SKIP 退出;否则加锁(`--dry-run` 不加)。再读共享 KB(`gh issue view <kb_issue>` 的 body)拿 repo 拓扑热启动,别从零探索。再 `gh issue view <n> --comments`:有既往 AI 结论 + human 意见 → 走「轮次感知」热启动路径,**跳过**下面会重复的全量步骤,只做 human 指定的下一步;否则走冷启动 Step 1–6(冷启动也按价值分档)。**收尾**:把本轮新学到的拓扑事实 append/修正进 KB body,并 **release 锁(Step 7)**。
+**最先 acquire 并发锁**(见「★ 并发锁」):已被新鲜 `agent:processing` 持有 → SKIP 退出;否则加锁(`--dry-run` 不加)。并行 `issue-sweep` 的主控只分配 slot、**不替 worker 预加锁**;worker 到这里自行即时 acquire。再读共享 KB(`gh issue view <kb_issue>` 的 body)拿 repo 拓扑热启动,别从零探索。再 `gh issue view <n> --comments`:有既往 AI 结论 + human 意见 → 走「轮次感知」热启动路径,**跳过**下面会重复的全量步骤,只做 human 指定的下一步;否则走冷启动 Step 1–6(冷启动也按价值分档)。**收尾**:普通单 issue 调用把本轮新学到的拓扑事实 append/修正进 KB body;作为并行 `issue-sweep` worker 时不直接改 KB body,把结构化 KB delta 返回主控统一折叠。两种模式都由本 worker **release 锁(Step 7)**。
 
 ### Step 1 — 读 issue 全貌
 `gh issue view <n> --json title,body,author,labels,state,milestone` + `--comments`。记下:文档路径、引用的 spec/范式、关键 commits、**全部 human/AI 意见**(human 意见优先级最高)。

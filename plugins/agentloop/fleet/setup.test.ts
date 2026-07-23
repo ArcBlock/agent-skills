@@ -278,6 +278,7 @@ describe("buildCatalog", () => {
         skills: ["issue-sweep"],
         cloneUrl: "git@github.com:ArcBlock/arc.git",
         setupCommand: "pnpm install",
+	skillConcurrency: { "issue-sweep": 4 },
       },
     ];
     const incoming: RepoEntry[] = [
@@ -294,6 +295,7 @@ describe("buildCatalog", () => {
     expect(merged[0].cadenceMinutes).toBe(120); // added
     expect(merged[0].cloneUrl).toBe("git@github.com:ArcBlock/arc.git"); // preserved
     expect(merged[0].setupCommand).toBe("pnpm install"); // preserved
+    expect(merged[0].skillConcurrency).toEqual({ "issue-sweep": 4 }); // preserved
   });
   test("preserves hand-added referenceRepos (the installer never asks for them)", () => {
     const existing: RepoEntry[] = [
@@ -426,9 +428,17 @@ describe("buildCloudPlan", () => {
     expect(arcIssue).toBeDefined();
     expect(arcIssue?.slug).toBe("ArcBlock/arc");
     expect(arcIssue?.model).toBe("claude-sonnet-5");
+    expect(arcIssue?.concurrency).toBe(3);
     expect(arcIssue?.promptPath.endsWith("/fleet/prompts/issue-sweep.md")).toBe(true);
     expect(arcIssue?.cron).toMatch(/^\d+ \* \* \* \*$/);
     expect(plan.map((p) => p.canonicalName)).toContain("did issue-sweep hourly");
+  });
+  test("carries per-repo skill concurrency into the cloud render plan", () => {
+    const configured: RepoEntry[] = [
+      { ...repos[0], skills: ["issue-sweep"], skillConcurrency: { "issue-sweep": 5 } },
+    ];
+    const plan = buildCloudPlan(baseInput({ cover: "all" }), configured);
+    expect(plan[0].concurrency).toBe(5);
   });
   test("deterministic + respects cover subset", () => {
     const a = buildCloudPlan(baseInput({ cover: ["ArcBlock/did"] }), repos);

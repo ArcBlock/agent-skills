@@ -178,6 +178,7 @@ round silently skips. `~/.agentloop-fleet/deployment.json`:
 [
   { "slug": "ArcBlock/arc", "defaultBranch": "main", "skills": ["issue-sweep","pr-sweep"],
     "cloneUrl": "git@github.com:ArcBlock/arc.git", "cadenceMinutes": 120,
+    "skillConcurrency": { "issue-sweep": 3 },
     "setupCommand": "pnpm install --frozen-lockfile --prefer-offline" }
 ]
 ```

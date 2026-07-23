@@ -4,7 +4,8 @@
     "defaultBranch": "main",
     "skills": ["issue-sweep", "pr-sweep"],
     "cloneUrl": "git@github.com:ArcBlock/arc.git",
-    "cadenceMinutes": 60
+    "cadenceMinutes": 60,
+    "skillConcurrency": { "issue-sweep": 3 }
   },
   {
     "slug": "ArcBlock/did",

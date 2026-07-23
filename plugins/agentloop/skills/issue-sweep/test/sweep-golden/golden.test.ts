@@ -67,6 +67,44 @@ async function loadFixtures(): Promise<Array<{ name: string; fixture: Fixture }>
   );
 }
 
+describe("unattended orchestration contract", () => {
+  it("allows bounded non-interactive issue fan-out while retaining a serial fallback", async () => {
+    const skill = await readFile(join(import.meta.dir, "..", "..", "SKILL.md"), "utf8");
+    const prompt = await readFile(
+      join(import.meta.dir, "..", "..", "..", "..", "fleet", "prompts", "issue-sweep.md"),
+      "utf8",
+    );
+    const issueReview = await readFile(
+      join(import.meta.dir, "..", "..", "..", "issue-review", "SKILL.md"),
+      "utf8",
+    );
+
+    expect(skill).toContain('skillConcurrency["issue-sweep"]');
+    expect(skill).toContain("主控分配,worker 即时 claim");
+    expect(skill).toContain("不预加");
+    expect(skill).toContain("会改 repo 的 worker 必须使用独立 worktree");
+    expect(skill).toContain("AGENTLOOP_SETUP_COMMAND");
+    expect(skill).toContain("共享 KB 由主控单写,worker 仍贡献 KB");
+    expect(skill).toContain("绝不代删");
+    expect(skill).toContain("嵌套 fan-out 也受 runtime 总 slot 限制");
+    expect(skill).toContain("没有非交互 agent 能力时");
+    expect(skill).not.toContain("编排一律串行 inline");
+    expect(skill).not.toContain("主控先 claim");
+
+    expect(prompt).toContain("The prohibition is on interactive orchestration, not parallelism");
+    expect(prompt).toContain('skillConcurrency["issue-sweep"]');
+    expect(prompt).toContain("--concurrency {{CONCURRENCY}}");
+    expect(prompt).toContain("arguments `--autofix-green --concurrency {{CONCURRENCY}}`");
+    expect(prompt).toContain("bounded worker-pool contract");
+    expect(prompt).toContain("fall back to serial inline only when it does not");
+    expect(prompt).not.toContain("Orchestrate serially inline");
+
+    expect(issueReview).toContain("不替 worker 预加锁");
+    expect(issueReview).toContain("把结构化 KB delta 返回主控统一折叠");
+    expect(issueReview).not.toContain("串行 inline + 待拍板问题落 comment");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // isAiAgentComment
 // ---------------------------------------------------------------------------

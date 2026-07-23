@@ -26,8 +26,13 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { DeploymentConfig, EngineConfig, RepoEntry } from "./driver.ts";
-import { expandHome } from "./driver.ts";
+import {
+  type DeploymentConfig,
+  type EngineConfig,
+  expandHome,
+  type RepoEntry,
+  resolveSkillConcurrency,
+} from "./driver.ts";
 
 // ── marker + fixed shape (mirrors the proven `# agentloop-fleet:` crontab block) ──
 export const CRON_MARKER = "agentloop-fleet";
@@ -179,6 +184,7 @@ export interface CloudRoutineSpec {
   cron: string; // "17 * * * *"
   promptPath: string; // <agentloopRoot>/fleet/prompts/<skill>.md, rendered with {{RUNNER}}
   model?: string;
+  concurrency: number;
 }
 
 /** The covered repos for a deployment (all catalog repos, or the explicit cover subset). */
@@ -205,6 +211,7 @@ export function buildCloudPlan(input: SetupInput, repos: RepoEntry[]): CloudRout
         cron: `${min} * * * *`,
         promptPath: `${input.agentloopRoot.replace(/\/+$/, "")}/fleet/prompts/${skill}.md`,
         model: input.model,
+	concurrency: resolveSkillConcurrency(r, skill) ?? 3,
       });
     }
   }

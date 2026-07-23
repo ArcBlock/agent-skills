@@ -106,6 +106,43 @@ describe("planRuns", () => {
     expect(new Set(plan.map((p) => p.slug))).toEqual(new Set(["ArcBlock/did"]));
   });
 
+  it("carries repo×skill concurrency into the plan, prompt env, and worker setup env", () => {
+    const catalog: RepoEntry[] = [
+      {
+	...CATALOG[0],
+	skills: ["issue-sweep"],
+	setupCommand: "pnpm install --frozen-lockfile",
+	skillConcurrency: { "issue-sweep": 4 },
+      },
+    ];
+    const cfg = base({ cover: ["ArcBlock/arc"] });
+    const run = planRuns(catalog, cfg)[0];
+    expect(run.concurrency).toBe(4);
+    expect(run.command).toContain("AGENTLOOP_SKILL_CONCURRENCY=4");
+    const env = runEnv(run, cfg, {});
+    expect(env.AGENTLOOP_SKILL_CONCURRENCY).toBe("4");
+    expect(env.AGENTLOOP_SETUP_COMMAND).toBe("pnpm install --frozen-lockfile");
+  });
+
+  it("rejects invalid repo×skill concurrency instead of silently running unbounded", () => {
+    const invalid = (value: number): RepoEntry[] => [
+      {
+	...CATALOG[0],
+	skills: ["issue-sweep"],
+	skillConcurrency: { "issue-sweep": value },
+      },
+    ];
+    expect(() => planRuns(invalid(0), base({ cover: ["ArcBlock/arc"] }))).toThrow(
+      /between 1 and 16/,
+    );
+    expect(() => planRuns(invalid(1.5), base({ cover: ["ArcBlock/arc"] }))).toThrow(
+      /between 1 and 16/,
+    );
+    expect(() => planRuns(invalid(17), base({ cover: ["ArcBlock/arc"] }))).toThrow(
+      /between 1 and 16/,
+    );
+  });
+
   it("two deployments covering the same repo plan identical commands (coordination is per-item via labels, not here)", () => {
     const a = planRuns(CATALOG, base({ runner: "a", cover: ["ArcBlock/arc"] }), "ArcBlock/arc");
     const b = planRuns(CATALOG, base({ runner: "b", cover: ["ArcBlock/arc"] }), "ArcBlock/arc");
@@ -160,9 +197,11 @@ describe("expandHome", () => {
 describe("renderPrompt", () => {
   it("substitutes {{RUNNER}} in the real generalized prompt + keeps the namespaced skill name", async () => {
     const p = new URL("prompts/issue-sweep.md", import.meta.url).pathname;
-    const out = await renderPrompt(p, "robert-macbook");
+    const out = await renderPrompt(p, "robert-macbook", 4);
     expect(out).toContain("runner is 'robert-macbook'");
     expect(out).not.toContain("{{RUNNER}}");
+    expect(out).not.toContain("{{CONCURRENCY}}");
+    expect(out).toContain("--concurrency 4");
     expect(out).toContain("agentloop:issue-sweep"); // namespaced, per the namespace fix
     expect(out.toLowerCase()).toContain("unattended");
   });

@@ -1,6 +1,6 @@
 ---
 name: issue-sweep
-description: Sweep open GitHub issues for unprocessed human input and act on each via the issue-review skill — delete-PRs for human-approved deprecated docs, doc-update PRs for approved drifted docs, fix-PRs for approved bugs, analysis+TDD-plan comments for feature/design requests (then implement after confirmation), close issues whose PR merged, comment-only on conditional/security/needs-decision ones. The actionable signal may be a comment OR the issue body. With --autofix-green, also auto-fixes "green" issues that have no human reply yet (unambiguous + verifiable-here + low-risk + non-security) — reproduce→fix→test→PR, never auto-merge. Run manually (/agentloop:issue-sweep) or on a schedule. Designed for a doc-audit + spin-off + feature workflow.
+description: Sweep open GitHub issues for unprocessed human input and act on each via the issue-review skill — delete-PRs for human-approved deprecated docs, doc-update PRs for approved drifted docs, fix-PRs for approved bugs, grounded analysis for feature/design requests followed by autonomous execution when no real human-only fork remains, close issues whose PR merged, and comment-only on conditional/security/needs-decision ones. The actionable signal may be a comment OR the issue body. With --autofix-green, also auto-fixes "green" issues that have no human reply yet (unambiguous + verifiable-here + low-risk + non-security) — reproduce→fix→test→PR, never auto-merge. Run manually (/agentloop:issue-sweep) or on a schedule. Designed for a doc-audit + spin-off + feature workflow.
 ---
 
 # Issue Sweep — batch-process issues with new human replies
@@ -20,7 +20,7 @@ the agent hasn't acted on yet** — and runs the per-issue engine on each.
 This is the thing a cron should schedule: one run = scan + process a batch. In
 environments without a working scheduler, run it by hand: `/agentloop:issue-sweep`.
 
-> **★ 无人值守铁律(cron routine / /loop——本 skill 的默认运行形态):绝不调用任何会等待用户的工具——`AskUserQuestion`、`Workflow`(需交互式 opt-in 确认)、`EnterPlanMode`(退出需用户批准)。** 无人应答 → 整条 routine 永久挂死(实测:sweep routine 整夜卡在「是否运行 workflow」的提问上)。需要人拍板的问题,照 [`design-review` Autonomous escalation](../design-review/SKILL.md) 范式处理:把选项 + 你的推荐 + 被 block 的内容作为 comment(挂 `needs-human-confirm`)落到对应 issue,**然后继续处理下一项**;编排一律串行 inline(同 [`pr-sweep` Step 3 铁律](../pr-sweep/SKILL.md))。repo hook(`.claude/hooks/deny-interactive-unattended.py`)会在无人值守 session 硬 deny 这三个工具兜底——被 deny 即说明你在无人值守环境,按本条纪律走,不要重试。
+> **★ 无人值守铁律(cron routine / /loop——本 skill 的默认运行形态):绝不调用任何会等待用户的工具——`AskUserQuestion`、`Workflow`(需交互式 opt-in 确认)、`EnterPlanMode`(退出需用户批准)。** 无人应答 → 整条 routine 永久挂死(实测:sweep routine 整夜卡在「是否运行 workflow」的提问上)。需要人拍板的问题,照 [`design-review` Autonomous escalation](../design-review/SKILL.md) 范式处理:把选项 + 你的推荐 + 被 block 的内容作为 comment(挂 `needs-human-confirm`)落到对应 issue,**然后继续处理下一项**。**禁止的是会等待确认的交互式编排,不是并行本身**:无人值守环境优先使用无需 opt-in、不会等待用户的 subagent/agent fan-out;若当前 runtime 没有这种能力才串行 inline fallback。repo hook(`.claude/hooks/deny-interactive-unattended.py`)会在无人值守 session 硬 deny 这三个工具兜底——被 deny 即说明你在无人值守环境,按本条纪律走,不要重试。
 
 > **输出语言与写作规范(中文,信雅达),同 `issue-review`。** 所有面向团队的产出——issue/PR comment、**PR/issue 描述正文**、issue 标题、triage 说明——一律中文;代码标识符、路径、命令、`path:line`、测试输出保持原样。**PR 与 commit 标题必须全英文**——完整 Conventional Commits(`type(scope): english description`,冒号后的描述也用英文),不得留中文;issue 标题保持中文。**不堆砌**:先一句话结论,再最少但足够的证据(文档 / 代码 `path:line` / 真实测试输出,**UI 相关必附截图**);长日志折叠进 `<details>`。
 
@@ -31,6 +31,7 @@ environments without a working scheduler, run it by hand: `/agentloop:issue-swee
 /agentloop:issue-sweep --dry-run  # report what WOULD be processed; do not post/PR/close
 /agentloop:issue-sweep <label…>   # restrict the candidate set to specific labels
 /agentloop:issue-sweep --autofix-green   # ALSO auto-fix "green" issues that have NO human reply yet (Step 3b)
+/agentloop:issue-sweep --concurrency 2   # override this repo's configured active-issue limit
 ```
 
 Repo is `<repo_slug>`. Use the `gh` CLI when it's available (as the `gh …`
@@ -286,6 +287,48 @@ frozen by old runs.)
 Hand the issue to `issue-review` (read issue + referenced docs + **verify each
 claim against live code/tests**, `path:line` or NOT FOUND). Then act per the
 human's latest comment — this is `issue-review`'s resolve phase:
+
+### Bounded per-issue orchestration（无人值守默认并行）
+
+候选集确定后,主控按以下契约运行 `issue-review`:
+
+**并发配置（repo × skill）:**按优先级取值:显式 `--concurrency <N>` →
+环境变量 `AGENTLOOP_SKILL_CONCURRENCY`（fleet driver 从 `repos.json` 当前 repo 的
+`skillConcurrency["issue-sweep"]` 注入）→ 默认 `3`。值必须是 `1..16` 的整数,非法值
+直接报配置错误;当前 runtime 可用 agent slot 更少时向下收敛,没有非交互 agent 能力时
+降到 `1`。这个值限制 **active issue workers**,不是本轮最多处理多少 issue。
+
+1. **主控分配,worker 即时 claim。** 主控只维护去重后的候选 queue 和空闲 slot,
+   **不预加** `agent:processing`。某个 slot 准备立即开工时才把一条 issue 交给 worker;
+   worker 的第一个动作是运行 `issue-review` Step 0,自行重验
+   open/hold/blocked/`agent:processing` 并 acquire。抢锁失败就返回 `SKIP_LOCKED`,
+   主控继续投递下一条。未进入 active slot 的候选保持未锁,避免排队超过 TTL。
+2. **一个 worker 只拥有一个 issue。** worker 运行完整 `issue-review` engine,只写该
+   issue 的 comment/label/PR/branch;不同 issue 之间不得共享可变任务状态。
+3. **会改 repo 的 worker 必须使用独立 worktree。** comment-only / research / idea /
+   triage 等只读代码的 worker 可共用主 checkout;任何会 edit/format/test/commit/push/
+   open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree,
+   分支仍严格使用 Step 4 的 `claude/issue-<N>`（或 phase 变体）。禁止多个写 worker
+   在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
+   `AGENTLOOP_SETUP_COMMAND`（fleet driver 从当前 repo 的 `setupCommand` 注入）并在
+   该 worktree 执行;未配置时按 repo profile/toolchain 完成等价 bootstrap。setup
+   未成功不得编辑、测试或声称可验证。
+4. **共享 KB 由主控单写,worker 仍贡献 KB。** 并行 sweep 调用 `issue-review` 时,
+   本条显式覆盖其“收尾直接编辑 KB body”:worker 只返回结构化结果（issue、disposition、证据、
+   PR/claim、KB 增量、错误）;共享 KB body、整轮汇总、presence heartbeat 由主控在
+   barrier 后统一写,避免 read-modify-write 覆盖。worker 不直接编辑共享 KB body。
+5. **失败隔离 + ownership-safe 清理。** 一个 worker 失败不取消其他 worker。正常
+   收尾由 worker 按 `issue-review` Step 7 release 自己的 `agent:processing`;主控
+   **绝不代删**无 owner token 的 label 锁,worker 崩溃留给 TTL 恢复。写 worker 成功且
+   worktree clean 后移除临时 worktree;失败且有未提交内容时不 force-delete,返回路径、
+   branch、status 和 blocker 供恢复。不得把半成品汇报为完成。
+6. **嵌套 fan-out 也受 runtime 总 slot 限制。** `--concurrency` 只限制 active
+   issues;Research 等 issue 内部要再开 subagent 时先看 runtime 剩余 slot,不足就
+   在该 worker 内 inline/串行,不得因 3 个 issue 各自再扇出而突破 runtime 上限。
+
+主控只在候选分配与最终共享写入处串行;issue 的取证、实现、验证和 per-issue GitHub
+写入在上述边界内并行。并发上限是安全阀,不是本轮处理上限:worker 完成后继续从
+unclaimed queue 取下一条,直到候选耗尽或触及真实的运行预算/外部限流。
 
 | Human's latest reply | Action |
 |---|---|

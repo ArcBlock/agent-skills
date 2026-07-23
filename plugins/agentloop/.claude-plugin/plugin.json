@@ -1,6 +1,6 @@
 {
   "name": "agentloop",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "description": "Repo-agnostic engineering loop engine: config-driven verification gate, sticky PR-comment delivery, and the review/sweep skill contracts. Repo specifics live in each repo's .claude/verify/config.ts, not here.",
   "author": {
     "name": "ArcBlock Team",
