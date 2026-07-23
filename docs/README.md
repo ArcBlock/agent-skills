@@ -43,6 +43,14 @@ Guide for creating specialized AI subagents for task-specific workflows. Read th
 - Create domain-specific expertise
 - Manage multi-agent workflows
 
+### Cross-Platform Usage
+
+**🌙 [kimi.md](kimi.md)** - **Kimi Code CLI Usage**<br>
+Guide for using the Agent Skills from this repository with Kimi Code CLI. Read this when you need to:
+- Understand which parts of the project work in Kimi
+- Install skills in Kimi
+- Learn about compatibility differences between Claude Code and Kimi
+
 ### Plugin System
 
 **🔧 [plugins.md](plugins.md)** - **Plugin Development**<br>
