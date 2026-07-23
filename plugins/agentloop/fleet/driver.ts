@@ -465,7 +465,7 @@ export function planRuns(
         cfg.envFile ? `. ${cfg.envFile}` : "",
         ...Object.keys(cfg.env ?? {}).map((k) => `${k}=…`),
         ...Object.keys(cfg.skillEnv?.[s] ?? {}).map((k) => `${k}=…`),
-	...(concurrency === undefined ? [] : [`AGENTLOOP_SKILL_CONCURRENCY=${concurrency}`]),
+        ...(concurrency === undefined ? [] : [`AGENTLOOP_SKILL_CONCURRENCY=${concurrency}`]),
       ]
         .filter(Boolean)
         .join(" ");
@@ -485,7 +485,7 @@ export function planRuns(
         modelFlags,
         setupCommand: r.setupCommand,
         cadenceMinutes: r.cadenceMinutes,
-	concurrency,
+        concurrency,
         slug: r.slug,
         skill: `${NS}:${s}`,
         skillLocal: s,

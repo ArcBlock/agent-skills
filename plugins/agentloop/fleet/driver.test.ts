@@ -109,10 +109,10 @@ describe("planRuns", () => {
   it("carries repo×skill concurrency into the plan, prompt env, and worker setup env", () => {
     const catalog: RepoEntry[] = [
       {
-	...CATALOG[0],
-	skills: ["issue-sweep"],
-	setupCommand: "pnpm install --frozen-lockfile",
-	skillConcurrency: { "issue-sweep": 4 },
+        ...CATALOG[0],
+        skills: ["issue-sweep"],
+        setupCommand: "pnpm install --frozen-lockfile",
+        skillConcurrency: { "issue-sweep": 4 },
       },
     ];
     const cfg = base({ cover: ["ArcBlock/arc"] });
@@ -127,9 +127,9 @@ describe("planRuns", () => {
   it("rejects invalid repo×skill concurrency instead of silently running unbounded", () => {
     const invalid = (value: number): RepoEntry[] => [
       {
-	...CATALOG[0],
-	skills: ["issue-sweep"],
-	skillConcurrency: { "issue-sweep": value },
+        ...CATALOG[0],
+        skills: ["issue-sweep"],
+        skillConcurrency: { "issue-sweep": value },
       },
     ];
     expect(() => planRuns(invalid(0), base({ cover: ["ArcBlock/arc"] }))).toThrow(

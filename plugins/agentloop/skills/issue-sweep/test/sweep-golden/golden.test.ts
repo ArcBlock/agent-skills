@@ -389,7 +389,7 @@ describe("shouldProcess — inline", () => {
     const issue: Issue = {
       number: 2,
       comments: [],
-      body: "> 🤖 AI Agent — auto-generated spin-off\nDelete sample.test.ts" + TRACE,
+      body: `> 🤖 AI Agent — auto-generated spin-off\nDelete sample.test.ts${TRACE}`,
     };
     // Body itself IS an AI agent comment → treated as "already processed" → skip
     expect(shouldProcess(issue)).toBe(false);
@@ -399,7 +399,7 @@ describe("shouldProcess — inline", () => {
     const issue: Issue = {
       number: 3,
       comments: [
-        { body: "> 🤖 AI Agent — sweep\nAudit note." + TRACE },
+        { body: `> 🤖 AI Agent — sweep\nAudit note.${TRACE}` },
         { body: "I've confirmed the bug in staging. LGTM." },
       ],
     };
@@ -411,7 +411,7 @@ describe("shouldProcess — inline", () => {
       number: 4,
       comments: [
         { body: "Confirmed." },
-        { body: "> 🤖 AI Agent — sweep\nFix delivered in PR #99. Closing." + TRACE },
+        { body: `> 🤖 AI Agent — sweep\nFix delivered in PR #99. Closing.${TRACE}` },
       ],
     };
     expect(shouldProcess(issue)).toBe(false);
@@ -422,7 +422,7 @@ describe("shouldProcess — inline", () => {
       number: 5,
       comments: [
         { body: "Good idea." },
-        { body: "> 🤖 AI Agent — sweep 2026-05-20\n🟠 不在本轮范围 / 留开放。" + TRACE },
+        { body: `> 🤖 AI Agent — sweep 2026-05-20\n🟠 不在本轮范围 / 留开放。${TRACE}` },
       ],
     };
     expect(shouldProcess(issue)).toBe(true);
@@ -432,7 +432,7 @@ describe("shouldProcess — inline", () => {
     const issue: Issue = {
       number: 6,
       comments: [
-        { body: "> 🤖 AI Agent — doc-audit\nDocument is drifted. needs-human-confirm." + TRACE },
+        { body: `> 🤖 AI Agent — doc-audit\nDocument is drifted. needs-human-confirm.${TRACE}` },
       ],
     };
     expect(shouldProcess(issue)).toBe(false);
@@ -615,14 +615,13 @@ describe("live-sweep regressions", () => {
   });
 
   it("a TERMINAL security escalation is NOT re-picked because its prose says 不在本轮自动修 (#1521)", () => {
-    const body =
-      "> 🤖 AI Agent\n🔴 security-sensitive:证据不充分,不在本轮自动修,交人类判断。" + TRACE;
+    const body = `> 🤖 AI Agent\n🔴 security-sensitive:证据不充分,不在本轮自动修,交人类判断。${TRACE}`;
     expect(isTerminalAiComment(body)).toBe(true);
     expect(shouldProcess({ number: 1521, comments: [{ body }] })).toBe(false); // terminal wins
   });
 
   it("terminal beats an incidental deferral word (ordering was inverted)", () => {
-    const body = "> 🤖 AI Agent\n已开 PR #1699 修复;其余 TODO 留待后续。" + TRACE;
+    const body = `> 🤖 AI Agent\n已开 PR #1699 修复;其余 TODO 留待后续。${TRACE}`;
     expect(shouldProcess({ number: 1, comments: [{ body }] })).toBe(false);
   });
 
@@ -637,7 +636,7 @@ describe("live-sweep regressions", () => {
     // agents run — so it cannot discriminate. A real autonomous cloud comment is caught at
     // runtime by its Bot author (claude[bot]); a local one by its sweep-trace.
     expect(isAiAgentComment("报告正文。\n\n@ vm · runner:robert · skills@a2298a3b")).toBe(false);
-    expect(isAiAgentComment("报告正文。\n\n@ vm · runner:robert · skills@a2298a3b" + TRACE)).toBe(
+    expect(isAiAgentComment(`报告正文。\n\n@ vm · runner:robert · skills@a2298a3b${TRACE}`)).toBe(
       true,
     );
   });

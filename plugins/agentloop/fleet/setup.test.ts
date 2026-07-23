@@ -278,7 +278,7 @@ describe("buildCatalog", () => {
         skills: ["issue-sweep"],
         cloneUrl: "git@github.com:ArcBlock/arc.git",
         setupCommand: "pnpm install",
-	skillConcurrency: { "issue-sweep": 4 },
+        skillConcurrency: { "issue-sweep": 4 },
       },
     ];
     const incoming: RepoEntry[] = [

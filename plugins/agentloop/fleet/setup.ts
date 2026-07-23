@@ -211,7 +211,7 @@ export function buildCloudPlan(input: SetupInput, repos: RepoEntry[]): CloudRout
         cron: `${min} * * * *`,
         promptPath: `${input.agentloopRoot.replace(/\/+$/, "")}/fleet/prompts/${skill}.md`,
         model: input.model,
-	concurrency: resolveSkillConcurrency(r, skill) ?? 3,
+        concurrency: resolveSkillConcurrency(r, skill) ?? 3,
       });
     }
   }
