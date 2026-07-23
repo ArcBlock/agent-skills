@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #2271: '[test-sweep] aistro: 1 failures detected' — a per-blocklet failure child issue opened directly by the test-sweep skill (child of a '[test-sweep] QA Report' parent). Zero comments, labels ['P2', 'test-sweep-failure']. It carries the standard `> 🤖 AI Agent` identity header but NO sweep-trace/Generated-by machine marker (test-sweep opens these directly, not through issue-publish's test-sweep-key idempotency path), so before the label-aware fix, shouldProcess() read this as an unprocessed human directive. It is an automated QA finding, not human input — Step 2 must skip it (belongs to the Step 3b autofix-green 'test-sweep 发现的 issue' track instead). Reference: issue-sweep SKILL.md Step 3b.",
+  "issue": {
+    "number": 2271,
+    "labels": ["P2", "test-sweep-failure"],
+    "body": "\n## test-sweep 失败：aistro\n\n**时间**: 2026-07-22 20:05 UTC\n**URL**: https://aistro.afsd.dev\n\n### 发现：chat 页 `.man` 文档与实际行为不符（doc-vs-code drift）\n\nchat.yaml 声称外层视图无 authenticated gate，实际匿名访问观测到登录墙。\n\n**建议**：更新 chat.yaml 的门禁描述以匹配实际部署行为，或排查该门禁是否为非预期回归。\n\n> 🤖 AI Agent @ vm · runner:yechao · skills@56f6c81c",
+    "comments": []
+  },
+  "expected": {
+    "step2_keep": false,
+    "reason": "Zero comments, test-sweep-failure label, body carries the identity header but no machine marker. This is an automated QA finding (not a human directive), so Step 2 must NOT treat it as unprocessed human input — it is instead a candidate for the Step 3b autofix-green 'test-sweep 发现的 issue' track."
+  },
+  "forbidden_actions": []
+}

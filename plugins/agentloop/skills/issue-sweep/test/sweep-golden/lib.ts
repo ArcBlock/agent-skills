@@ -142,6 +142,24 @@ export function isTerminalAiComment(body: string): boolean {
 }
 
 /**
+ * Labels that mark an issue as an automated QA finding (opened directly by the test-sweep
+ * skill), never a human directive — even when the body carries no MACHINE_MARKER. Real arc
+ * finding (#2271, "[test-sweep] aistro: 1 failures detected"): the per-blocklet failure child
+ * issue is opened directly (not through issue-publish's `test-sweep-key` idempotency path), so
+ * its body has zero comments and no MACHINE_MARKER — before this fix, `shouldProcess()` read
+ * that shape as an unprocessed human directive and would have routed a real automated QA report
+ * into the human-reply-pending track. Label is the only reliable machine-authorship signal for
+ * this issue class; see SKILL.md Step 3b "test-sweep 发现的 issue" for the disposition this
+ * unlocks (autofix-green track, not human-reply-pending).
+ */
+const TEST_SWEEP_FINDING_LABELS = new Set(["test-sweep-failure", "test-sweep-report"]);
+
+/** True when the issue is an automated test-sweep finding (see TEST_SWEEP_FINDING_LABELS). */
+export function isTestSweepFinding(issue: Issue): boolean {
+  return (issue.labels ?? []).some((l) => TEST_SWEEP_FINDING_LABELS.has(l));
+}
+
+/**
  * Core Step 2 predicate: should this issue be kept in the processing set?
  *
  * Keep if:
@@ -151,12 +169,15 @@ export function isTerminalAiComment(body: string): boolean {
  *
  * Skip if:
  * - Last comment is a terminal AI comment
+ * - Zero comments AND the issue is a test-sweep finding (#2271 archetype — an automated QA
+ *   report, not a human directive; belongs to the Step 3b autofix-green track instead)
  */
 export function shouldProcess(issue: Issue): boolean {
   const comments = issue.comments;
 
   // No comments — check if body itself has an AI agent response
   if (comments.length === 0) {
+    if (isTestSweepFinding(issue)) return false;
     const body = issue.body ?? "";
     return !isAiAgentComment(body);
   }

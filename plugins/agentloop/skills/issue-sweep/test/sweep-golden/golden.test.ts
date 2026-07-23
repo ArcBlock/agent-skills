@@ -20,6 +20,7 @@ import {
   isAiAgentComment,
   isNonTerminalAiComment,
   isTerminalAiComment,
+  isTestSweepFinding,
   labelStance,
   shouldProcess,
 } from "./lib.ts";
@@ -397,6 +398,61 @@ describe("shouldProcess — inline", () => {
       ],
     };
     expect(shouldProcess(issue)).toBe(false);
+  });
+
+  // #2271 archetype: test-sweep opens per-blocklet failure issues directly (not through
+  // issue-publish's test-sweep-key marker path), so the body carries the `> 🤖 AI Agent`
+  // identity header but no MACHINE_MARKER. Before the label-aware fix this was a false
+  // positive: shouldProcess() read a zero-comment automated QA finding as an unprocessed
+  // human directive. See SKILL.md Step 3b "test-sweep 发现的 issue".
+  it("zero-comment test-sweep-failure issue → skip (automated QA finding, not human input)", () => {
+    const issue: Issue = {
+      number: 2271,
+      labels: ["P2", "test-sweep-failure"],
+      comments: [],
+      body: "test-sweep 失败报告...\n\n> 🤖 AI Agent @ vm · runner:yechao · skills@56f6c81c",
+    };
+    expect(shouldProcess(issue)).toBe(false);
+  });
+
+  it("zero-comment test-sweep-report (parent QA report) → skip, same rule", () => {
+    const issue: Issue = {
+      number: 2274,
+      labels: ["test-sweep-report"],
+      comments: [],
+      body: "[test-sweep] QA Report — 2026-07-22 20:08 UTC\n\n> 🤖 AI Agent @ vm · runner:yechao · skills@56f6c81c",
+    };
+    expect(shouldProcess(issue)).toBe(false);
+  });
+
+  it("a test-sweep-failure issue that LATER gets a real human reply is still kept normally", () => {
+    // Once a human actually comments, the ordinary last-comment rule takes back over —
+    // the label-based override only applies to the zero-comment gap.
+    const issue: Issue = {
+      number: 2271,
+      labels: ["P2", "test-sweep-failure"],
+      comments: [{ body: "这个登录墙是有意的,不是回归,可以关闭。" }],
+    };
+    expect(shouldProcess(issue)).toBe(true);
+  });
+});
+
+describe("isTestSweepFinding", () => {
+  it("true for test-sweep-failure label", () => {
+    expect(
+      isTestSweepFinding({ number: 1, labels: ["P2", "test-sweep-failure"], comments: [] }),
+    ).toBe(true);
+  });
+
+  it("true for test-sweep-report label", () => {
+    expect(isTestSweepFinding({ number: 1, labels: ["test-sweep-report"], comments: [] })).toBe(
+      true,
+    );
+  });
+
+  it("false when neither label is present", () => {
+    expect(isTestSweepFinding({ number: 1, labels: ["bug", "P2"], comments: [] })).toBe(false);
+    expect(isTestSweepFinding({ number: 1, comments: [] })).toBe(false);
   });
 });
 
