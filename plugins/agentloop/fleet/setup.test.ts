@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import type { DeploymentConfig, RepoEntry } from "./driver.ts";
 import {
@@ -14,9 +22,11 @@ import {
   detectCodexPluginRoot,
   parseProbedPath,
   parseReposSpec,
+  paths,
   reconcileCrontab,
   renderCronBlock,
   renderCronRow,
+  renderRunnerScript,
   type SetupInput,
   scaffoldEnvFile,
   skillBaseMinute,
@@ -156,6 +166,219 @@ describe("detectCodexPluginRoot (codex loads only GLOBALLY-installed plugins)", 
         recursive: true,
       });
       expect(detectCodexPluginRoot(home)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("renderRunnerScript (the launcher fix — content shape)", () => {
+  test("is self-contained: no imports from the plugin itself, only node: builtins", () => {
+    const script = renderRunnerScript(
+      "/home/alice/.bun/bin/bun",
+      "/home/alice/.agentloop-fleet/agentloop-current",
+    );
+    const importLines = script.split("\n").filter((l) => l.trim().startsWith("import "));
+    for (const line of importLines) expect(line).toMatch(/from "node:/);
+  });
+
+  test("embeds the given bunPath and currentLink literally", () => {
+    const script = renderRunnerScript("/opt/bun/bun", "/x/agentloop-current");
+    expect(script).toContain('"/opt/bun/bun"');
+    expect(script).toContain('"/x/agentloop-current"');
+  });
+
+  test("checks the codex cache first (codex has no per-invocation --plugin-dir), then the marketplace clone, then the claude cache", () => {
+    const script = renderRunnerScript("/b/bun", "/x/link");
+    expect(script).toContain("marketplaces/arcblock-agent-skills/plugins/agentloop");
+    expect(script).toContain(".codex/plugins/cache");
+    expect(script).toContain(".claude/plugins/cache");
+    expect(script).toContain("cmpSemver");
+  });
+
+  test("errors loudly (not a bare crash) when nothing is found", () => {
+    const script = renderRunnerScript("/b/bun", "/x/link");
+    expect(script).toContain("no agentloop plugin installation found");
+    expect(script).toContain("process.exit(1)");
+  });
+
+  test("has no un-escaped backtick template literals in the GENERATED code (the nesting footgun)", () => {
+    const script = renderRunnerScript("/b/bun", "/x/link");
+    // the generated script's OWN logic must use string concatenation, never backticks —
+    // nesting backtick template literals inside this file's own template literal is the
+    // exact mistake this test guards against (see renderRunnerScript's doc comment).
+    const bodyLines = script.split("\n").filter((l) => !l.trim().startsWith("//"));
+    for (const line of bodyLines) expect(line).not.toContain("`");
+  });
+});
+
+describe("renderRunnerScript (the launcher fix — actually EXECUTED, not just inspected)", () => {
+  function fixture() {
+    const home = mkdtempSync(`${tmpdir()}/agentloop-launcher-`);
+    const configDir = `${home}/.agentloop-fleet`;
+    mkdirSync(configDir, { recursive: true });
+    return { home, configDir };
+  }
+
+  function installStubVersion(home: string, engine: "codex" | "claude", version: string): string {
+    const dir = `${home}/.${engine}/plugins/cache/arcblock-agent-skills/agentloop/${version}`;
+    mkdirSync(`${dir}/.claude-plugin`, { recursive: true });
+    writeFileSync(
+      `${dir}/.claude-plugin/plugin.json`,
+      JSON.stringify({ name: "agentloop", version }),
+    );
+    mkdirSync(`${dir}/fleet`, { recursive: true });
+    // A minimal driver.ts stub: prints which version invoked it + its argv, so the test
+    // can prove the launcher resolved and exec'd the RIGHT one, not just "some" one.
+    writeFileSync(
+      `${dir}/fleet/driver.ts`,
+      `console.log("STUB_DRIVER_RAN version=${version} argv=" + process.argv.slice(2).join(","));\n`,
+    );
+    return dir;
+  }
+
+  function runLauncher(home: string, configDir: string, args: string[] = ["--hello"]) {
+    const p = paths({ configDir });
+    writeFileSync(p.launcher, renderRunnerScript("bun", p.currentLink), { mode: 0o755 });
+    const proc = Bun.spawnSync(["bun", p.launcher, ...args], {
+      env: { ...process.env, HOME: home },
+    });
+    return {
+      code: proc.exitCode,
+      out: new TextDecoder().decode(proc.stdout),
+      err: new TextDecoder().decode(proc.stderr),
+      currentLink: p.currentLink,
+    };
+  }
+
+  test("resolves the ONLY installed version and execs its driver.ts with argv passed through", () => {
+    const { home, configDir } = fixture();
+    try {
+      const dir = installStubVersion(home, "codex", "0.20.0");
+      const r = runLauncher(home, configDir, ["--skill", "issue-sweep", "--run"]);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("STUB_DRIVER_RAN version=0.20.0");
+      expect(r.out).toContain("argv=--skill,issue-sweep,--run");
+      // and it left a symlink pointing at the resolved version, for agentloopRoot to use
+      expect(lstatSync(r.currentLink).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(r.currentLink)).toBe(dir);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("picks the HIGHEST semver among several coexisting installs", () => {
+    const { home, configDir } = fixture();
+    try {
+      installStubVersion(home, "codex", "0.19.5");
+      const newest = installStubVersion(home, "codex", "0.20.0");
+      installStubVersion(home, "codex", "0.9.0"); // must not win despite sorting last lexically
+      const r = runLauncher(home, configDir);
+      expect(r.out).toContain("STUB_DRIVER_RAN version=0.20.0");
+      expect(readlinkSync(r.currentLink)).toBe(newest);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // THE regression test for the actual incident: a plugin upgrade deletes the old version
+  // dir between two ticks. Before this fix, the crontab's hardcoded path would fail on
+  // EVERY subsequent tick with a bare "Module not found" — silently, forever. After this
+  // fix, the very next tick must pick up the new version with zero human action.
+  test("SELF-HEALS across a version upgrade: old dir deleted, new one appears — next run just picks it up", () => {
+    const { home, configDir } = fixture();
+    try {
+      installStubVersion(home, "codex", "0.22.1");
+      const first = runLauncher(home, configDir);
+      expect(first.out).toContain("STUB_DRIVER_RAN version=0.22.1");
+
+      // Simulate the exact incident: the upgrade DELETES the old version wholesale.
+      rmSync(`${home}/.codex/plugins/cache/arcblock-agent-skills/agentloop/0.22.1`, {
+        recursive: true,
+        force: true,
+      });
+      const newDir = installStubVersion(home, "codex", "0.22.2");
+
+      const second = runLauncher(home, configDir);
+      expect(second.code).toBe(0);
+      expect(second.out).toContain("STUB_DRIVER_RAN version=0.22.2");
+      expect(second.err).not.toContain("Module not found"); // the literal old failure mode
+      expect(readlinkSync(second.currentLink)).toBe(newDir); // symlink followed the upgrade
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("errors loudly and exits non-zero when NOTHING is installed anywhere (not a bare module-not-found)", () => {
+    const { home, configDir } = fixture();
+    try {
+      const r = runLauncher(home, configDir);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("no agentloop plugin installation found");
+      expect(r.err).toContain("codex plugin add agentloop@arcblock-agent-skills");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  function installMarketplace(home: string): string {
+    const marketplace = `${home}/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop`;
+    mkdirSync(`${marketplace}/.claude-plugin`, { recursive: true });
+    writeFileSync(
+      `${marketplace}/.claude-plugin/plugin.json`,
+      JSON.stringify({ name: "agentloop", version: "0.0.0-marketplace" }),
+    );
+    mkdirSync(`${marketplace}/fleet`, { recursive: true });
+    writeFileSync(
+      `${marketplace}/fleet/driver.ts`,
+      'console.log("STUB_DRIVER_RAN marketplace");\n',
+    );
+    return marketplace;
+  }
+
+  // codex has NO per-invocation --plugin-dir — it loads the skill it invokes BY NAME from
+  // wherever it is globally installed, independent of --add-dir. So whenever codex has ANY
+  // install, it MUST win, even over an equally-current marketplace clone — otherwise the
+  // prompt (read from our resolved root) and the skill codex actually loads (read from
+  // codex's own registry) could land on two different versions. This is not a preference,
+  // it is the exact invariant detectCodexPluginRoot's doc comment already documents; the
+  // launcher must preserve it, not just "pick something that works".
+  test("codex cache wins over the marketplace clone whenever codex has ANY install", () => {
+    const { home, configDir } = fixture();
+    try {
+      const codexDir = installStubVersion(home, "codex", "0.20.0");
+      installMarketplace(home); // present, but must lose to the codex install
+      const r = runLauncher(home, configDir);
+      expect(r.out).toContain("STUB_DRIVER_RAN version=0.20.0");
+      expect(readlinkSync(r.currentLink)).toBe(codexDir);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to the marketplace clone only when codex has NO install at all", () => {
+    const { home, configDir } = fixture();
+    try {
+      const marketplace = installMarketplace(home);
+      const r = runLauncher(home, configDir);
+      expect(r.out).toContain("STUB_DRIVER_RAN marketplace");
+      expect(readlinkSync(r.currentLink)).toBe(marketplace);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a stale symlink from a PRIOR run does not confuse resolution or block relinking", () => {
+    const { home, configDir } = fixture();
+    try {
+      const p = paths({ configDir });
+      // Pre-seed a symlink pointing at garbage, as if left over from a much older run.
+      symlinkSync("/nonexistent/ghost-version", p.currentLink);
+      installStubVersion(home, "codex", "0.21.0");
+      const r = runLauncher(home, configDir);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("STUB_DRIVER_RAN version=0.21.0");
+      expect(readlinkSync(r.currentLink)).not.toBe("/nonexistent/ghost-version");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -332,11 +555,14 @@ describe("coveredSkills", () => {
 });
 
 describe("renderCronRow", () => {
-  test("runs the driver directly, sources envFile, NO cron-level lock (driver self-locks per repo)", () => {
+  test("invokes the STABLE launcher (never a versioned plugin path), sources envFile, NO cron-level lock", () => {
     const row = renderCronRow(baseInput({ envFile: "~/.arc-routines/env" }), "issue-sweep", 9);
     expect(row).not.toContain("shlock");
     expect(row).not.toContain("flock");
-    expect(row).toContain("/fleet/driver.ts --config");
+    expect(row).toContain("/agentloop-run.ts --config");
+    // NEVER the raw agentloopRoot baked in directly — that is exactly the staleness bug
+    // this launcher indirection exists to prevent (a plugin upgrade deletes that path).
+    expect(row).not.toContain("/fleet/driver.ts");
     expect(row).toContain("--skill issue-sweep --run");
     expect(row).toContain(". /"); // envFile sourced (expandHome'd absolute path)
     expect(row).toContain("cron-issue-sweep.log");
@@ -365,7 +591,7 @@ describe("renderCronBlock", () => {
     expect(block).toContain(`\n${(9 + off) % 60} * * * *`);
     expect(block).toContain(`\n${(39 + off) % 60} * * * *`);
     // one row per distinct skill
-    expect((block.match(/driver\.ts --config/g) ?? []).length).toBe(2);
+    expect((block.match(/agentloop-run\.ts --config/g) ?? []).length).toBe(2);
   });
 });
 
@@ -379,7 +605,7 @@ describe("stripCronBlock / reconcileCrontab", () => {
     expect(had).toBe(true);
     expect(without).toContain("/usr/bin/backup");
     expect(without).not.toContain(CRON_BEGIN);
-    expect(without).not.toContain("driver.ts");
+    expect(without).not.toContain("agentloop-run.ts");
   });
 
   test("no block present → had=false, content unchanged in spirit", () => {
