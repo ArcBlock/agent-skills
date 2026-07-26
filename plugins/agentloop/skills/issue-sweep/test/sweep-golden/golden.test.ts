@@ -83,6 +83,12 @@ describe("unattended orchestration contract", () => {
     expect(skill).toContain("主控分配,worker 即时 claim");
     expect(skill).toContain("不预加");
     expect(skill).toContain("会改 repo 的 worker 必须使用独立 worktree");
+    // #(disk-fill incident) — the worktree instruction must give a literal, always-set
+    // path variable, not a description a worker has to improvise. A bare "build a temp
+    // worktree" defaulted to hardcoded `/tmp/...`, silently bypassing checkoutBase/TMPDIR
+    // and piling up ~36G of orphans on one machine in a day.
+    expect(skill).toContain("AGENTLOOP_ISSUE_WORKTREE_BASE");
+    expect(skill).not.toMatch(/worktree add[^\n]*\/tmp\//);
     expect(skill).toContain("AGENTLOOP_SETUP_COMMAND");
     expect(skill).toContain("共享 KB 由主控单写,worker 仍贡献 KB");
     expect(skill).toContain("绝不代删");

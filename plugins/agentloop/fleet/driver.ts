@@ -21,6 +21,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -631,6 +632,106 @@ export function reapOrphans(
   return { killed, spared };
 }
 
+export interface StaleWorktreeDeps {
+  sh: Sh;
+  exists: (p: string) => boolean;
+  listDir: (p: string) => string[];
+  mtimeMs: (p: string) => number;
+  /**
+   * True only for an actual LINKED git worktree — its `.git` is a FILE (containing
+   * `gitdir: ...`), unlike a full clone's `.git` DIRECTORY. `git worktree add` is the only
+   * shape this skill ever creates under this base, so this is the one positive signal that a
+   * path is ours to remove at all.
+   *
+   * Load-bearing, not a nicety: `AGENTLOOP_ISSUE_WORKTREE_BASE` defaults to whatever `TMPDIR`
+   * the deployment already configured — NOT a directory exclusive to agentloop. MEASURED on a
+   * live deployment: that same TMPDIR already held ~2700 unrelated entries from other tools
+   * (SwiftPM's own `*.lock` files, editor/electron scratch dirs) — none of them directories
+   * with a live process cwd under them, so an age+no-process check ALONE would have treated
+   * every one of them as fair game and deleted them on the very first sweep.
+   */
+  isWorktree: (p: string) => boolean;
+  now: number;
+}
+
+const realStaleDeps = (now: number = Date.now()): StaleWorktreeDeps => ({
+  sh: realSh,
+  exists: existsSync,
+  listDir: (p) => readdirSync(p),
+  mtimeMs: (p) => statSync(p).mtimeMs,
+  isWorktree: (p) => {
+    try {
+      return statSync(`${p}/.git`).isFile();
+    } catch {
+      return false;
+    }
+  },
+  now,
+});
+
+/**
+ * Directory-level counterpart to reapOrphans (which reaps stray PROCESSES): find per-issue
+ * scratch worktrees directly under `base` (see ISSUE_WORKTREE_BASE_ENV) that are safe to
+ * remove.
+ *
+ * Safety, in order: (1) `isWorktree` — skip anything that isn't actually a linked git worktree,
+ * full stop, before any other check even runs (see its doc comment for why this is not
+ * optional); (2) no process anywhere under it (pidsWithCwdUnder — the exact signal reapOrphans
+ * trusts); (3) older than `minAgeMs` (a grace window against the boundary case where a worker
+ * just created the dir and has not cd'ed into it yet — a live-process check sampled in that
+ * instant would see nothing and misfire). Read-only: does not remove anything itself (see
+ * reapStaleWorktrees).
+ */
+export function findStaleWorktrees(
+  base: string,
+  deps: StaleWorktreeDeps = realStaleDeps(),
+  minAgeMs = 15 * 60_000,
+): string[] {
+  if (!deps.exists(base)) return [];
+  const stale: string[] = [];
+  for (const leaf of deps.listDir(base)) {
+    if (leaf.startsWith(".")) continue; // reserve dotfiles for our own future bookkeeping
+    const path = `${base.replace(/\/+$/, "")}/${leaf}`;
+    if (!deps.isWorktree(path)) continue; // not ours — never a removal candidate, regardless of age
+    let age: number;
+    try {
+      age = deps.now - deps.mtimeMs(path);
+    } catch {
+      continue; // vanished between listing and stat — nothing to do
+    }
+    if (age < minAgeMs) continue;
+    if (pidsWithCwdUnder(path, deps.sh).length) continue; // still in use — never touch
+    stale.push(path);
+  }
+  return stale;
+}
+
+/**
+ * Remove the stale worktrees findStaleWorktrees identified. Tries `git worktree remove --force`
+ * first — a linked worktree can run its own worktree commands (it shares the base checkout's
+ * repository via its `.git` file), so this also clears the base's `.git/worktrees/<leaf>` admin
+ * entry, not just the directory. Falls back to a plain `rm -rf` for anything that was not
+ * actually a git worktree (or whose base checkout is already gone). Best-effort throughout: a
+ * failure here must never fail — or even slow down — the round it runs ahead of.
+ */
+export function reapStaleWorktrees(
+  base: string,
+  deps: StaleWorktreeDeps = realStaleDeps(),
+  minAgeMs = 15 * 60_000,
+): string[] {
+  const removed: string[] = [];
+  for (const path of findStaleWorktrees(base, deps, minAgeMs)) {
+    const q = `'${path.replace(/'/g, `'\\''`)}'`;
+    const wt = deps.sh(`git -C ${q} worktree remove --force ${q}`);
+    if (wt.code === 0 || !deps.exists(path)) {
+      removed.push(path);
+      continue;
+    }
+    if (deps.sh(`rm -rf ${q}`).code === 0) removed.push(path);
+  }
+  return removed;
+}
+
 /**
  * Kill the round's process group — every descendant, at any depth, in one signal.
  *
@@ -955,6 +1056,36 @@ export function loadEnvFile(path: string, sh: Sh = realSh): Record<string, strin
 export const referenceEnvKey = (slug: string): string =>
   `AGENTLOOP_REF_${slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
 
+/**
+ * Env var naming where a skill should create its OWN per-unit-of-work scratch worktrees
+ * (issue-sweep: one per concurrently-processed issue — see SKILL.md "会改 repo 的 worker 必须
+ * 使用独立 worktree"). That instruction used to say only THAT such a worktree must exist, never
+ * WHERE — so the agent, improvising a `mktemp`/`git worktree add` path on its own, defaulted to
+ * the Unix convention `/tmp/...`. That silently bypassed a deployment's `checkoutBase`/`TMPDIR`
+ * (both of which point at an external disk here): MEASURED on a live machine, ~36G of orphaned
+ * worktrees piled up under `/private/tmp` in one day of unattended hourly sweeps, while the
+ * external disk sat mostly empty. Giving the skill a literal, always-set variable to reference
+ * (instead of a path it has to guess) is what actually fixes it — see issueWorktreeBase.
+ */
+export const ISSUE_WORKTREE_BASE_ENV = "AGENTLOOP_ISSUE_WORKTREE_BASE";
+
+/**
+ * Where per-issue scratch worktrees should live: whatever `$TMPDIR` resolves to for this run
+ * (already flows through cfg.env/envFile via runEnv's merge — proven live: SwiftPM's own lock
+ * files land there today) when the deployment set one, else a dedicated dir beside the
+ * checkouts (same disk as `checkoutBase`, so it moves with it even for a deployment that never
+ * bothered to set TMPDIR). Never bare `/tmp` — that is exactly the default this function
+ * replaces. `mergedEnv` is the in-progress runEnv merge, so this must run AFTER the
+ * process/envFile/cfg.env/skillEnv layers (whichever of those sets TMPDIR wins, same as for any
+ * other var), and BEFORE this key is read back out.
+ */
+export function issueWorktreeBase(
+  cfg: Pick<DeploymentConfig, "checkoutBase">,
+  mergedEnv: Record<string, string>,
+): string {
+  return mergedEnv.TMPDIR || `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.tmp-worktrees`;
+}
+
 /** Env for one run: process env < envFile < deployment env < per-skill env. */
 export function runEnv(
   run: Pick<
@@ -980,6 +1111,7 @@ export function runEnv(
   if (run.concurrency !== undefined) merged.AGENTLOOP_SKILL_CONCURRENCY = String(run.concurrency);
   if (run.setupCommand) merged.AGENTLOOP_SETUP_COMMAND = run.setupCommand;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
+  merged[ISSUE_WORKTREE_BASE_ENV] = issueWorktreeBase(cfg, merged);
   // Beside the checkout, never inside it: an in-tree file would dirty `git status` and
   // disarm the repo's own push/verify gates — the same reason the fleet marker lives out.
   merged[RUN_REPORT_ENV] = `${run.checkoutPath.replace(/\/+$/, "")}.run-report.json`;
@@ -1312,6 +1444,20 @@ if (import.meta.main) {
   const lockDir = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.locks`;
   ensureLockDir(lockDir);
 
+  // Directory-level hygiene, mirroring reapOrphans: a worker that crashed instead of running
+  // its own Step 5 cleanup leaves a scratch worktree behind forever otherwise. Best-effort —
+  // must never fail or block the round it runs ahead of.
+  try {
+    const wtBase = issueWorktreeBase(cfg, { TMPDIR: cfg.env?.TMPDIR ?? "" });
+    const removed = reapStaleWorktrees(wtBase);
+    if (removed.length)
+      console.log(
+        `# reaped ${removed.length} stale worktree(s) under ${wtBase}: ${removed.join(", ")}`,
+      );
+  } catch (e) {
+    console.log(`# worktree hygiene sweep failed (non-fatal): ${(e as Error).message}`);
+  }
+
   // Record one finished run. The summary append + cadence stamp touch SHARED files, so with
   // overlapping invocations they run under a short cross-process lock (advisory: a contended
   // stamp that times out just reruns that repo next fire — never a deadlock).
@@ -1351,8 +1497,15 @@ if (import.meta.main) {
   };
   const runOne = async (p: PlannedRun): Promise<RunOutcome> => {
     const lockPath = runLockPath(lockDir, p.slug, p.skillLocal);
-    if (!acquire(lockPath, pid, Date.now(), realLockIO)) return { p, locked: true };
     try {
+      // acquire() can THROW on an unexpected filesystem error (EPERM from a transient
+      // external-disk hiccup — measured live) rather than just returning false for ordinary
+      // contention (EEXIST, handled inside acquire()). Catching it HERE, inside runOne's own
+      // try, is what stops one repo's disk hiccup from crashing the whole Promise.all in
+      // parallel mode and taking down every OTHER repo running concurrently in this same
+      // invocation — measured: it did, abandoning an unrelated round mid-work with no chance
+      // to finish, report, or clean up after itself.
+      if (!acquire(lockPath, pid, Date.now(), realLockIO)) return { p, locked: true };
       // Only now — holding the lock is the precondition that makes this safe (see reapOrphans).
       const orphans = reapOrphans(p.checkoutPath, realSh);
       if (orphans.killed.length)

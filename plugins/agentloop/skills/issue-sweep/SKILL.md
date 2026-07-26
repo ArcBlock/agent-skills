@@ -307,9 +307,19 @@ human's latest comment — this is `issue-review`'s resolve phase:
    issue 的 comment/label/PR/branch;不同 issue 之间不得共享可变任务状态。
 3. **会改 repo 的 worker 必须使用独立 worktree。** comment-only / research / idea /
    triage 等只读代码的 worker 可共用主 checkout;任何会 edit/format/test/commit/push/
-   open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree,
-   分支仍严格使用 Step 4 的 `claude/issue-<N>`（或 phase 变体）。禁止多个写 worker
-   在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
+   open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree。
+   **worktree 必须建在 `$AGENTLOOP_ISSUE_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**
+   ——fleet driver 已把这个变量注入 worker 环境(值等于部署方配置的 `TMPDIR`,未配置时
+   落在 `checkoutBase` 旁边),字面照抄即可:
+   ```bash
+   git -C "$(pwd)" worktree add --detach \
+     "$AGENTLOOP_ISSUE_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" \
+     origin/<default_branch>
+   ```
+   硬编码 `/tmp/...` 会绕开部署方的 `checkoutBase`/`TMPDIR` 配置,在系统盘上越攒越多
+   ——实测:未做限制时一天在 `/private/tmp` 下堆了约 36G 孤儿 worktree,而配置的外置盘
+   却几乎是空的。分支仍严格使用 Step 4 的 `claude/issue-<N>`（或 phase 变体）。禁止
+   多个写 worker 在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
    `AGENTLOOP_SETUP_COMMAND`（fleet driver 从当前 repo 的 `setupCommand` 注入）并在
    该 worktree 执行;未配置时按 repo profile/toolchain 完成等价 bootstrap。setup
    未成功不得编辑、测试或声称可验证。

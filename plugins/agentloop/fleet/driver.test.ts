@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import type { Sh } from "./checkout.ts";
 import {
   buildArgv,
   cadenceDue,
@@ -14,6 +15,9 @@ import {
   enginePermissionFlags,
   executeRun,
   expandHome,
+  findStaleWorktrees,
+  ISSUE_WORKTREE_BASE_ENV,
+  issueWorktreeBase,
   loadEnvFile,
   logPaths,
   newRunId,
@@ -26,6 +30,7 @@ import {
   readRunProduct,
   reapGroup,
   reapOrphans,
+  reapStaleWorktrees,
   referenceEnvKey,
   renderPrompt,
   resolveCovered,
@@ -285,6 +290,36 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     const mk = (s: string) => ({ skillLocal: s, checkoutPath: "/co/x", root: "/p", runner: "r" });
     expect(runEnv(mk("issue-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4910");
     expect(runEnv(mk("pr-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4920");
+  });
+
+  // Disk-fill incident: a bare "build a temp worktree" instruction let the skill improvise a
+  // hardcoded /tmp path, silently bypassing checkoutBase/TMPDIR. This is the fix's actual
+  // mechanism — the driver computes + injects a literal, always-set variable instead.
+  describe("issueWorktreeBase / ISSUE_WORKTREE_BASE_ENV (the disk-fill fix)", () => {
+    it("uses TMPDIR when the deployment set one", () => {
+      expect(issueWorktreeBase({ checkoutBase: "/co" }, { TMPDIR: "/Volumes/Fleet/tmp" })).toBe(
+        "/Volumes/Fleet/tmp",
+      );
+    });
+
+    it("falls back to a dedicated dir beside checkoutBase — never bare /tmp", () => {
+      expect(issueWorktreeBase({ checkoutBase: "/co" }, {})).toBe("/co/.tmp-worktrees");
+    });
+
+    it("runEnv always injects it, derived from whatever TMPDIR the merge resolved to", () => {
+      const cfg = base({ env: { TMPDIR: "/Volumes/Fleet/tmp" } });
+      const run = { skillLocal: "issue-sweep", checkoutPath: "/co/x", root: "/p", runner: "r" };
+      expect(runEnv(run, cfg, {})[ISSUE_WORKTREE_BASE_ENV]).toBe("/Volumes/Fleet/tmp");
+    });
+
+    it("runEnv falls back beside checkoutBase when no TMPDIR is configured anywhere", () => {
+      const cfg = base({ checkoutBase: "/co" });
+      const run = { skillLocal: "issue-sweep", checkoutPath: "/co/x", root: "/p", runner: "r" };
+      // process.env may carry a real TMPDIR in CI/dev — isolate this run from it explicitly.
+      expect(runEnv(run, cfg, { PATH: "/bin" })[ISSUE_WORKTREE_BASE_ENV]).toBe(
+        "/co/.tmp-worktrees",
+      );
+    });
   });
 
   it("NEVER prints secret values in the plan — only that the file is sourced", () => {
@@ -716,6 +751,135 @@ describe("reapOrphans (cleaning up what an earlier round left behind)", () => {
       999,
     );
     expect(r).toEqual({ killed: [], spared: [] });
+  });
+});
+
+// findStaleWorktrees/reapStaleWorktrees are the directory-level counterpart to reapOrphans —
+// same safety philosophy (never touch anything with a live process under it), applied to the
+// scratch worktrees a crashed worker leaves behind instead of the processes it leaves behind.
+describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety net)", () => {
+  const NOW = 1_000_000_000; // arbitrary fixed instant — tests must not depend on real time
+  const MIN_AGE = 15 * 60_000;
+
+  const depsFor = (opts: {
+    entries?: string[];
+    mtimes?: Record<string, number>;
+    lsofCwds?: Record<number, string>;
+    exists?: (p: string) => boolean;
+    isWorktree?: (p: string) => boolean;
+  }) => ({
+    sh: ((cmd: string) => {
+      if (cmd.includes("lsof")) {
+        const out = Object.entries(opts.lsofCwds ?? {})
+          .flatMap(([pid, cwd]) => [`p${pid}`, `n${cwd}`])
+          .join("\n");
+        return { code: 0, out };
+      }
+      return { code: 0, out: "" }; // default: worktree remove / rm -rf both "succeed"
+    }) as Sh,
+    exists: opts.exists ?? (() => true),
+    listDir: () => opts.entries ?? [],
+    mtimeMs: (p: string) => opts.mtimes?.[p] ?? NOW - MIN_AGE - 1,
+    isWorktree: opts.isWorktree ?? (() => true), // default: every fixture entry IS one of ours
+    now: NOW,
+  });
+
+  it("is empty when the base dir does not exist yet (nothing has run there)", () => {
+    expect(findStaleWorktrees("/tmp/base", depsFor({ exists: () => false }))).toEqual([]);
+  });
+
+  it("skips an entry younger than minAgeMs — the boundary-race grace window", () => {
+    const deps = depsFor({
+      entries: ["arc-issue-1.abc"],
+      mtimes: { "/tmp/base/arc-issue-1.abc": NOW - 1000 }, // just created
+    });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+  });
+
+  it("skips an old entry that still has a live process under it — never touch a live worker", () => {
+    const deps = depsFor({
+      entries: ["arc-issue-2.def"],
+      lsofCwds: { 501: "/tmp/base/arc-issue-2.def" },
+    });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+  });
+
+  it("reports an old entry with no live process as stale", () => {
+    const deps = depsFor({ entries: ["arc-issue-3.ghi"] });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-3.ghi"]);
+  });
+
+  // THE incident this whole isWorktree gate exists to prevent: AGENTLOOP_ISSUE_WORKTREE_BASE
+  // defaults to the deployment's TMPDIR, which is NOT exclusive to agentloop. MEASURED live:
+  // that directory already held ~2700 unrelated old entries (SwiftPM's own *.lock files) with
+  // no process anywhere under them — old + no-live-process alone would have swept every one of
+  // them away on the very first round.
+  it("NEVER reports an old, process-free entry that is not actually a git worktree (shared TMPDIR incident)", () => {
+    const deps = depsFor({
+      entries: ["_private_tmp_arc-2089_platforms_swift_.build.lock", "arc-issue-5.mno"],
+      isWorktree: (p) => p.endsWith("arc-issue-5.mno"), // only the real worktree qualifies
+    });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-5.mno"]);
+  });
+
+  it("skips a directory whose .git is a full clone (a directory), not a linked worktree", () => {
+    const deps = depsFor({ entries: ["some-other-clone"], isWorktree: () => false });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+  });
+
+  it("never reports our own dotfiles/bookkeeping entries", () => {
+    const deps = depsFor({ entries: [".locks", ".fleet-state.json", "arc-issue-3.ghi"] });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-3.ghi"]);
+  });
+
+  it("tolerates an entry that vanished between listing and stat (a race, not a failure)", () => {
+    const deps = depsFor({ entries: ["ghost"] });
+    deps.mtimeMs = () => {
+      throw new Error("ENOENT");
+    };
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+  });
+
+  it("reapStaleWorktrees removes via `git worktree remove` when that succeeds", () => {
+    const calls: string[] = [];
+    const deps = depsFor({ entries: ["arc-issue-4.jkl"] });
+    deps.sh = ((cmd: string) => {
+      calls.push(cmd);
+      if (cmd.includes("lsof")) return { code: 0, out: "" };
+      return { code: 0, out: "" }; // worktree remove succeeds
+    }) as Sh;
+    const removed = reapStaleWorktrees("/tmp/base", deps, MIN_AGE);
+    expect(removed).toEqual(["/tmp/base/arc-issue-4.jkl"]);
+    expect(calls.some((c) => c.includes("worktree remove"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("rm -rf"))).toBe(false); // no fallback needed
+  });
+
+  it("falls back to `rm -rf` when the path was not actually a git worktree", () => {
+    const calls: string[] = [];
+    let stillThere = true;
+    const deps = depsFor({ entries: ["stray-dir"], exists: () => stillThere });
+    deps.sh = ((cmd: string) => {
+      calls.push(cmd);
+      if (cmd.includes("lsof")) return { code: 0, out: "" };
+      if (cmd.includes("worktree remove")) return { code: 1, out: "fatal: not a worktree" };
+      if (cmd.startsWith("rm -rf")) {
+        stillThere = false;
+        return { code: 0, out: "" };
+      }
+      return { code: 0, out: "" };
+    }) as Sh;
+    const removed = reapStaleWorktrees("/tmp/base", deps, MIN_AGE);
+    expect(removed).toEqual(["/tmp/base/stray-dir"]);
+    expect(calls.some((c) => c.startsWith("rm -rf"))).toBe(true);
+  });
+
+  it("does not report removal when both git worktree remove and rm -rf fail", () => {
+    const deps = depsFor({ entries: ["stuck-dir"] });
+    deps.sh = ((cmd: string) => {
+      if (cmd.includes("lsof")) return { code: 0, out: "" };
+      return { code: 1, out: "permission denied" };
+    }) as Sh;
+    expect(reapStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
   });
 });
 
