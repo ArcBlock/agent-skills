@@ -220,6 +220,40 @@ codex plugin add agentloop@arcblock-agent-skills
 
 Re-run setup after a `codex plugin add` update so `agentloopRoot` tracks the new version.
 
+## Reliability guards (why an unattended fleet doesn't quietly eat its own disk)
+
+The driver fails LOUD and early, before touching a checkout, rather than let a round make an
+already-bad situation worse — three distinct exit codes so a cron log can tell which:
+
+| Guard | Checked by | Exit | When it fires |
+|---|---|---|---|
+| **Mount guard** | `checkoutBaseStatus` | 3 | `checkoutBase` is on an unmounted external volume, or its writability probe fails |
+| **Disk-floor guard** | `diskHeadroomStatus` | 4 | Free space on `checkoutBase`'s filesystem is below `MIN_FREE_DISK_KB` (10GB) — refuses to start any new work rather than let checkout resets / `setupCommand` installs / scratch worktrees compound a critical shortage while nobody is watching. `df` failing is treated as "unknown, proceed" — a monitoring gap must not also become an availability outage |
+
+**Scratch-worktree hygiene** (every skill, not just issue-sweep — see `WORKTREE_BASE_ENV`):
+every skill that needs an isolated worktree (issue-sweep per concurrently-processed issue,
+pr-review per PR needing a branch checkout) MUST build it under
+`$AGENTLOOP_WORKTREE_BASE`, a directory exclusive to agentloop beside `checkoutBase`
+(`worktreeBase()` — never the deployment's `$TMPDIR`, which is shared with unrelated tools and
+was itself the cause of a real incident). Two independent skills hit the identical "hardcoded
+`/tmp/...`, never cleaned up" gap before this was locked down (issue-sweep: ~36G/day; pr-sweep:
+~17G across 9 abandoned worktrees) — the fix is a convention every worktree-creating skill must
+follow, not a one-off patch. Every driver invocation also runs a best-effort sweep of this same
+directory, in order:
+
+1. **`reapOrphans(wtBase)`** — kill any re-parented (`PPID==1`) zombie process anywhere under
+   it. Runs FIRST, deliberately: a directory removed while a zombie still holds a file open
+   under it does not reclaim that file's disk space until the zombie's fd closes, so cleanup
+   would silently free nothing if done in the other order.
+2. **`reapStaleWorktrees(wtBase)`** — remove anything older than 15 minutes with no live
+   process under it. Because the directory is exclusive to agentloop, this does NOT gate on
+   "is this actually a linked git worktree" — a full clone, or any other shape a worker
+   improvised, is still fair game; shape only decides *how* to remove it (`git worktree
+   remove` first when it looks like one, `rm -rf` otherwise).
+
+A worker crashing mid-round is exactly what these two exist for — but they are a safety net,
+not a substitute for a worker cleaning up its own worktree when it finishes.
+
 ## Running
 
 ```bash

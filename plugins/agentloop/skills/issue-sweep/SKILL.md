@@ -308,17 +308,22 @@ human's latest comment — this is `issue-review`'s resolve phase:
 3. **会改 repo 的 worker 必须使用独立 worktree。** comment-only / research / idea /
    triage 等只读代码的 worker 可共用主 checkout;任何会 edit/format/test/commit/push/
    open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree。
-   **worktree 必须建在 `$AGENTLOOP_ISSUE_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**
-   ——fleet driver 已把这个变量注入 worker 环境(值等于部署方配置的 `TMPDIR`,未配置时
-   落在 `checkoutBase` 旁边),字面照抄即可:
+   **worktree 必须建在 `$AGENTLOOP_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**——fleet
+   driver 已把这个变量注入 worker 环境(专属 agentloop 的固定目录,不是系统 `/tmp`、
+   也不是部署方的 `TMPDIR`),字面照抄即可:
    ```bash
    git -C "$(pwd)" worktree add --detach \
-     "$AGENTLOOP_ISSUE_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" \
+     "$AGENTLOOP_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" \
      origin/<default_branch>
+   # 本 issue 处理完(无论成功/失败/跳过)务必清理,别只指望 driver 下一轮的兜底清扫:
+   git worktree remove --force "$AGENTLOOP_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" 2>/dev/null || true
    ```
-   硬编码 `/tmp/...` 会绕开部署方的 `checkoutBase`/`TMPDIR` 配置,在系统盘上越攒越多
-   ——实测:未做限制时一天在 `/private/tmp` 下堆了约 36G 孤儿 worktree,而配置的外置盘
-   却几乎是空的。分支仍严格使用 Step 4 的 `claude/issue-<N>`（或 phase 变体）。禁止
+   硬编码 `/tmp/...` 会绕开部署方的 `checkoutBase` 配置,在系统盘上越攒越多——实测:
+   未做限制时一天在 `/private/tmp` 下堆了约 36G 孤儿 worktree,而配置的外置盘却几乎
+   是空的。**driver 每轮都会兜底清扫一次 `$AGENTLOOP_WORKTREE_BASE` 下超过 15 分钟、
+   且没有活跃进程的残留**,但那是安全网,不是借口——worker 自己清理不了的话,残留
+   至少要撑到下一轮才会被回收,别指望它替代及时清理。分支仍严格使用 Step 4 的
+   `claude/issue-<N>`（或 phase 变体）。禁止
    多个写 worker 在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
    `AGENTLOOP_SETUP_COMMAND`（fleet driver 从当前 repo 的 `setupCommand` 注入）并在
    该 worktree 执行;未配置时按 repo profile/toolchain 完成等价 bootstrap。setup

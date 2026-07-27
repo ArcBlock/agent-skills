@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import type { Sh } from "./checkout.ts";
 import {
@@ -11,13 +11,13 @@ import {
   codexPermissionFlags,
   type DeploymentConfig,
   defaultLogDir,
+  diskHeadroomStatus,
   engineModelFlags,
   enginePermissionFlags,
   executeRun,
   expandHome,
   findStaleWorktrees,
-  ISSUE_WORKTREE_BASE_ENV,
-  issueWorktreeBase,
+  freeDiskKb,
   loadEnvFile,
   logPaths,
   newRunId,
@@ -40,6 +40,8 @@ import {
   settleResidual,
   stateKey,
   summaryLine,
+  WORKTREE_BASE_ENV,
+  worktreeBase,
 } from "./driver.ts";
 
 const CATALOG: RepoEntry[] = [
@@ -292,33 +294,31 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     expect(runEnv(mk("pr-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4920");
   });
 
-  // Disk-fill incident: a bare "build a temp worktree" instruction let the skill improvise a
-  // hardcoded /tmp path, silently bypassing checkoutBase/TMPDIR. This is the fix's actual
-  // mechanism — the driver computes + injects a literal, always-set variable instead.
-  describe("issueWorktreeBase / ISSUE_WORKTREE_BASE_ENV (the disk-fill fix)", () => {
-    it("uses TMPDIR when the deployment set one", () => {
-      expect(issueWorktreeBase({ checkoutBase: "/co" }, { TMPDIR: "/Volumes/Fleet/tmp" })).toBe(
-        "/Volumes/Fleet/tmp",
+  // Disk-fill incident, TWICE: a bare "build a temp worktree" instruction let a skill improvise
+  // a hardcoded /tmp path, silently bypassing checkoutBase — first issue-sweep, then months
+  // later pr-sweep hit the identical gap independently. Round 2 of the fix: stop trusting the
+  // deployment's (shared, non-exclusive) TMPDIR at all — always a dedicated dir beside
+  // checkoutBase, so ANY skill's scratch worktrees land in one place every skill can rely on.
+  describe("worktreeBase / WORKTREE_BASE_ENV (the disk-fill fix, round 2 — exclusive, not shared)", () => {
+    it("is always a dedicated dir beside checkoutBase — never bare /tmp, never $TMPDIR", () => {
+      expect(worktreeBase({ checkoutBase: "/co" })).toBe("/co/.agentloop-worktrees");
+    });
+
+    it("ignores TMPDIR even when the deployment set one — exclusivity is the whole point", () => {
+      // A prior design consulted $TMPDIR here; that is exactly the shared-directory ambiguity
+      // this redesign removes (see the function's doc comment for the ~2700-unrelated-files
+      // incident that forced a fragile isWorktree() gate as a workaround).
+      expect(worktreeBase({ checkoutBase: "/Volumes/Fleet/agentloop-fleet/checkouts" })).toBe(
+        "/Volumes/Fleet/agentloop-fleet/checkouts/.agentloop-worktrees",
       );
     });
 
-    it("falls back to a dedicated dir beside checkoutBase — never bare /tmp", () => {
-      expect(issueWorktreeBase({ checkoutBase: "/co" }, {})).toBe("/co/.tmp-worktrees");
-    });
-
-    it("runEnv always injects it, derived from whatever TMPDIR the merge resolved to", () => {
-      const cfg = base({ env: { TMPDIR: "/Volumes/Fleet/tmp" } });
-      const run = { skillLocal: "issue-sweep", checkoutPath: "/co/x", root: "/p", runner: "r" };
-      expect(runEnv(run, cfg, {})[ISSUE_WORKTREE_BASE_ENV]).toBe("/Volumes/Fleet/tmp");
-    });
-
-    it("runEnv falls back beside checkoutBase when no TMPDIR is configured anywhere", () => {
+    it("runEnv always injects it, for every skill — not just issue-sweep", () => {
       const cfg = base({ checkoutBase: "/co" });
-      const run = { skillLocal: "issue-sweep", checkoutPath: "/co/x", root: "/p", runner: "r" };
-      // process.env may carry a real TMPDIR in CI/dev — isolate this run from it explicitly.
-      expect(runEnv(run, cfg, { PATH: "/bin" })[ISSUE_WORKTREE_BASE_ENV]).toBe(
-        "/co/.tmp-worktrees",
-      );
+      for (const skillLocal of ["issue-sweep", "pr-sweep"]) {
+        const run = { skillLocal, checkoutPath: "/co/x", root: "/p", runner: "r" };
+        expect(runEnv(run, cfg, {})[WORKTREE_BASE_ENV]).toBe("/co/.agentloop-worktrees");
+      }
     });
   });
 
@@ -625,6 +625,37 @@ describe("process hygiene (a round's descendants must not outlive it)", () => {
     expect(pidsWithCwdUnder("/co/nothing-here", () => ({ code: 0, out: "" }))).toEqual([]);
   });
 
+  // MEASURED live: macOS's /tmp is itself a symlink to /private/tmp. `lsof` reports a live
+  // process's cwd fully resolved — so a caller passing the un-resolved path (exactly what
+  // `worktreeBase()` can produce if `checkoutBase` sits under a symlinked ancestor) silently
+  // matched NOTHING, and every zombie under it went undetected by reapOrphans. Real symlink,
+  // real filesystem — the bug only reproduces through actual path resolution, not a string mock.
+  it("resolves symlinks before matching — a real process cwd rooted through a symlinked ancestor", () => {
+    // realpathSync on `real` itself too: tmpdir() on macOS is ALREADY one symlink hop
+    // (`/var/folders/...` → `/private/var/folders/...`) — canonicalizing here is what makes
+    // this test assert the true bug (caller's un-resolved path vs lsof's resolved one) instead
+    // of accidentally passing on both sides being equally un-resolved.
+    const real = realpathSync(mkdtempSync(`${tmpdir()}/pidscwd-real-`));
+    const parent = mkdtempSync(`${tmpdir()}/pidscwd-link-`);
+    const link = `${parent}/alias`;
+    symlinkSync(real, link);
+    try {
+      const lsof = [
+        "p777",
+        `n${real}/some-worktree`, // what lsof ACTUALLY reports: fully resolved
+      ].join("\n");
+      // Caller passes the SYMLINKED path — exactly the shape of the original incident.
+      expect(pidsWithCwdUnder(link, () => ({ code: 0, out: lsof }))).toEqual([777]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(real, { recursive: true, force: true });
+    }
+  });
+
+  it("a path that does not exist yet falls back to the literal string (nothing to resolve, nothing to find)", () => {
+    expect(pidsWithCwdUnder("/co/never-created", () => ({ code: 0, out: "" }))).toEqual([]);
+  });
+
   // Measured on a live fleet: single-sample counting reported an MCP server and a shell
   // script as "survivors" while they were shutting down normally, gone seconds later.
   describe("settleResidual (a process mid-exit is not a leak)", () => {
@@ -757,6 +788,8 @@ describe("reapOrphans (cleaning up what an earlier round left behind)", () => {
 // findStaleWorktrees/reapStaleWorktrees are the directory-level counterpart to reapOrphans —
 // same safety philosophy (never touch anything with a live process under it), applied to the
 // scratch worktrees a crashed worker leaves behind instead of the processes it leaves behind.
+// `base` here stands in for worktreeBase()'s real, exclusive-to-agentloop directory — so, unlike
+// round 1 of this fix, there is no more "is this really ours" question, only "is it in use".
 describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety net)", () => {
   const NOW = 1_000_000_000; // arbitrary fixed instant — tests must not depend on real time
   const MIN_AGE = 15 * 60_000;
@@ -809,22 +842,16 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-3.ghi"]);
   });
 
-  // THE incident this whole isWorktree gate exists to prevent: AGENTLOOP_ISSUE_WORKTREE_BASE
-  // defaults to the deployment's TMPDIR, which is NOT exclusive to agentloop. MEASURED live:
-  // that directory already held ~2700 unrelated old entries (SwiftPM's own *.lock files) with
-  // no process anywhere under them — old + no-live-process alone would have swept every one of
-  // them away on the very first round.
-  it("NEVER reports an old, process-free entry that is not actually a git worktree (shared TMPDIR incident)", () => {
-    const deps = depsFor({
-      entries: ["_private_tmp_arc-2089_platforms_swift_.build.lock", "arc-issue-5.mno"],
-      isWorktree: (p) => p.endsWith("arc-issue-5.mno"), // only the real worktree qualifies
-    });
-    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-5.mno"]);
-  });
-
-  it("skips a directory whose .git is a full clone (a directory), not a linked worktree", () => {
+  // Round 1 of this fix gated removal on isWorktree() — AGENTLOOP_ISSUE_WORKTREE_BASE defaulted
+  // to the deployment's TMPDIR, NOT exclusive to agentloop, and that directory MEASURED live
+  // held ~2700 unrelated old entries (SwiftPM's own *.lock files) with no process under them —
+  // old + no-live-process ALONE would have swept every one of them away on the first round.
+  // Round 2 removed the shared directory instead of gating around it (see worktreeBase's doc
+  // comment) — so a full clone, or anything else a worker improvised, under OUR OWN exclusive
+  // base is correctly fair game now; there is no more "someone else's file" case to protect.
+  it("reports a full-clone directory (not a linked worktree) as stale too — base is exclusive now", () => {
     const deps = depsFor({ entries: ["some-other-clone"], isWorktree: () => false });
-    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/some-other-clone"]);
   });
 
   it("never reports our own dotfiles/bookkeeping entries", () => {
@@ -854,7 +881,7 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     expect(calls.some((c) => c.startsWith("rm -rf"))).toBe(false); // no fallback needed
   });
 
-  it("falls back to `rm -rf` when the path was not actually a git worktree", () => {
+  it("falls back to `rm -rf` when `git worktree remove` fails at runtime (isWorktree said yes but it wasn't)", () => {
     const calls: string[] = [];
     let stillThere = true;
     const deps = depsFor({ entries: ["stray-dir"], exists: () => stillThere });
@@ -870,6 +897,21 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     }) as Sh;
     const removed = reapStaleWorktrees("/tmp/base", deps, MIN_AGE);
     expect(removed).toEqual(["/tmp/base/stray-dir"]);
+    expect(calls.some((c) => c.includes("worktree remove"))).toBe(true); // did try first
+    expect(calls.some((c) => c.startsWith("rm -rf"))).toBe(true);
+  });
+
+  it("skips the `git worktree remove` attempt entirely when isWorktree already says no", () => {
+    const calls: string[] = [];
+    const deps = depsFor({ entries: ["some-other-clone"], isWorktree: () => false });
+    deps.sh = ((cmd: string) => {
+      calls.push(cmd);
+      if (cmd.includes("lsof")) return { code: 0, out: "" };
+      return { code: 0, out: "" }; // rm -rf succeeds
+    }) as Sh;
+    const removed = reapStaleWorktrees("/tmp/base", deps, MIN_AGE);
+    expect(removed).toEqual(["/tmp/base/some-other-clone"]);
+    expect(calls.some((c) => c.includes("worktree remove"))).toBe(false); // never attempted
     expect(calls.some((c) => c.startsWith("rm -rf"))).toBe(true);
   });
 
@@ -1101,6 +1143,51 @@ describe("checkoutBaseStatus (mount guard — fail loud when an external disk is
 
   it("expands ~ before checking (a literal ~ would never be a /Volumes path)", () => {
     expect(checkoutBaseStatus("~/.agentloop-fleet", (p) => p === homedir()).ok).toBe(true);
+  });
+});
+
+describe("freeDiskKb (parses `df -k`, never throws)", () => {
+  const dfSh = (out: string): Sh => (() => ({ code: 0, out })) as Sh;
+
+  it("parses the AVAIL column (4th) from a real df -k line", () => {
+    const out =
+      "Filesystem      1024-blocks      Used Available Capacity  Mounted on\n" +
+      "/dev/disk3s5     482797652 350000000  60000000     86%    /System/Volumes/Data";
+    expect(freeDiskKb("/co", dfSh(out))).toBe(60000000);
+  });
+
+  it("returns null when df itself fails (never throws)", () => {
+    expect(freeDiskKb("/co", (() => ({ code: 1, out: "" })) as Sh)).toBeNull();
+  });
+
+  it("returns null when df's output does not parse (defensive, not just the happy path)", () => {
+    expect(freeDiskKb("/co", dfSh("not df output at all"))).toBeNull();
+  });
+});
+
+describe("diskHeadroomStatus (disk-floor guard — refuse new work before it compounds unattended)", () => {
+  const dfSh = (availKb: number): Sh =>
+    (() => ({
+      code: 0,
+      out: `Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 1 1 ${availKb} 1% /`,
+    })) as Sh;
+
+  it("ok when free space is comfortably above the floor", () => {
+    expect(diskHeadroomStatus("/co", dfSh(50 * 1024 * 1024), 10 * 1024 * 1024).ok).toBe(true);
+  });
+
+  it("not ok, with a human-readable reason, when free space is below the floor", () => {
+    const r = diskHeadroomStatus("/co", dfSh(5 * 1024 * 1024), 10 * 1024 * 1024);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("/co");
+    expect(r.reason).toContain("5.0G");
+    expect(r.reason).toContain("10G");
+  });
+
+  // A monitoring gap (df failed) must not ALSO become an availability outage — that failure
+  // mode belongs to the separate disk-space-monitor cron job, not this best-effort guard.
+  it("treats unknown (df failed) as ok — a missing signal must never itself block the fleet", () => {
+    expect(diskHeadroomStatus("/co", (() => ({ code: 1, out: "" })) as Sh).ok).toBe(true);
   });
 });
 

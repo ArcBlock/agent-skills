@@ -159,6 +159,22 @@ gh pr diff <n>
 ```
 本地 checkout 须在**最新 `<default_branch>`**(pr-sweep 已 sync;单跑先 `git fetch origin <default_branch>`)。读 diff 触碰的文件在当前树里的真实样子——**不要只在 diff 内自洽地判断**,要看它落到现实代码里对不对。
 
+> **需要 checkout 出 PR 分支本身来深查(跑某个包的测试、探索 diff 之外的关联文件)时,
+> 绝不能直接切分支/改动上面这个共享主 checkout**——它固定在 `<default_branch>`,
+> 而且 pr-sweep 批量跑多个 PR 时会被别的 PR review 复用。**必须建独立 worktree,
+> 且必须建在 `$AGENTLOOP_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**(fleet driver
+> 已把这个变量注入 worker 环境,专属 agentloop 的固定目录):
+> ```bash
+> git worktree add --detach "$AGENTLOOP_WORKTREE_BASE/pr-<n>.$$" "origin/pr/<n>/head" 2>/dev/null \
+>   || git worktree add --detach "$AGENTLOOP_WORKTREE_BASE/pr-<n>.$$" "$(gh pr view <n> --json headRefName -q .headRefName)"
+> # 本 PR review 结束时(无论 verdict 是什么)务必清理:
+> git worktree remove --force "$AGENTLOOP_WORKTREE_BASE/pr-<n>.$$" 2>/dev/null || true
+> ```
+> 硬编码 `/tmp/...` 会绕开部署方的 `checkoutBase` 配置、在系统盘上越攒越多且用完不清。
+> driver 每轮都会兜底清扫 `$AGENTLOOP_WORKTREE_BASE` 下超过 15 分钟、且没有活跃进程的残留,但那是安全网,
+> 不是替代——自己建的自己清。**多数 PR 靠 `gh pr diff` + 读当前 default_branch 上的
+> 代码现状就够核验,只有真需要跑 PR 分支自己的代码(测试/构建)时才值得建这个 worktree。**
+
 ### Step 2 — ★ 逐条核验声明 vs 已落地代码/测试(最关键)
 把"读起来对"和"其实是对的"分开。按 PR 类型定核验深度:
 

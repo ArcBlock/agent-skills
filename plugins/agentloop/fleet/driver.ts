@@ -23,6 +23,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -524,9 +525,22 @@ export async function renderPrompt(
 // `outcome=ok, exitCode=0`. No crash, no signal, nothing to notice.
 
 /** PIDs whose cwd is inside `path`. One `lsof` over the process table — NOT `lsof +D`,
- *  which walks the directory tree and is unusable on a multi-GB checkout. */
+ *  which walks the directory tree and is unusable on a multi-GB checkout.
+ *
+ *  `lsof` reports a process's cwd fully RESOLVED (symlinks followed) — measured live: a path
+ *  under macOS's `/tmp` (itself a symlink to `/private/tmp`) came back from `lsof` as
+ *  `/private/tmp/...`, so a naive string-prefix match against the CALLER's un-resolved `path`
+ *  never matched, and every zombie under it went undetected. `realpathSync` resolves our side
+ *  to the same form; a path that does not exist yet (nothing to find anyway) falls back to the
+ *  literal string rather than throwing. */
 export function pidsWithCwdUnder(path: string, sh: Sh = realSh): number[] {
-  const prefix = path.replace(/\/+$/, "");
+  let resolved = path;
+  try {
+    resolved = realpathSync(path);
+  } catch {
+    // does not exist (yet) — no cwd could possibly be under it; fall through with the literal.
+  }
+  const prefix = resolved.replace(/\/+$/, "");
   const r = sh(`lsof -d cwd -Fpn 2>/dev/null || true`);
   const out: number[] = [];
   let pid = 0;
@@ -638,17 +652,12 @@ export interface StaleWorktreeDeps {
   listDir: (p: string) => string[];
   mtimeMs: (p: string) => number;
   /**
-   * True only for an actual LINKED git worktree — its `.git` is a FILE (containing
-   * `gitdir: ...`), unlike a full clone's `.git` DIRECTORY. `git worktree add` is the only
-   * shape this skill ever creates under this base, so this is the one positive signal that a
-   * path is ours to remove at all.
-   *
-   * Load-bearing, not a nicety: `AGENTLOOP_ISSUE_WORKTREE_BASE` defaults to whatever `TMPDIR`
-   * the deployment already configured — NOT a directory exclusive to agentloop. MEASURED on a
-   * live deployment: that same TMPDIR already held ~2700 unrelated entries from other tools
-   * (SwiftPM's own `*.lock` files, editor/electron scratch dirs) — none of them directories
-   * with a live process cwd under them, so an age+no-process check ALONE would have treated
-   * every one of them as fair game and deleted them on the very first sweep.
+   * True for an actual LINKED git worktree — its `.git` is a FILE (containing `gitdir: ...`),
+   * unlike a full clone's `.git` DIRECTORY. Informational only now, NOT a removal gate (see
+   * findStaleWorktrees) — `base` is `worktreeBase()`, exclusive to agentloop, so anything found
+   * there is ours regardless of shape. Still used to choose HOW to remove: a linked worktree
+   * gets `git worktree remove` (also clears the base checkout's `.git/worktrees/<leaf>` admin
+   * entry); anything else falls straight to `rm -rf` — see reapStaleWorktrees.
    */
   isWorktree: (p: string) => boolean;
   now: number;
@@ -670,17 +679,18 @@ const realStaleDeps = (now: number = Date.now()): StaleWorktreeDeps => ({
 });
 
 /**
- * Directory-level counterpart to reapOrphans (which reaps stray PROCESSES): find per-issue
- * scratch worktrees directly under `base` (see ISSUE_WORKTREE_BASE_ENV) that are safe to
- * remove.
+ * Directory-level counterpart to reapOrphans (which reaps stray PROCESSES): find scratch
+ * worktrees directly under `base` (see WORKTREE_BASE_ENV) that are safe to remove.
  *
- * Safety, in order: (1) `isWorktree` — skip anything that isn't actually a linked git worktree,
- * full stop, before any other check even runs (see its doc comment for why this is not
- * optional); (2) no process anywhere under it (pidsWithCwdUnder — the exact signal reapOrphans
- * trusts); (3) older than `minAgeMs` (a grace window against the boundary case where a worker
- * just created the dir and has not cd'ed into it yet — a live-process check sampled in that
- * instant would see nothing and misfire). Read-only: does not remove anything itself (see
- * reapStaleWorktrees).
+ * `base` is exclusive to agentloop (see worktreeBase's doc comment for why that matters) — so
+ * the only two questions worth asking are (1) no process anywhere under it (pidsWithCwdUnder —
+ * the exact signal reapOrphans trusts) and (2) older than `minAgeMs` (a grace window against
+ * the boundary case where a worker just created the dir and has not cd'ed into it yet — a
+ * live-process check sampled in that instant would see nothing and misfire). Does NOT gate on
+ * "is this actually a linked git worktree": a worker that improvised something else (a full
+ * clone, a stray file) under OUR OWN exclusive directory is still ours to clean up — shape is
+ * only consulted later, for HOW to remove it (see reapStaleWorktrees). Read-only: does not
+ * remove anything itself.
  */
 export function findStaleWorktrees(
   base: string,
@@ -692,7 +702,6 @@ export function findStaleWorktrees(
   for (const leaf of deps.listDir(base)) {
     if (leaf.startsWith(".")) continue; // reserve dotfiles for our own future bookkeeping
     const path = `${base.replace(/\/+$/, "")}/${leaf}`;
-    if (!deps.isWorktree(path)) continue; // not ours — never a removal candidate, regardless of age
     let age: number;
     try {
       age = deps.now - deps.mtimeMs(path);
@@ -707,12 +716,15 @@ export function findStaleWorktrees(
 }
 
 /**
- * Remove the stale worktrees findStaleWorktrees identified. Tries `git worktree remove --force`
- * first — a linked worktree can run its own worktree commands (it shares the base checkout's
- * repository via its `.git` file), so this also clears the base's `.git/worktrees/<leaf>` admin
- * entry, not just the directory. Falls back to a plain `rm -rf` for anything that was not
- * actually a git worktree (or whose base checkout is already gone). Best-effort throughout: a
- * failure here must never fail — or even slow down — the round it runs ahead of.
+ * Remove the stale worktrees findStaleWorktrees identified. Uses `deps.isWorktree` to pick HOW,
+ * not WHETHER (findStaleWorktrees already decided that — `base` is exclusive to agentloop, so
+ * every candidate here is fair game regardless of shape): a linked worktree gets `git worktree
+ * remove --force` (it shares the base checkout's repository via its `.git` file, so this also
+ * clears the base's `.git/worktrees/<leaf>` admin entry, not just the directory); anything else
+ * — a full clone a worker made instead, or a stray leftover file — goes straight to `rm -rf`,
+ * which also catches a linked-worktree removal that failed (e.g. its base checkout is already
+ * gone). Best-effort throughout: a failure here must never fail — or even slow down — the
+ * round it runs ahead of.
  */
 export function reapStaleWorktrees(
   base: string,
@@ -722,12 +734,14 @@ export function reapStaleWorktrees(
   const removed: string[] = [];
   for (const path of findStaleWorktrees(base, deps, minAgeMs)) {
     const q = `'${path.replace(/'/g, `'\\''`)}'`;
-    const wt = deps.sh(`git -C ${q} worktree remove --force ${q}`);
-    if (wt.code === 0 || !deps.exists(path)) {
-      removed.push(path);
-      continue;
+    if (deps.isWorktree(path)) {
+      const wt = deps.sh(`git -C ${q} worktree remove --force ${q}`);
+      if (wt.code === 0 || !deps.exists(path)) {
+        removed.push(path);
+        continue;
+      }
     }
-    if (deps.sh(`rm -rf ${q}`).code === 0) removed.push(path);
+    if (!deps.exists(path) || deps.sh(`rm -rf ${q}`).code === 0) removed.push(path);
   }
   return removed;
 }
@@ -858,6 +872,48 @@ export function checkoutBaseStatus(
   let p = base;
   while (p && p !== "/" && !exists(p)) p = p.slice(0, p.lastIndexOf("/")) || "/";
   if (!exists(p)) return { ok: false, reason: `no existing parent directory for ${base}` };
+  return { ok: true };
+}
+
+/** Free space in KB on the filesystem containing `path`, parsed from `df -k`. `null` means
+ *  unknown (df failed, or its output didn't parse) — never throws, so a shell hiccup can't
+ *  itself take down a round; the caller decides how to treat "unknown". */
+export function freeDiskKb(path: string, sh: Sh = realSh): number | null {
+  const r = sh(`df -k ${JSON.stringify(path)} 2>/dev/null`);
+  if (r.code !== 0) return null;
+  const cols = (r.out.trim().split("\n").at(-1) ?? "").trim().split(/\s+/);
+  const kb = Number(cols[3]);
+  return Number.isFinite(kb) && kb >= 0 ? kb : null;
+}
+
+/**
+ * Below this, refuse to start ANY new work this invocation. Exists specifically for a
+ * deployment running unattended for a long stretch: checkout resets, `setupCommand` installs,
+ * and scratch worktrees all consume disk, and starting more of that work while already
+ * critically low is exactly how "disk is a bit tight" compounds into "machine is unusable and
+ * nobody is there to notice." `null` (df failed / unparseable) is treated as "unknown, proceed
+ * anyway" — a monitoring gap here must not ALSO become an availability outage; catching the gap
+ * itself is the separate disk-space-monitor cron job's job, not this best-effort guard's.
+ */
+export const MIN_FREE_DISK_KB = 10 * 1024 * 1024; // 10GB
+
+/** Same shape as checkoutBaseStatus, same reason it exists — fail LOUD and early, before any
+ *  checkout, rather than silently let a round make an already-tight disk worse. */
+export function diskHeadroomStatus(
+  checkoutBase: string,
+  sh: Sh = realSh,
+  floorKb: number = MIN_FREE_DISK_KB,
+): { ok: boolean; reason?: string } {
+  const kb = freeDiskKb(expandHome(checkoutBase), sh);
+  if (kb === null) return { ok: true }; // unknown — see MIN_FREE_DISK_KB's doc comment
+  if (kb < floorKb) {
+    const gb = (kb / 1024 / 1024).toFixed(1);
+    const floorGb = (floorKb / 1024 / 1024).toFixed(0);
+    return {
+      ok: false,
+      reason: `only ${gb}G free on the filesystem holding ${checkoutBase} (floor: ${floorGb}G)`,
+    };
+  }
   return { ok: true };
 }
 
@@ -1057,33 +1113,38 @@ export const referenceEnvKey = (slug: string): string =>
   `AGENTLOOP_REF_${slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
 
 /**
- * Env var naming where a skill should create its OWN per-unit-of-work scratch worktrees
- * (issue-sweep: one per concurrently-processed issue — see SKILL.md "会改 repo 的 worker 必须
- * 使用独立 worktree"). That instruction used to say only THAT such a worktree must exist, never
- * WHERE — so the agent, improvising a `mktemp`/`git worktree add` path on its own, defaulted to
- * the Unix convention `/tmp/...`. That silently bypassed a deployment's `checkoutBase`/`TMPDIR`
- * (both of which point at an external disk here): MEASURED on a live machine, ~36G of orphaned
- * worktrees piled up under `/private/tmp` in one day of unattended hourly sweeps, while the
- * external disk sat mostly empty. Giving the skill a literal, always-set variable to reference
- * (instead of a path it has to guess) is what actually fixes it — see issueWorktreeBase.
+ * Env var naming where ANY skill should create its OWN per-unit-of-work scratch worktrees
+ * (issue-sweep: one per concurrently-processed issue; pr-sweep/pr-review: one per PR needing
+ * an isolated branch checkout — see both skills' SKILL.md "worktree 必须建在
+ * `$AGENTLOOP_WORKTREE_BASE` 下"). A bare "build a temp worktree" instruction used to say only
+ * THAT one must exist, never WHERE — so the agent, improvising a `mktemp`/`git worktree add`
+ * path on its own, defaulted to the Unix convention `/tmp/...`. MEASURED live, twice, in two
+ * different skills that both hit this same gap independently: issue-sweep first (~36G of
+ * orphaned worktrees under `/private/tmp` in one day), then pr-sweep the same way months later
+ * (~17G across 9 abandoned `/private/tmp/wt-<pr#>` dirs) — one skill getting an explicit
+ * variable did not stop the NEXT skill from improvising the identical mistake. Giving every
+ * skill the SAME literal, always-set variable (instead of a path each has to guess
+ * independently) is what actually fixes it — see worktreeBase.
  */
-export const ISSUE_WORKTREE_BASE_ENV = "AGENTLOOP_ISSUE_WORKTREE_BASE";
+export const WORKTREE_BASE_ENV = "AGENTLOOP_WORKTREE_BASE";
 
 /**
- * Where per-issue scratch worktrees should live: whatever `$TMPDIR` resolves to for this run
- * (already flows through cfg.env/envFile via runEnv's merge — proven live: SwiftPM's own lock
- * files land there today) when the deployment set one, else a dedicated dir beside the
- * checkouts (same disk as `checkoutBase`, so it moves with it even for a deployment that never
- * bothered to set TMPDIR). Never bare `/tmp` — that is exactly the default this function
- * replaces. `mergedEnv` is the in-progress runEnv merge, so this must run AFTER the
- * process/envFile/cfg.env/skillEnv layers (whichever of those sets TMPDIR wins, same as for any
- * other var), and BEFORE this key is read back out.
+ * Where scratch worktrees should live: a directory beside the checkouts, exclusive to
+ * agentloop — never the deployment's bare `$TMPDIR`. An earlier version of this function
+ * preferred `$TMPDIR` when set (reasoning: reuse whatever disk the deployment already pointed
+ * temp files at) — but `$TMPDIR` is NOT exclusive to agentloop: MEASURED live, that same
+ * directory held ~2700 unrelated entries from other tools (SwiftPM's own `*.lock` files,
+ * editor/electron scratch dirs), which forced the stale-worktree reaper to gate on "is this
+ * actually a linked git worktree" before touching anything — a fragile, shape-based safety
+ * check standing in for the real fix. Owning a dedicated subdirectory removes the ambiguity at
+ * the source: NOTHING but agentloop's own scratch worktrees ever lives here, so the reaper
+ * below can safely remove anything old and unused regardless of its shape (linked worktree,
+ * full clone, or a worker's stray leftover file) — see findStaleWorktrees. Same disk as
+ * `checkoutBase` by construction, so a deployment that points `checkoutBase` at a roomy
+ * external volume gets scratch worktrees there too, automatically.
  */
-export function issueWorktreeBase(
-  cfg: Pick<DeploymentConfig, "checkoutBase">,
-  mergedEnv: Record<string, string>,
-): string {
-  return mergedEnv.TMPDIR || `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.tmp-worktrees`;
+export function worktreeBase(cfg: Pick<DeploymentConfig, "checkoutBase">): string {
+  return `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.agentloop-worktrees`;
 }
 
 /** Env for one run: process env < envFile < deployment env < per-skill env. */
@@ -1111,7 +1172,7 @@ export function runEnv(
   if (run.concurrency !== undefined) merged.AGENTLOOP_SKILL_CONCURRENCY = String(run.concurrency);
   if (run.setupCommand) merged.AGENTLOOP_SETUP_COMMAND = run.setupCommand;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
-  merged[ISSUE_WORKTREE_BASE_ENV] = issueWorktreeBase(cfg, merged);
+  merged[WORKTREE_BASE_ENV] = worktreeBase(cfg);
   // Beside the checkout, never inside it: an in-tree file would dirty `git status` and
   // disarm the repo's own push/verify gates — the same reason the fleet marker lives out.
   merged[RUN_REPORT_ENV] = `${run.checkoutPath.replace(/\/+$/, "")}.run-report.json`;
@@ -1335,6 +1396,7 @@ if (import.meta.main) {
   const gated = plan.map((p) => ({ p, ...cadenceDue(p, force ? {} : state, now) }));
 
   const baseStatus = checkoutBaseStatus(cfg.checkoutBase, existsSync);
+  const diskStatus = baseStatus.ok ? diskHeadroomStatus(cfg.checkoutBase) : { ok: true };
 
   if (!run) {
     for (const { p, due, remainingMin } of gated) {
@@ -1343,6 +1405,7 @@ if (import.meta.main) {
     }
     const due = gated.filter((g) => g.due).length;
     if (!baseStatus.ok) console.log(`\n# ⚠ checkoutBase unavailable: ${baseStatus.reason}`);
+    if (!diskStatus.ok) console.log(`\n# ⚠ disk headroom: ${diskStatus.reason}`);
     console.log(
       `\n(dry-run — ${due}/${plan.length} due now. Pass --run to execute; --force ignores cadence.)`,
     );
@@ -1354,6 +1417,13 @@ if (import.meta.main) {
   if (!baseStatus.ok) {
     console.error(`✗ checkoutBase not available — ${baseStatus.reason}. Skipping round.`);
     process.exit(3);
+  }
+  // Disk-floor guard: same philosophy, one exit code over (4) so a cron log can tell "disk
+  // critically low" apart from "disk not mounted" apart from "sweep failed". Checked ONLY
+  // after the mount guard passes — no point asking `df` about a path that isn't even there.
+  if (!diskStatus.ok) {
+    console.error(`✗ refusing to start new work — ${diskStatus.reason}. Skipping round.`);
+    process.exit(4);
   }
   try {
     mkdirSync(expandHome(cfg.checkoutBase), { recursive: true });
@@ -1444,11 +1514,25 @@ if (import.meta.main) {
   const lockDir = `${expandHome(cfg.checkoutBase).replace(/\/+$/, "")}/.locks`;
   ensureLockDir(lockDir);
 
-  // Directory-level hygiene, mirroring reapOrphans: a worker that crashed instead of running
-  // its own Step 5 cleanup leaves a scratch worktree behind forever otherwise. Best-effort —
-  // must never fail or block the round it runs ahead of.
+  // Scratch-worktree hygiene, for EVERY skill (not just issue-sweep — pr-sweep/pr-review share
+  // the same base, see WORKTREE_BASE_ENV). Two passes, in order, and the order matters: kill
+  // zombie PROCESSES first (reapOrphans, same PPID==1 signal as the per-checkout reap below),
+  // THEN reap stale worktree DIRECTORIES (reapStaleWorktrees). Doing it the other way risks the
+  // exact failure mode this whole mechanism exists to prevent — a directory removed while a
+  // zombie still holds a file open under it does NOT reclaim that file's disk space until the
+  // zombie's fd closes, so the "cleanup" would silently not free anything. Both best-effort:
+  // must never fail or block the round they run ahead of.
+  const wtBase = worktreeBase(cfg);
   try {
-    const wtBase = issueWorktreeBase(cfg, { TMPDIR: cfg.env?.TMPDIR ?? "" });
+    const orphans = reapOrphans(wtBase);
+    if (orphans.killed.length)
+      console.log(
+        `# reaped ${orphans.killed.length} zombie process(es) under ${wtBase}: ${orphans.killed.join(", ")}`,
+      );
+  } catch (e) {
+    console.log(`# worktree-base zombie sweep failed (non-fatal): ${(e as Error).message}`);
+  }
+  try {
     const removed = reapStaleWorktrees(wtBase);
     if (removed.length)
       console.log(
