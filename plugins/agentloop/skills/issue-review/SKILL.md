@@ -490,10 +490,10 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 用 `comment_language` 指定的正文语言写(arc 默认:中文),顶部标 AI 身份与读取/运行范围:
 
 ```
-> 🤖 AI Agent Audit @ <hostname> · runner:<runner> · skills@<hash> — Claude Code(<model>)。读取:<文档+代码+测试>。运行:<测试命令>。每条发现附可复现证据。
+> 🤖 AI Agent Audit @ <hostname> · runner:<runner> · skills@<hash>[ · engine:<kind>[/<model>]]。读取:<文档+代码+测试>。运行:<测试命令>。每条发现附可复现证据。
 ```
 
-整行 header **必须由单点脚本生成**(`<agent_identity_script>`;环境/归属/skills 版本三维溯源,不能用日期、占位符或手拼代替),行尾追加模型与范围:
+整行 header **必须由单点脚本生成**(`<agent_identity_script>`;环境/归属/skills/engine 四维溯源,不能用日期、占位符或手拼代替——尤其别再手写死 "Claude Code(<model>)",脚本按 `ARC_AGENT_ENGINE`/`ARC_AGENT_MODEL` 自动带出真实 engine,Codex 下跑手写死会错误自称 Claude),行尾追加读取/运行范围:
 ```bash
 bash <agent_identity_script> --header "Audit"
 # → "> 🤖 AI Agent Audit @ vm · runner:<name> · skills@a2298a3b"

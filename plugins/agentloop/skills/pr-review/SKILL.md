@@ -367,11 +367,11 @@ bun .claude/skills/e2e-gate/scripts/scope.ts --pr "$n" --json   # backendHit + �
 > **范围**:只有上面那几类**要人介入**的 verdict 带此块;`MERGE`(无需人)、agent 自修的机械件**不带**——别给不需要人的 PR 也堆一个空块。
 
 ### Step 6 — 落 comment(`--post` 时)
-中文写,顶部标 AI 身份与读取/运行范围。**整行 header 由单点脚本生成**(不能手拼/占位符/日期代替),行尾追加模型与范围:
+中文写,顶部标 AI 身份与读取/运行范围。**整行 header 由单点脚本生成**(不能手拼/占位符/日期代替;engine/model 由脚本按 `ARC_AGENT_ENGINE`/`ARC_AGENT_MODEL` 自动带出,别再手写 "Claude Code(<model>)"——Codex 下跑会错误自称 Claude),行尾追加读取/运行范围:
 ```bash
 hdr=$(bash <agent_identity_script> --header "PR Review")   # profile 字段
-# → "> 🤖 AI Agent PR Review @ <hostname> · runner:<name> · skills@<hash>"
-echo "${hdr} — Claude Code(<model>)。读取:PR diff + 受影响代码/文档/测试 + 关联 issue。运行:/agentloop:verification (pre-merge) + <测试命令>。每条结论附可复现证据。"
+# → "> 🤖 AI Agent PR Review @ <hostname> · runner:<name> · skills@<hash>[ · engine:<kind>[/<model>]]"
+echo "${hdr}。读取:PR diff + 受影响代码/文档/测试 + 关联 issue。运行:/agentloop:verification (pre-merge) + <测试命令>。每条结论附可复现证据。"
 ```
 详见根 CLAUDE.md「Agent Comment 格式」(前缀是 pr-sweep 检测谓词,由脚本保证不漂移)。
 ```bash

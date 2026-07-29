@@ -270,6 +270,7 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
       checkoutPath: "/co/x",
       root: "/plugins",
       runner: "r1",
+      engine: { kind: "claude" as const, bin: "claude" },
     };
     const e = runEnv(run, cfg, { PRE_EXISTING: "kept", SHARED: "process" });
     expect(e.PRE_EXISTING).toBe("kept");
@@ -289,7 +290,13 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
         "pr-sweep": { ARC_SERVICE_PORT: "4920", ARC_WORKER_PORT: "8807" },
       },
     });
-    const mk = (s: string) => ({ skillLocal: s, checkoutPath: "/co/x", root: "/p", runner: "r" });
+    const mk = (s: string) => ({
+      skillLocal: s,
+      checkoutPath: "/co/x",
+      root: "/p",
+      runner: "r",
+      engine: { kind: "claude" as const, bin: "claude" },
+    });
     expect(runEnv(mk("issue-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4910");
     expect(runEnv(mk("pr-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4920");
   });
@@ -316,7 +323,13 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     it("runEnv always injects it, for every skill — not just issue-sweep", () => {
       const cfg = base({ checkoutBase: "/co" });
       for (const skillLocal of ["issue-sweep", "pr-sweep"]) {
-        const run = { skillLocal, checkoutPath: "/co/x", root: "/p", runner: "r" };
+        const run = {
+          skillLocal,
+          checkoutPath: "/co/x",
+          root: "/p",
+          runner: "r",
+          engine: { kind: "claude" as const, bin: "claude" },
+        };
         expect(runEnv(run, cfg, {})[WORKTREE_BASE_ENV]).toBe("/co/.agentloop-worktrees");
       }
     });
@@ -984,7 +997,13 @@ describe("observability: what a round DID, not just that it ran", () => {
   });
 
   it("names the report file BESIDE the checkout — in-tree would dirty git status forever", () => {
-    const run = { skillLocal: "issue-sweep", checkoutPath: "/co/X", root: "/p", runner: "r" };
+    const run = {
+      skillLocal: "issue-sweep",
+      checkoutPath: "/co/X",
+      root: "/p",
+      runner: "r",
+      engine: { kind: "claude" as const, bin: "claude" },
+    };
     const e = runEnv(run, base(), {});
     expect(e[RUN_REPORT_ENV]).toBe("/co/X.run-report.json");
     expect(e[RUN_REPORT_ENV].startsWith("/co/X/")).toBe(false);

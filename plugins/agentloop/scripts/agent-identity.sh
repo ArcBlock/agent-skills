@@ -3,13 +3,22 @@
 # UNIVERSAL: ships with the plugin, works in any repo, needs no per-repo setup.
 #
 # Output (one line):
-#   @ <hostname> · runner:<runner> · skills@<version>[-dirty]
+#   @ <hostname> · runner:<runner> · skills@<version>[-dirty][ · engine:<kind>[/<model>]]
 #
-# The three provenance axes it answers:
+# The provenance axes it answers:
 #   hostname  which machine ran it (vm = cloud routine, *.local = a laptop, runner-N = CI)
 #   runner    who owns the routine/session. --runner > $ARC_AGENT_RUNNER > git user.name > whoami
 #   skills@   WHICH VERSION OF THE SKILLS produced the comment — i.e. THIS PLUGIN's version,
 #             plus the consuming repo's own `.claude/skills/` when it has any.
+#   engine    claude or codex, and the model IF it is actually known (--engine/--model >
+#             $ARC_AGENT_ENGINE/$ARC_AGENT_MODEL > omitted). The fleet driver always knows
+#             engine.kind (resolveEngine defaults to claude) but NOT always engine.model — a
+#             codex run with no explicit `engine.model` gets no `-m` flag, so the CLI picks its
+#             own default and the driver never learns what it was. In that case print the kind
+#             alone; never guess a model, that would be worse than admitting we don't know it
+#             (agent-skills#28). Interactive/ad-hoc sessions have no env signal for either axis
+#             (no live-model env var exists in either CLI) — the calling skill must pass
+#             --engine/--model from the agent's own self-knowledge if it wants this segment.
 #
 # Why the plugin ships this rather than each repo (#1037): the line describes the AGENT and
 # its skills, not the repo. A repo cannot know the plugin's version, and a per-repo copy
@@ -19,20 +28,27 @@
 # Usage:
 #   suffix=$(bash "$AGENTLOOP_ROOT/scripts/agent-identity.sh")
 #   bash "$AGENTLOOP_ROOT/scripts/agent-identity.sh" --header "PR Review"
-#     → "> 🤖 AI Agent PR Review @ vm · runner:robert · skills@0.3.0"
+#     → "> 🤖 AI Agent PR Review @ vm · runner:robert · skills@0.3.0 · engine:codex/gpt-5-codex"
 # The `> 🤖 AI Agent` prefix is a sweep AI/human predicate — never change it.
 set -uo pipefail
 
 runner=""
+engine=""
+model=""
 header_mode=0
 header_label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --runner) runner="${2-}"; shift 2 ;;
+    --engine) engine="${2-}"; shift 2 ;;
+    --model) model="${2-}"; shift 2 ;;
     --header) header_mode=1; header_label="${2-}"; shift 2 ;;
     *) shift ;;
   esac
 done
+
+[ -z "${engine}" ] && engine="${ARC_AGENT_ENGINE:-}"
+[ -z "${model}" ] && model="${ARC_AGENT_MODEL:-}"
 
 host=$(python3 -c "import socket; print(socket.gethostname())" 2>/dev/null || hostname)
 
@@ -79,7 +95,16 @@ if [ -z "${skills_hash}" ]; then
   skills_hash="${v:-unknown}"
 fi
 
-suffix="@ ${host} · runner:${runner} · skills@${skills_hash}${dirty}"
+engine_seg=""
+if [ -n "${engine}" ]; then
+  if [ -n "${model}" ]; then
+    engine_seg=" · engine:${engine}/${model}"
+  else
+    engine_seg=" · engine:${engine}"
+  fi
+fi
+
+suffix="@ ${host} · runner:${runner} · skills@${skills_hash}${dirty}${engine_seg}"
 if [ "${header_mode}" = "1" ]; then
   if [ -n "${header_label}" ]; then echo "> 🤖 AI Agent ${header_label} ${suffix}"; else echo "> 🤖 AI Agent ${suffix}"; fi
 else

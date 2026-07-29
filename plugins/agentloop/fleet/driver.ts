@@ -1151,7 +1151,7 @@ export function worktreeBase(cfg: Pick<DeploymentConfig, "checkoutBase">): strin
 export function runEnv(
   run: Pick<
     PlannedRun,
-    "skillLocal" | "checkoutPath" | "root" | "runner" | "concurrency" | "setupCommand"
+    "skillLocal" | "checkoutPath" | "root" | "runner" | "concurrency" | "setupCommand" | "engine"
   > & {
     referenceRepos?: PlannedRun["referenceRepos"];
   },
@@ -1169,6 +1169,12 @@ export function runEnv(
   merged.ARC_UNATTENDED = "1";
   merged.AGENTLOOP_ROOT = run.root;
   merged.ARC_AGENT_RUNNER = run.runner;
+  // engine.kind always resolves (resolveEngine defaults to claude); model does not — a codex
+  // run with no explicit engine.model gets no -m flag and the CLI picks its own default, which
+  // the driver never learns. Only set ARC_AGENT_MODEL when we actually know it — printing a
+  // guess would be worse than printing nothing (agent-skills#28).
+  merged.ARC_AGENT_ENGINE = run.engine.kind;
+  if (run.engine.model) merged.ARC_AGENT_MODEL = run.engine.model;
   if (run.concurrency !== undefined) merged.AGENTLOOP_SKILL_CONCURRENCY = String(run.concurrency);
   if (run.setupCommand) merged.AGENTLOOP_SETUP_COMMAND = run.setupCommand;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
@@ -1350,7 +1356,7 @@ export async function executeRun(
     ok: exitCode === 0,
     residualProcs: residual.length,
     produced,
-    detail: `checkout ${co.action}; ${run.engine.kind} exit ${exitCode}`,
+    detail: `checkout ${co.action}; ${run.engine.kind}${run.engine.model ? `/${run.engine.model}` : ""} exit ${exitCode}`,
     exitCode,
   });
 }
