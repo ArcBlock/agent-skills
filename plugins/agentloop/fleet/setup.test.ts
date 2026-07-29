@@ -722,3 +722,116 @@ describe("parseProbedPath", () => {
     expect(parseProbedPath("cd\n")).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lessons from a real first deployment (2026-07-29, ArcBlock/arc on a dev mac).
+// Each test below encodes a failure that cost real rounds, so re-running the
+// installer on a fresh machine cannot reproduce it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("scaffoldEnvFile — a present key with no value is NOT a set key", () => {
+  // MEASURED: a first deployment ran 22 consecutive rounds that each died in ~7s with
+  // `Not logged in`, because the envFile carried `export CLAUDE_CODE_OAUTH_TOKEN=   # ← FILL:`
+  // — the key was present, so the existing-file check reported "already sets" and the setup
+  // looked complete. Presence of the key is not the question; a usable value is.
+  test("flags the unfilled FILL line instead of reporting the file complete", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => true,
+      () =>
+        "export GH_TOKEN=gho_real\nexport CLAUDE_CODE_OAUTH_TOKEN=   # ← FILL: claude setup-token\n",
+      () => {},
+      () => "",
+    );
+    expect(out[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(out[0]).not.toContain("already sets");
+  });
+
+  test("flags a bare empty assignment too", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => true,
+      () => "export GH_TOKEN=gho_real\nexport CLAUDE_CODE_OAUTH_TOKEN=\n",
+      () => {},
+      () => "",
+    );
+    expect(out[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(out[0]).not.toContain("already sets");
+  });
+
+  test("still reports a genuinely complete file as complete", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => true,
+      () => "export GH_TOKEN=gho_real\nexport CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-real\n",
+      () => {},
+      () => "",
+    );
+    expect(out[0]).toContain("already sets");
+  });
+});
+
+describe("scaffoldEnvFile — warns about an over-scoped derived GH_TOKEN", () => {
+  // MEASURED: deriving GH_TOKEN from the machine's own `gh` session handed the fleet a user
+  // token carrying `admin:public_key` (can add SSH keys to the ACCOUNT) and `repo` across every
+  // org. Setup time is the only moment this is cheap to fix, so it must be said there.
+  test("names the offending scope and points at a fine-grained token", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => false,
+      () => "",
+      () => {},
+      (cmd) =>
+        cmd.includes("gh auth token")
+          ? "gho_derived"
+          : cmd.includes("gh auth status")
+            ? "  - Token scopes: 'admin:public_key', 'gist', 'read:org', 'repo'"
+            : "",
+    );
+    const text = out.join("\n");
+    expect(text).toContain("admin:public_key");
+    expect(text).toMatch(/fine-grained/i);
+  });
+
+  test("stays quiet when the token carries no account-level scope", () => {
+    const out = scaffoldEnvFile(
+      "/e/env",
+      () => false,
+      () => "",
+      () => {},
+      (cmd) =>
+        cmd.includes("gh auth token")
+          ? "github_pat_narrow"
+          : cmd.includes("gh auth status")
+            ? "  - Token scopes: 'repo'"
+            : "",
+    );
+    expect(out.join("\n")).not.toMatch(/fine-grained/i);
+  });
+});
+
+describe("buildCatalog — clone mode needs a cloneUrl the compact spec cannot carry", () => {
+  // MEASURED: `--repos "ArcBlock/arc=issue-sweep,pr-sweep@120"` produced entries with no
+  // cloneUrl, and clone mode then skipped every repo with "no checkout at … and no cloneUrl".
+  // The compact spec deliberately cannot express a URL (special chars), so the default has to
+  // come from the slug.
+  test("falls back to the conventional https URL derived from the slug", () => {
+    const [r] = buildCatalog(parseReposSpec("ArcBlock/arc=issue-sweep"), undefined);
+    expect(r.cloneUrl).toBe("https://github.com/ArcBlock/arc.git");
+  });
+
+  // The fallback must never win over a real choice: a teammate who set an ssh remote (or a
+  // GHE host) keeps it across every re-run.
+  test("never overrides an explicitly configured cloneUrl", () => {
+    const existing = [
+      {
+        slug: "ArcBlock/arc",
+        defaultBranch: "main",
+        skills: ["issue-sweep"],
+        cloneUrl: "git@github.com:ArcBlock/arc.git",
+      },
+    ];
+    const [r] = buildCatalog(parseReposSpec("ArcBlock/arc=issue-sweep"), existing);
+    expect(r.cloneUrl).toBe("git@github.com:ArcBlock/arc.git");
+  });
+});

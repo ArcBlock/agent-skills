@@ -153,6 +153,20 @@ export function buildDeployment(
   return { ...defaults, ...existing, ...explicit };
 }
 
+/** The conventional clone URL for a `<owner>/<repo>` slug.
+ *
+ *  Clone mode (the default, and the only safe one on a machine that also does human work)
+ *  needs a URL, but the compact `--repos` spec deliberately cannot carry one — a URL is full
+ *  of the characters that spec uses as separators. MEASURED: without this fallback a
+ *  `--repos "Owner/repo=issue-sweep"` deployment installs cleanly and then skips every repo
+ *  at run time with "no checkout at … and no cloneUrl", which reads like a checkout bug.
+ *
+ *  https rather than ssh on purpose: it works with the `gh` credential helper the envFile
+ *  already provisions, so a fresh deployment needs no SSH key of its own. */
+export function deriveCloneUrl(slug: string): string {
+  return `https://github.com/${slug}.git`;
+}
+
 /** Reconcile the catalog: merge incoming repos per-slug over existing, preserving
  *  fields the incoming entry omits (cloneUrl / setupCommand a user may have set). If
  *  no incoming repos are given, keep the existing catalog untouched. */
@@ -164,7 +178,10 @@ export function buildCatalog(
   const bySlug = new Map(existing.map((r) => [r.slug, r]));
   for (const r of incoming) {
     const prev = bySlug.get(r.slug) ?? ({} as RepoEntry);
-    bySlug.set(r.slug, { ...prev, ...r });
+    const merged = { ...prev, ...r };
+    // Fallback only — an explicit value (ssh remote, GHE host) always wins, on every re-run.
+    if (!merged.cloneUrl) merged.cloneUrl = deriveCloneUrl(merged.slug);
+    bySlug.set(r.slug, merged);
   }
   return [...bySlug.values()];
 }
@@ -558,6 +575,40 @@ export const ENV_KEYS: { key: string; derive: string; how: string }[] = [
   },
 ];
 
+/** Does this envFile actually SET the key — i.e. assign a usable value, not merely name it?
+ *
+ *  MEASURED (2026-07-29, first ArcBlock/arc deployment): the scaffold writes an unfilled hole
+ *  as `export CLAUDE_CODE_OAUTH_TOKEN=   # ← FILL: claude setup-token`. A presence check on
+ *  `export KEY=` matches that line, so a re-run reported "already sets GH_TOKEN,
+ *  CLAUDE_CODE_OAUTH_TOKEN" and the setup looked finished — while every cron round died in ~7s
+ *  with `Not logged in`. 22 consecutive rounds were lost to that false green.
+ *
+ *  The driver's "a round that sources 0 vars aborts loudly" guard does not cover this: the
+ *  round sourced two vars, one of which happened to be empty. */
+export function hasUsableValue(body: string, key: string): boolean {
+  const m = body.match(new RegExp(`^\\s*export\\s+${key}=(.*)$`, "m"));
+  if (!m) return false;
+  const v = (m[1] ?? "").trim();
+  return v.length > 0 && !v.startsWith("#");
+}
+
+/** GitHub scopes that reach beyond "work on repositories" into the ACCOUNT itself.
+ *
+ *  MEASURED: deriving GH_TOKEN from a dev machine's own `gh` session handed the fleet a user
+ *  token with `admin:public_key` — which can add an SSH key to the GitHub account, i.e. a
+ *  persistence primitive, not a "wrote the wrong code" mistake — plus `repo` across every org
+ *  the human belongs to. Setup is the one moment when narrowing this is nearly free. */
+const ACCOUNT_LEVEL_SCOPE = /^(admin:|delete_repo|write:org|delete:packages)/;
+
+/** Parse the scope list out of `gh auth status` and return only the account-level ones. */
+export function overBroadScopes(ghAuthStatus: string): string[] {
+  const line = ghAuthStatus.match(/Token scopes:\s*(.+)/)?.[1] ?? "";
+  return line
+    .split(",")
+    .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+    .filter((s) => ACCOUNT_LEVEL_SCOPE.test(s));
+}
+
 /**
  * Create the credential file the cron rows source, filling in what the machine can already
  * answer and leaving an obvious hole for what it cannot.
@@ -583,7 +634,7 @@ export function scaffoldEnvFile(
   const out: string[] = [];
   if (exists(path)) {
     const body = read(path);
-    const missing = ENV_KEYS.filter((k) => !new RegExp(`^\\s*export\\s+${k.key}=`, "m").test(body));
+    const missing = ENV_KEYS.filter((k) => !hasUsableValue(body, k.key));
     out.push(
       missing.length
         ? `⚠ ${path} exists but sets no ${missing.map((m) => m.key).join(", ")} — add it (${missing.map((m) => m.how).join("; ")}) or the fleet aborts on its first fire.`
@@ -609,6 +660,18 @@ export function scaffoldEnvFile(
     out.push(
       `   ${done ? "✓" : "→"} ${k.key}${done ? " (derived)" : `  RUN: ${k.how}, then paste it in`}`,
     );
+  }
+  // Only meaningful when we DERIVED the token — for a file the human wrote we never read the
+  // value, so we cannot (and must not) inspect its scopes.
+  if (!todo.some((k) => k.key === "GH_TOKEN")) {
+    const risky = overBroadScopes(run("gh auth status 2>&1"));
+    if (risky.length)
+      out.push(
+        `   ⚠ the derived GH_TOKEN carries account-level scope(s): ${risky.join(", ")}.`,
+        `     An unattended agent holds this for every round. Prefer a fine-grained token scoped`,
+        `     to the covered repo(s) with contents+pull-requests+issues write and no admin —`,
+        `     then replace GH_TOKEN in ${path}.`,
+      );
   }
   return out;
 }
