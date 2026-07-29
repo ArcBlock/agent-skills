@@ -19,6 +19,33 @@
  *  merged map — see driver's runEnv, which starts from process.env). Omit it to inherit. */
 export type Sh = (cmd: string, env?: Record<string, string>) => { code: number; out: string };
 
+/** Injectable backoff delay — tests pass a no-op so retries don't actually stall the suite. */
+export type SleepFn = (ms: number) => void;
+
+const NETWORK_RETRY_ATTEMPTS = 3;
+const NETWORK_RETRY_DELAY_MS = 5000;
+
+/**
+ * Retry a network-touching git command a few times before giving up. An unattended fleet
+ * behind a consumer proxy sees transient SSH/HTTPS connect timeouts to the git remote that
+ * clear up seconds later — without a retry, one such blip fails the whole round even though
+ * the checkout itself is otherwise fine. Local-only steps (reset/clean/checkout) are NOT
+ * retried here — a failure there is a real problem, not remote flakiness.
+ */
+function shNetwork(
+  sh: Sh,
+  cmd: string,
+  sleep: SleepFn,
+  attempts = NETWORK_RETRY_ATTEMPTS,
+): { code: number; out: string } {
+  let last = sh(cmd);
+  for (let i = 1; i < attempts && last.code !== 0; i++) {
+    sleep(NETWORK_RETRY_DELAY_MS);
+    last = sh(cmd);
+  }
+  return last;
+}
+
 export type CheckoutPolicy = { mode: "clone" } | { mode: "worktree"; baseDir: string }; // base clone per repo = <baseDir>/<repo-name>
 
 export interface CheckoutResult {
@@ -63,6 +90,8 @@ export interface EnsureOpts {
   exists: (p: string) => boolean;
   /** shell runner (injected for tests) */
   sh: Sh;
+  /** backoff delay for network retries (injected for tests); defaults to Bun.sleepSync */
+  sleep?: SleepFn;
 }
 
 const repoName = (slug: string) => slug.split("/").pop() ?? slug;
@@ -82,6 +111,7 @@ function resetExisting(path: string, branch: string, sh: Sh): CheckoutResult {
  */
 export function ensureCheckout(opts: EnsureOpts): CheckoutResult {
   const { path, slug, branch, cloneUrl, policy, exists, sh } = opts;
+  const sleep = opts.sleep ?? Bun.sleepSync;
   const hasTree = exists(`${path}/.git`); // a worktree's .git is a FILE; existsSync sees both
   // Accept the legacy in-tree marker so trees created by an older driver are still ours;
   // claim() then heals them by moving the marker out of the working tree.
@@ -110,7 +140,7 @@ export function ensureCheckout(opts: EnsureOpts): CheckoutResult {
       };
     }
     // Fetch into the SHARED object store (the base clone), then point the worktree at the tip.
-    const f = sh(`git -C ${base} fetch --quiet origin ${branch}`);
+    const f = shNetwork(sh, `git -C ${base} fetch --quiet origin ${branch}`, sleep);
     if (f.code !== 0)
       return { action: "worktree", ok: false, detail: `fetch failed: ${f.out.trim()}` };
     if (!hasTree) {
@@ -130,12 +160,12 @@ export function ensureCheckout(opts: EnsureOpts): CheckoutResult {
   if (!hasTree) {
     if (!cloneUrl)
       return { action: "skipped", ok: false, detail: `no checkout at ${path} and no cloneUrl` };
-    const r = sh(`git clone --depth 1 --branch ${branch} ${cloneUrl} ${path}`);
+    const r = shNetwork(sh, `git clone --depth 1 --branch ${branch} ${cloneUrl} ${path}`, sleep);
     if (r.code !== 0) return { action: "cloned", ok: false, detail: r.out.trim() };
     claim();
     return { action: "cloned", ok: true };
   }
-  const f = sh(`git -C ${path} fetch --depth 1 origin ${branch}`);
+  const f = shNetwork(sh, `git -C ${path} fetch --depth 1 origin ${branch}`, sleep);
   if (f.code !== 0) return { action: "reset", ok: false, detail: `fetch failed: ${f.out.trim()}` };
   sh(`git -C ${path} checkout -q ${branch}`);
   claim();

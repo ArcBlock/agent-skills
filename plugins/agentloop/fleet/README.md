@@ -108,6 +108,12 @@ Safety in both: a `.agentloop-fleet` marker is dropped in trees the driver creat
 `checkoutBase` overlapping your dev workspace) can never nuke a checkout it didn't create.
 In worktree mode the dev clone is only ever the *base* (fetched into), never reset.
 
+Every network-touching step (`git clone`/`fetch`, including each `referenceRepos` fetch)
+retries up to 3 times with a 5s gap before failing the round — an unattended machine behind
+a flaky proxy sees transient SSH/HTTPS connect timeouts that clear up seconds later, and a
+single blip should not fail an otherwise-healthy round. Local-only steps (`reset --hard`,
+`clean`) are never retried — a failure there is a real problem, not remote flakiness.
+
 ## Parallel repos (`parallel` in the deployment config)
 
 The repos covered by ONE skill invocation are independent — each sweeps its own repo's

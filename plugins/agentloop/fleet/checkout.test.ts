@@ -170,6 +170,90 @@ describe("ensureCheckout — safety (both modes)", () => {
   });
 });
 
+describe("ensureCheckout — network retry (transient proxy/SSH blips)", () => {
+  /** fails the given command the first `failTimes`, then succeeds. */
+  function flaky(cmd: string, failTimes: number): { sh: Sh; calls: () => number } {
+    let seen = 0;
+    const sh: Sh = (c) => {
+      if (c === cmd) {
+        seen++;
+        return seen <= failTimes ? { code: 1, out: "connect timed out" } : { code: 0, out: "" };
+      }
+      return { code: 0, out: "" };
+    };
+    return { sh, calls: () => seen };
+  }
+  const noSleep = () => {};
+
+  it("retries a failing clone and succeeds on the 2nd attempt", () => {
+    const cmd = "git clone --depth 1 --branch main git@h:o/x.git /co/x";
+    const { sh, calls } = flaky(cmd, 1);
+    const r = ensureCheckout({
+      path: "/co/x",
+      slug: "o/x",
+      branch: "main",
+      cloneUrl: "git@h:o/x.git",
+      policy: CLONE,
+      exists: existsSet([]),
+      sh,
+      sleep: noSleep,
+    });
+    expect(r).toEqual({ action: "cloned", ok: true });
+    expect(calls()).toBe(2);
+  });
+
+  it("retries a failing worktree-mode fetch and succeeds on the 3rd attempt", () => {
+    const cmd = "git -C /Users/me/Develop/arcblock/arc fetch --quiet origin main";
+    const { sh, calls } = flaky(cmd, 2);
+    const r = ensureCheckout({
+      path: "/fleet/ArcBlock__arc",
+      slug: "ArcBlock/arc",
+      branch: "main",
+      policy: WT("/Users/me/Develop/arcblock"),
+      exists: existsSet(["/Users/me/Develop/arcblock/arc/.git"]),
+      sh,
+      sleep: noSleep,
+    });
+    expect(r).toEqual({ action: "worktree", ok: true });
+    expect(calls()).toBe(3);
+  });
+
+  it("gives up after exhausting retries and surfaces the last error", () => {
+    const cmd = "git -C /co/x fetch --depth 1 origin main";
+    const { sh, calls } = flaky(cmd, 99);
+    const r = ensureCheckout({
+      path: "/co/x",
+      slug: "o/x",
+      branch: "main",
+      policy: CLONE,
+      exists: existsSet(["/co/x/.git", `/co/x/${FLEET_MARKER}`]),
+      sh,
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("connect timed out");
+    expect(calls()).toBe(3); // caps at NETWORK_RETRY_ATTEMPTS, does not retry forever
+  });
+
+  it("does NOT retry local-only steps (reset/clean) — a failure there is real, not remote flakiness", () => {
+    const { sh } = recorder("reset --hard");
+    let sleeps = 0;
+    const r = ensureCheckout({
+      path: "/co/x",
+      slug: "o/x",
+      branch: "main",
+      policy: CLONE,
+      exists: existsSet(["/co/x/.git", `/co/x/${FLEET_MARKER}`]),
+      sh,
+      sleep: () => {
+        sleeps++;
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(sleeps).toBe(0); // no retry attempted → no backoff delay incurred
+  });
+});
+
 describe("marker lives OUTSIDE the working tree (measured: an in-tree marker disarms the host repo's gates)", () => {
   it("puts the marker beside the checkout, never inside it", () => {
     expect(markerFor("/co/ArcBlock__arc")).toBe("/co/.agentloop-fleet-markers/ArcBlock__arc");
