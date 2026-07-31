@@ -273,7 +273,7 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
    gh pr comment <twin> --body-file <note.md>   # 说明:与 #<keeper> 重复(同 issue #N),保留 #<keeper> 因 <判据+证据>;本 PR 关闭
    gh pr close <twin> --comment "superseded by #<keeper>"   # 或先 comment 再 close
    ```
-   comment 顶部带完整身份行（整行由 `<agent_identity_script> --header "PR Review"` 生成，不能用日期、占位符或手拼代替、也别再手写死 `Claude Code(<model>)`——engine/model 由脚本按 `ARC_AGENT_ENGINE`/`ARC_AGENT_MODEL` 自动带出；行尾追加读取/运行范围）。
+   comment 顶部带完整身份行（整行由 `<agent_identity_script> --header "PR Review" --skill pr-sweep` 生成，不能用日期、占位符或手拼代替、也别再手写死 `Claude Code(<model>)`——engine/model 由脚本按 `ARC_AGENT_ENGINE`/`ARC_AGENT_MODEL` 自动带出；行尾追加读取/运行范围）。
    正文一句话定责 + 指向 keeper。
 4. **keeper 上留一条**:注明"已关闭重复 #twin,本 PR 为保留方",便于人追溯。
 

@@ -3,13 +3,25 @@
 # UNIVERSAL: ships with the plugin, works in any repo, needs no per-repo setup.
 #
 # Output (one line):
-#   @ <hostname> · runner:<runner> · skills@<version>[-dirty][ · engine:<kind>[/<model>]]
+#   @ <hostname> · runner:<runner> · agentloop@<version>[+<hash>][-dirty][ · skill:<id>][ · engine:<kind>[/<model>]]
 #
 # The provenance axes it answers:
-#   hostname  which machine ran it (vm = cloud routine, *.local = a laptop, runner-N = CI)
-#   runner    who owns the routine/session. --runner > $ARC_AGENT_RUNNER > git user.name > whoami
-#   skills@   WHICH VERSION OF THE SKILLS produced the comment — i.e. THIS PLUGIN's version,
-#             plus the consuming repo's own `.claude/skills/` when it has any.
+#   hostname   which machine ran it (vm = cloud routine, *.local = a laptop, runner-N = CI)
+#   runner     who owns the routine/session. --runner > $ARC_AGENT_RUNNER > git user.name > whoami
+#   agentloop@ WHICH VERSION OF THE SKILLS produced the comment. **The semver is always present**
+#              — it is the thing a reader can act on ("are you on the version that has the fix?").
+#              A checked-out tree appends `+<commit>` for the sharper answer; the commit
+#              fingerprints THIS PLUGIN plus the consuming repo's own `.claude/skills/` when it
+#              has any, so it moves when either tree moves. `-dirty` = uncommitted local edits.
+#              Was `skills@<commit-or-version>`: in a git tree it printed a BARE COMMIT and no
+#              semver at all, so the common case answered neither "which version" nor "which
+#              plugin" (arc#2713 follow-up — a reader staring at `skills@eb9a70f1` cannot tell
+#              whether it predates a given fix). Renamed off `skills@` because it sat one
+#              character from the new `skill:` segment.
+#   skill:     WHICH SKILL wrote this comment (`pr-review`, `issue-sweep`, `verification`, …).
+#              The human label after "AI Agent" is prose chosen per call site ("PR Review",
+#              "Audit", "— UI 验证报告"); this segment is the stable machine id. Omitted when the
+#              caller does not pass --skill, so external callers keep working unchanged.
 #   engine    claude or codex, and the model IF it is actually known (--engine/--model >
 #             $ARC_AGENT_ENGINE/$ARC_AGENT_MODEL > omitted). The fleet driver always knows
 #             engine.kind (resolveEngine defaults to claude) but NOT always engine.model — a
@@ -27,14 +39,15 @@
 #
 # Usage:
 #   suffix=$(bash "$AGENTLOOP_ROOT/scripts/agent-identity.sh")
-#   bash "$AGENTLOOP_ROOT/scripts/agent-identity.sh" --header "PR Review"
-#     → "> 🤖 AI Agent PR Review @ vm · runner:robert · skills@0.3.0 · engine:codex/gpt-5-codex"
+#   bash "$AGENTLOOP_ROOT/scripts/agent-identity.sh" --header "PR Review" --skill pr-review
+#     → "> 🤖 AI Agent PR Review @ vm · runner:robert · agentloop@0.27.0+eb9a70f1 · skill:pr-review · engine:codex/gpt-5-codex"
 # The `> 🤖 AI Agent` prefix is a sweep AI/human predicate — never change it.
 set -uo pipefail
 
 runner=""
 engine=""
 model=""
+skill=""
 header_mode=0
 header_label=""
 while [ $# -gt 0 ]; do
@@ -42,10 +55,13 @@ while [ $# -gt 0 ]; do
     --runner) runner="${2-}"; shift 2 ;;
     --engine) engine="${2-}"; shift 2 ;;
     --model) model="${2-}"; shift 2 ;;
+    --skill) skill="${2-}"; shift 2 ;;
     --header) header_mode=1; header_label="${2-}"; shift 2 ;;
     *) shift ;;
   esac
 done
+
+[ -z "${skill}" ] && skill="${AGENTLOOP_SKILL:-}"
 
 [ -z "${engine}" ] && engine="${ARC_AGENT_ENGINE:-}"
 [ -z "${model}" ] && model="${ARC_AGENT_MODEL:-}"
@@ -77,6 +93,11 @@ in_own_git_tree() {
     git -C "$1" ls-files --error-unmatch ".claude-plugin/plugin.json" >/dev/null 2>&1
 }
 
+# The semver ALWAYS leads — it is the actionable half ("does this run have the fix?").
+# The commit is precision on top, available only in a checked-out tree.
+version=$(version_of "${plugin_root}")
+version="${version:-unknown}"
+
 skills_hash=""
 dirty=""
 if in_own_git_tree "${plugin_root}"; then
@@ -89,11 +110,15 @@ if in_own_git_tree "${plugin_root}"; then
   # shellcheck disable=SC2086
   [ -n "$(git -C "${repo_root}" status --porcelain -- ${paths} 2>/dev/null)" ] && dirty="-dirty"
 fi
-if [ -z "${skills_hash}" ]; then
-  v=$(version_of "${plugin_root}")
-  # A shallow clone can hide path history; the version still locates the code.
-  skills_hash="${v:-unknown}"
-fi
+
+# `<version>` on a marketplace install (no git, and none needed — the version IS the identity);
+# `<version>+<commit>` in a checked-out tree. A shallow clone can hide path history, in which
+# case the commit is simply absent and the version still locates the code.
+skills_id="${version}"
+[ -n "${skills_hash}" ] && skills_id="${version}+${skills_hash}"
+
+skill_seg=""
+[ -n "${skill}" ] && skill_seg=" · skill:${skill}"
 
 engine_seg=""
 if [ -n "${engine}" ]; then
@@ -104,7 +129,7 @@ if [ -n "${engine}" ]; then
   fi
 fi
 
-suffix="@ ${host} · runner:${runner} · skills@${skills_hash}${dirty}${engine_seg}"
+suffix="@ ${host} · runner:${runner} · agentloop@${skills_id}${dirty}${skill_seg}${engine_seg}"
 if [ "${header_mode}" = "1" ]; then
   if [ -n "${header_label}" ]; then echo "> 🤖 AI Agent ${header_label} ${suffix}"; else echo "> 🤖 AI Agent ${suffix}"; fi
 else

@@ -566,7 +566,7 @@ premise-check 的要求都不一样,分开处理:
   才用 `Fixes #N`,部分修复留 issue 开放并说明处理了哪部分)。不要把无关改动塞一个 PR。
 - PR body ends with `Fixes #N` so merge auto-closes the issue.
 - **PR body 顶部带标准身份 header**（延伸到 PR 的同一套身份行约定；即 `agent_comment_marker`）：整行由
-  `<agent_identity_script> --header "PR"` 生成
+  `<agent_identity_script> --header "PR" --skill issue-sweep` 生成
   （→ `> 🤖 AI Agent PR @ <hostname> · runner:<runner> · skills@<hash>`），
   不能手拼/占位符。归属、环境、skills 版本从此 PR 本体可溯源，不用翻 comment。
 - Commit messages follow **Conventional Commits**. **Never reach for `git commit

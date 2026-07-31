@@ -495,7 +495,7 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 
 整行 header **必须由单点脚本生成**(`<agent_identity_script>`;环境/归属/skills/engine 四维溯源,不能用日期、占位符或手拼代替——尤其别再手写死 "Claude Code(<model>)",脚本按 `ARC_AGENT_ENGINE`/`ARC_AGENT_MODEL` 自动带出真实 engine,Codex 下跑手写死会错误自称 Claude),行尾追加读取/运行范围:
 ```bash
-bash <agent_identity_script> --header "Audit"
+bash <agent_identity_script> --header "Audit" --skill issue-review
 # → "> 🤖 AI Agent Audit @ vm · runner:<name> · skills@a2298a3b"
 ```
 runner 解析优先级、skills hash 语义、前缀谓词纪律见根 CLAUDE.md「Agent Comment 格式」。
