@@ -66,10 +66,39 @@ the human — the API has no delete).
 4. **cadence + model** (header "Cadence"): cadence minutes per repo (default 120 = every 2h under
    an hourly cron) + model (default `claude-sonnet-5`).
 
+**Also ask, when the machine is special (B6):** is this deployment **full-coverage** or a
+**capability-restricted specialist**? "Local only does what only local can do" is the entire
+reason to run local at all — a cloud sandbox is TS-only, it cannot run Xcode or gradle. The seam
+for that is `promptDir` (`fleet/driver.ts:161`), and it is the ONLY seam: `renderPrompt` is a
+whole-file replace (read the prompt file, substitute `{{RUNNER}}`), there is no append/addendum
+hook. Per the plugin CLAUDE.md, a per-machine preference belongs in a local prompt, never in the
+shared `fleet/prompts/*.md`.
+
+The recipe that was measured to work: point `promptDir` at `~/.agentloop-fleet/prompts/` holding a
+**thin wrapper** per skill — a SCOPE GATE at the top, then an instruction to read the upstream
+`<plugin>/fleet/prompts/<skill>.md` verbatim at the bottom, so a plugin upgrade never leaves a
+stale copy running. Both directions were verified on a native-capable Mac: with zero in-scope
+issues, a 62-second no-op round left 12 PRs' comments / `updated_at` / labels **line-for-line
+identical**; with in-scope work it closed two `macos-26` / `native-ios` issues on
+"real Apple-Intelligence-eligible hardware evidence that other fleet machines lacked", and 5
+spot-checked out-of-scope issues were untouched.
+
 Honor any value the user typed in an option's note. **Ask once, then execute — the questions are
 the confirmation.**
 
 ## Step 2 — LOCAL (if "Local" or "Both")
+
+> **★ B1 — a verification run from YOUR OWN shell is a FALSE POSITIVE. Never treat a
+> `--force` round you launched from your terminal as evidence that setup works.**
+>
+> Measured, 2026-07-29 first real deployment: with `CLAUDE_CODE_OAUTH_TOKEN` set to an **empty**
+> value, and again to a **deliberately corrupted** one, `claude -p` still **exited 0 with correct
+> output** in a GUI session — the macOS keychain backstops it, so the env var is not what decides.
+> A cron session cannot read that keychain, so the identical config fails every round with
+> `Not logged in`. The installer's own dry-run/apply output says nothing about this either.
+>
+> **The only valid verification is a real cron tick** (or a context with the keychain stripped).
+> Tell the user that plainly, and don't call setup complete on the strength of a hand-run round.
 
 Run the installer **dry-run first**, show the user the plan, then apply:
 
@@ -96,6 +125,15 @@ bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes c
   ```bash
   claude setup-token          # only if the installer asked for it, then paste into the envFile
   ```
+
+  **Why `setup-token` is not optional on macOS (B2).** Measured on one machine, same day: a cron
+  session running `security find-generic-password -s "Claude Code-credentials"` is **refused
+  (exit 44)**, while the GUI session on that same machine reads it fine. Someone who uses
+  interactive `claude` happily will reasonably assume cron inherits that login — it does not, and
+  the failure surfaces only as a `Not logged in` round an hour later. Say the reason, not just the
+  command. (The other route is a launchd **LaunchAgent**, which runs inside the GUI session and
+  needs no token at all — at the cost of stopping when the user logs out, and the installer does
+  not recognize it.)
 - **Repos running a daemon** (arc: `arc service`) need per-skill isolated ports so issue-sweep and
   pr-sweep don't collide — add `skillEnv` to the generated deployment.json (issue-sweep
   4910/8797, pr-sweep 4920/8807). The installer preserves it once set.
@@ -120,9 +158,26 @@ name = `<repo-name> <skill> hourly` (e.g. `arc issue-sweep hourly`). Render the 
 - Cloud cron **minimum interval is 1 hour** (`*/30` rejected); minutes must stagger (Step 0
   offset). Record each `next_run_at`.
 - **Never delete unknown routines** (the API can't) — list them for the human.
+- **★ B4 — a non-canonical existing routine will be DUPLICATED, not updated.** Canonical matching
+  is by name, so an account that already carries e.g. `issue-sweep hourly` / `pr-sweep hourly`
+  (no repo prefix) does **not** match this skill's `<repo-name> <skill> hourly`, and picking Cloud
+  creates two NEW routines beside them — four overlapping runs on the same repo. Step 0's listing
+  must therefore be read for **same-skill-different-name** routines too, not just exact matches,
+  and any it finds must be surfaced as an explicit warning before you create anything ("rename
+  these to the canonical form, or you will end up with both").
 
 Cloud and local can both cover the same repo safely (advisory lock + deterministic branch +
-stagger), but usually pick one to avoid burning double tokens.
+stagger), but usually pick one — and **be concrete about why (B3)**:
+
+- **The quota is shared with the human's own usage.** Anthropic's support docs state usage limits
+  are *shared across Claude and Claude Code*, all activity counting against the same limits. So an
+  overlapping fleet does not just burn "double fleet tokens"; it eats the same allowance the
+  person is typing against.
+- **What overlap actually looks like** (measured, same day, same repo, local + cloud concurrently):
+  `#2636 concurrently merged by peer runner, verified independently` — both sides ran a full
+  verification pass; `found #2630's bug 2 fix duplicated concurrent PR #2638 so discarded mine` —
+  the local side finished the whole implementation before discovering the duplicate, and threw
+  the code away. The locks prevent corruption, not wasted work.
 
 ## Step 4 — report (one final message, table)
 
@@ -158,3 +213,21 @@ Plus:
   at the marketplace clone the installer detected, whose existence Step 0 verified.
 - **A covered repo must have been through `/agentloop:repo-setup` first** — repo-profile + labels —
   or the sweep skills can't find its toolchain.
+
+## Troubleshooting — two things that look broken and are not
+
+Say both of these in the Step 4 report of a first-time install. Each cost real debugging time on
+the 2026-07-29 deployment, and neither is discoverable without reading source.
+
+- **`skipped-locked` right after install is EXPECTED (B5).** The first rounds clear a backlog and
+  can run far longer than the cron interval: measured **63 and 64 minutes** against a 30-minute
+  interval, so the next two invocations were `skipped-locked` on the spot. That is the
+  per-(repo,skill) lock doing its job — one slow repo delays only itself. Once the backlog is
+  drained the same skill took **7 minutes**. Set the expectation up front, or the first hour reads
+  as a broken install.
+- **The trust warning is noise, not the root cause (B7).** Every round prints
+  `Ignoring N permissions.allow entries … has not been trusted`. Under the fleet's `skip`
+  permission posture `permissions.allow` is moot anyway, while `permissions.deny` **is still
+  enforced** — recorded in `fleet/setup.ts`'s file header and `fleet/driver.ts:169-177`. It was
+  misread as the failure's root cause once already; name it as expected output so the next person
+  doesn't spend the same time on it.

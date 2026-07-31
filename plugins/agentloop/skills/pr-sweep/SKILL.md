@@ -184,11 +184,34 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) || ( -n "$rfr
 > 不追加新 comment(#1812:三个 runner 各 full review 一轮、6 条评论堆叠、没有一条对当前 HEAD
 > 有效的拍板块,就是缺这两条)。
 
+> **★ 判据 2(新 commit)对机械重生成 PR 不成立。** 自动发版工具(release-please 一类)会在每次
+> 上游合入时重写自己的分支,`head` 永远新于 `ai`,于是判据 2 每轮都成立、每轮都 needsReview——
+> 而结论恒定(这类 PR 按惯例人工 merge)。**实盘:一个自动发版 PR 攒了 29 条评论,22 条结论逐字
+> 相同,横跨 26 个 skills 版本**——不是某一版的 bug,是判据选错了维度。所以:
+>
+> **PR 满足「机械重生成」(分支名带自动发版前缀 / 带 `autorelease` 类 label / diff 只触碰版本号
+> · CHANGELOG · lockfile)且已带 `pr-sweep:awaiting-*` 或 `agent:hold` 时,判据 2 不适用**——
+> 只有判据 3(人类新评论)、判据 4(Draft→ready)、或**diff 形状变了**(触碰文件集合超出机械件)
+> 才重新 needsReview。其余轮次 0 动作,连 sha 刷新都不必新发 comment(见 pr-review Step 0.6
+> 「视同 fresh」)。
+
 **否则(已 review、无新 commit、无人类新评论):**
 - `pr-sweep:awaiting-*`(四档任一)→ **本轮 0 动作**,直接跳过。
 - `pr-sweep:blocked-deps` → 跳过 review,只做 Step 5 的廉价 gate 重查;满足闸就合(治本仍是修那个坏 dependent 包)。
 
 **幂等收尾(每个 full-review 完的 PR):** 据结论**刷新** disposition label(终结=合/关、去 label;held=打对应 label),verdict comment 按 [pr-review Step 6](../pr-review/SKILL.md) 的 canonical upsert **原地更新**而非新发(marker `<!-- pr-review-verdict -->` 定位 + PATCH,跨 runner 也能刷同一条;`--edit-last` 只覆盖「上一条恰是自己发的」情形)。**绝不在「无新输入」时重发同一结论。** 缺这些 label 就建,只用这套受控词(`pr-sweep:needs-fix` / `pr-sweep:awaiting-glance` / `pr-sweep:awaiting-direction` / `pr-sweep:awaiting-judgment` / `pr-sweep:awaiting-caution` / `pr-sweep:blocked-deps`),别再造变体、**不再新打已弃用的 `pr-sweep:awaiting-human`**。
+
+> **★ 「canonical upsert」覆盖本 skill 发出的每一条 PR 评论,不只 verdict。** disposition /
+> 复查 / 「新信息」这类 sweep 自己发的说明,同样走 marker 定位 + PATCH 原地更新——**每个 PR 至多
+> 一条 agent 评论载体**。实盘漏洞正在这里:verdict 有 upsert 规则、disposition 没有,于是每轮
+> 追加一条,一个 PR 攒到 29 条里只有 11 条带 upsert marker。**新发 comment 只允许在「本 PR 还
+> 没有任何 agent 评论」时发生。**
+>
+> **★ 发评论前的跨 runner 撞车自检(廉价,替代互斥锁)。** PR 侧不引入 `agent:processing`(见
+> Step 0),所以 N 个 runner 同一轮可能同时判 needsReview。**投递前重取一次评论**,若已存在
+> 同 `gate` 且同 `val` 的 sweep-trace、`sha` 也等于当前 HEAD → 说明别的 runner 刚发过同一结论,
+> **本轮改为 0 动作**(不新发、不重复 upsert)。这挡不住纳秒级同时写,但能挡住绝大多数「几分钟内
+> 三个 runner 各发一条」的实盘形态。
 
 > **只有 Step 1.5 判定 needsReview 的 PR 才进 Step 2 聚类 + Step 3 review。** 其余只走"廉价 gate 重查 + 可合就合"。这把每轮的 agent 起数从「所有 open PR」压到「真正变了的 PR」,routine 长期稳定、不刷屏。
 
@@ -431,6 +454,9 @@ sweep 每轮可顺手核对:新出现的重复簇若仍来自非确定性分支�
 7. **轮次感知:无新输入不重做(定时 routine 必守)。** 已 review 且无新 commit、无人类新评论的 PR
    默认跳过;只对真正变了的 PR 起 agent,只对外部阻塞已解除的 PR 廉价重查并合。`pr-sweep:awaiting-*`(四档)
    / `pr-sweep:blocked-deps` 等 disposition label 承载跨轮状态。**绝不重发同一结论 comment**(见 Step 1.5)。
+   **「新输入」判的是「结论会不会变」,不是「字节变没变」**:机械重生成 PR 的 sha churn 不算新输入
+   (Step 1.5 的机械重生成条款);已升级等人的 PR,增量复审后结论不变就静默刷 sha,不再重述
+   ([pr-review Step 0.6](../pr-review/SKILL.md))。**升级过一次就够了——人没回话之前再升级一次只是噪音。**
 8. **`agent:hold` = 终态冻结,不是处理冻结。** 人给 PR 打 `agent:hold` 表示"没我反馈别合/别关",
    不是"别理它":hold 期间 merge/close/摘 label 绝对禁止(Step 5 合并闸硬拦,即使 🟢 档;Step 4 去重
    不拿它当 twin/keeper),但**人类新评论/新 commit 照常触发 review + 响应**——尤其人类在 hold PR 上
@@ -450,7 +476,12 @@ sweep 每轮可顺手核对:新出现的重复簇若仍来自非确定性分支�
 字段：
 - `ver`：schema 版本，当前 `1`
 - `pr`：对应 PR 编号（数字）
-- `gate`：决策闸门名称，取受控词表：`needsReview` / `disposition`
+- `gate`：决策闸门名称，取受控词表：`needsReview` / `disposition`。
+  **★ 标错 gate 会让去重静默失效**——下一轮查的是 `gate:"verdict"`（[pr-review](../pr-review/SKILL.md) 文末），
+  一条 verdict comment 若标成 `needsReview`（实盘见过），那次 verdict 就查不到，
+  下一轮当作「没 verdict」走首轮全量流程、再发一条。**判据只有一句：这条 comment 承载的是不是
+  「本 PR 该怎么处置」的结论**——是 → `gate:"verdict"`（由 pr-review 发）；只是 sweep 自己的
+  分流/打标记录 → `gate:"disposition"`。拿不准就按 `verdict` 标（宁可多去重，不可漏去重）。
 - `sha`：本判定针对的 PR HEAD（40 位 commit oid）——跨 runner 新鲜度判定的机器键（Step 1.5 sha 优先规则；旧 trace 无此字段视为 stale）
 - `val`：决策值，取对应受控词表：
   - `needsReview` gate：`true` / `false`

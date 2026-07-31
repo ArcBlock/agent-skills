@@ -8,6 +8,7 @@ import {
   cadenceDue,
   checkoutBaseStatus,
   checkoutDir,
+  classifyCause,
   codexPermissionFlags,
   type DeploymentConfig,
   defaultLogDir,
@@ -21,6 +22,7 @@ import {
   loadEnvFile,
   logPaths,
   newRunId,
+  outcomeOf,
   permissionFlags,
   pidsWithCwdUnder,
   planRuns,
@@ -1052,6 +1054,65 @@ describe("observability: what a round DID, not just that it ran", () => {
         },
       ),
     ).toBe(false);
+  });
+});
+
+describe("classifyCause / outcomeOf (arc#2641 — auth-failed vs upstream-overloaded vs an ordinary agent failure)", () => {
+  // Before this fix, `detail` was ALWAYS `checkout <action>; <engine> exit <code>` regardless
+  // of why the agent exited non-zero — checkout runs first and succeeds even when the agent
+  // itself can't log in. So the old prefix-based outcomeOf classified every agent-side failure
+  // as "checkout-failed", collapsing two very different situations (a config problem that will
+  // fail every cron tick until fixed, vs a transient provider 5xx) into one indistinguishable
+  // string in fleet.jsonl.
+
+  it("classifies a real 'Not logged in' failure as auth-failed", () => {
+    expect(classifyCause("Invalid API key · Not logged in · Please run /login")).toBe(
+      "auth-failed",
+    );
+  });
+
+  it("classifies an upstream 529/500-class error as upstream-overloaded", () => {
+    expect(classifyCause('API Error: 529 {"type":"overloaded_error"}')).toBe("upstream-overloaded");
+    expect(classifyCause("500 Internal Server Error — Overloaded, please retry")).toBe(
+      "upstream-overloaded",
+    );
+  });
+
+  it("classifies a real checkout failure as checkout-failed — not regressed by cause", () => {
+    // No auth/overload pattern in the output → classifyCause finds nothing, and outcomeOf
+    // falls back to its original prefix-based classification exactly as before.
+    expect(
+      classifyCause("fatal: could not read Username for 'https://github.com'"),
+    ).toBeUndefined();
+    expect(outcomeOf("checkout clone: fatal: could not read Username", false)).toBe(
+      "checkout-failed",
+    );
+  });
+
+  it("an ordinary agent failure with neither pattern still falls back to 'failed'", () => {
+    expect(
+      classifyCause("Error: something the agent itself did wrong, unrelated to auth"),
+    ).toBeUndefined();
+    expect(outcomeOf("checkout reset; claude exit 1", false, undefined)).toBe("checkout-failed"); // detail alone still starts with "checkout" — see next test for why cause matters
+  });
+
+  it("cause takes priority over the detail prefix — this is the actual arc#2641 bug", () => {
+    // Every run's detail starts with "checkout ..." (checkout runs first, always) — so the
+    // prefix check alone cannot ever produce anything but checkout-failed/setup-failed/failed
+    // for a non-zero exit. `cause`, extracted from the run's own captured output, is what
+    // makes auth-failed and upstream-overloaded distinguishable from a plain agent failure.
+    const detail = "checkout reset; claude exit 1"; // identical detail string in all 3 cases
+    expect(outcomeOf(detail, false, "auth-failed")).toBe("auth-failed");
+    expect(outcomeOf(detail, false, "upstream-overloaded")).toBe("upstream-overloaded");
+    expect(outcomeOf(detail, false, undefined)).toBe("checkout-failed"); // no cause → old behavior
+  });
+
+  it("ok:true always wins, regardless of any cause somehow being set", () => {
+    expect(outcomeOf("checkout reset; claude exit 0", true, "auth-failed")).toBe("ok");
+  });
+
+  it("a real setup failure is still setup-failed when no cause is found", () => {
+    expect(outcomeOf("setup failed: npm ERR! 404 Not Found", false)).toBe("setup-failed");
   });
 });
 

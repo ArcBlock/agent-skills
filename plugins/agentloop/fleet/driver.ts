@@ -933,6 +933,8 @@ export interface RunRecord {
     | "failed"
     | "checkout-failed"
     | "setup-failed"
+    | "auth-failed"
+    | "upstream-overloaded"
     | "skipped-cadence"
     | "skipped-locked";
   exitCode: number | null;
@@ -1185,6 +1187,48 @@ export function runEnv(
   return merged;
 }
 
+/**
+ * Classify a run's captured output into a specific failure CAUSE, when one of two patterns
+ * that used to be indistinguishable (arc#2641) is present:
+ *
+ *  - `auth-failed`: the agent CLI could not authenticate (`Not logged in` / `Please run
+ *    /login`). This is a CONFIGURATION error — envFile/keychain/token — not a transient
+ *    hiccup, and retrying the same envFile every cadence tick just repeats the same failure.
+ *  - `upstream-overloaded`: the agent CLI's own request to the model provider was rejected
+ *    with a 5xx / "Overloaded" — transient, unrelated to this deployment's config.
+ *
+ * Deliberately only these two (per the issue: "只加这两条，别过度分类") — everything else
+ * still falls through to the existing prefix-based `outcomeOf` classification.
+ */
+export function classifyCause(output: string): "auth-failed" | "upstream-overloaded" | undefined {
+  if (/Not logged in|Please run \/login/.test(output)) return "auth-failed";
+  if (/API Error: 5\d\d|Overloaded/.test(output)) return "upstream-overloaded";
+  return undefined;
+}
+
+/**
+ * What actually went wrong, for the fleet.jsonl `outcome` field.
+ *
+ * `detail` alone cannot tell `auth-failed` and `upstream-overloaded` apart from an ordinary
+ * agent failure (arc#2641) — `detail` is always `checkout <action>; <engine> exit <code>`
+ * regardless of WHY the agent exited non-zero, so the old prefix check on `detail` classified
+ * every agent-side failure as `checkout-failed`. `cause`, when the caller was able to extract
+ * one from the run's captured output (see `classifyCause`), takes priority over that
+ * prefix-based fallback — it is a strictly more specific signal than "detail starts with the
+ * word checkout" (which is true of EVERY run, success or failure, since checkout runs first).
+ */
+export function outcomeOf(
+  detail: string,
+  ok: boolean,
+  cause?: "auth-failed" | "upstream-overloaded",
+): RunRecord["outcome"] {
+  if (ok) return "ok";
+  if (cause) return cause;
+  if (detail.startsWith("checkout")) return "checkout-failed";
+  if (detail.startsWith("setup")) return "setup-failed";
+  return "failed";
+}
+
 /** Live-run one planned invocation: fresh checkout, then the skill headless.
  *  `mirror` tees the skill's output to stdout too (serial mode); parallel mode passes false
  *  so N repos' outputs don't interleave into unreadable garbage — each still gets its own
@@ -1201,6 +1245,7 @@ export async function executeRun(
   exitCode: number | null;
   ms: number;
   residualProcs?: number;
+  cause?: "auth-failed" | "upstream-overloaded";
 }> {
   const started = Date.now();
   const { runLog } = logPaths(
@@ -1222,11 +1267,21 @@ export async function executeRun(
     exitCode: number | null;
     residualProcs?: number;
     produced?: RunProduct;
+    cause?: "auth-failed" | "upstream-overloaded";
   }) => {
     const ms = Date.now() - started;
     const res = r.residualProcs ? ` · ⚠ ${r.residualProcs} residual proc(s)` : "";
     const prod = r.produced?.summary ? ` · ${r.produced.summary}` : "";
     write(`---- ${r.ok ? "OK" : "FAIL"} · ${r.detail}${res}${prod} · ${ms}ms ----\n`);
+    // auth-failed is a CONFIG error (envFile/keychain/token), not a transient blip — the
+    // fleet.jsonl outcome already carries it, but this line is for whoever is tailing the
+    // per-(repo,skill) log or cron stdout live and would otherwise see just another failed
+    // round and wait for the next cron tick to "fix itself" (it won't, arc#2641 B1).
+    if (r.cause === "auth-failed") {
+      const hint = cfg.envFile ? ` — check ${cfg.envFile}` : " — check this deployment's envFile";
+      write(`⚠ AUTH FAILED${hint}\n`);
+      console.error(`⚠ [${run.slug} · ${run.skill}] AUTH FAILED${hint}`);
+    }
     closeSync(fd);
     return { ...r, logPath: runLog, ms, runId };
   };
@@ -1325,11 +1380,23 @@ export async function executeRun(
       detached: true,
     },
   );
+  // Bounded rolling tail of the agent's own stdout+stderr, decoded incrementally (TextDecoder
+  // with `stream: true` so a multi-byte char split across chunks decodes correctly) — enough
+  // to classifyCause() the two known patterns (arc#2641) without holding an unattended, hours-
+  // long run's entire output in memory. Shared across both tee() calls (stdout/stderr run
+  // concurrently); a match landing exactly on the two streams' interleave boundary is an
+  // acceptable miss for a best-effort classification, not a correctness requirement.
+  const OUTPUT_TAIL_MAX = 4000;
+  const outputDecoder = new TextDecoder();
+  let outputTail = "";
   const tee = async (stream: ReadableStream<Uint8Array> | undefined) => {
     if (!stream) return;
     for await (const chunk of stream) {
       if (mirror) process.stdout.write(chunk); // live (serial mode); off in parallel to avoid interleave
       writeSync(fd, chunk); // the isolated per-run log — always the clean source
+      outputTail = (outputTail + outputDecoder.decode(chunk, { stream: true })).slice(
+        -OUTPUT_TAIL_MAX,
+      );
     }
   };
   let exitCode: number | null = null;
@@ -1354,6 +1421,7 @@ export async function executeRun(
   );
   return finish({
     ok: exitCode === 0,
+    cause: exitCode === 0 ? undefined : classifyCause(outputTail),
     residualProcs: residual.length,
     produced,
     detail: `checkout ${co.action}; ${run.engine.kind}${run.engine.model ? `/${run.engine.model}` : ""} exit ${exitCode}`,
@@ -1505,15 +1573,6 @@ if (import.meta.main) {
 
   console.log(`# logs → ${logDir}/  (per-(repo,skill) .log + fleet.jsonl)`);
 
-  const outcomeOf = (detail: string, ok: boolean): RunRecord["outcome"] =>
-    ok
-      ? "ok"
-      : detail.startsWith("checkout")
-        ? "checkout-failed"
-        : detail.startsWith("setup")
-          ? "setup-failed"
-          : "failed";
-
   // Per-repo run locks live here; overlapping invocations coexist by skipping a repo whose
   // lock a LIVE invocation still holds (see runlock.ts). The cron no longer serializes whole
   // invocations, so shared-file writes (state stamps + fleet.jsonl) are guarded per-write.
@@ -1563,7 +1622,7 @@ if (import.meta.main) {
           runner: cfg.runner,
           slug: p.slug,
           skill: p.skillLocal,
-          outcome: outcomeOf(res.detail, res.ok),
+          outcome: outcomeOf(res.detail, res.ok, res.cause),
           exitCode: res.exitCode,
           ms: res.ms,
           detail: res.detail,
