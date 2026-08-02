@@ -1,0 +1,18 @@
+{
+  "name": "workspace-onboarding",
+  "version": "0.1.0",
+  "description": "Discover project rules and route voice or text tasks safely inside compatible web workspaces.",
+  "author": {
+    "name": "ArcBlock Team"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workspace Onboarding",
+    "shortDescription": "Discover rules and route work safely.",
+    "longDescription": "Maps a compatible web workspace, separates authoritative facts from open questions, and routes the task to the project's own skills.",
+    "developerName": "ArcBlock Team",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use $web-workspace-onboarding to map this workspace and route my task safely."
+  }
+}

@@ -158,6 +158,30 @@
         "engineering",
         "ci-gate"
       ]
+    },
+    {
+      "name": "workspace-onboarding",
+      "description": "Voice-friendly workspace discovery and task routing for compatible web and content projects.",
+      "version": "0.1.0",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/workspace-onboarding",
+      "category": "methodology",
+      "tags": [
+        "workspace",
+        "onboarding",
+        "voice",
+        "web",
+        "content"
+      ],
+      "keywords": [
+        "workspace-onboarding",
+        "voice-agent",
+        "context",
+        "skill-routing",
+        "content-workflow"
+      ]
     }
   ]
 }

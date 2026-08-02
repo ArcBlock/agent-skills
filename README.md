@@ -46,6 +46,7 @@ claude
 | **blocklet** | Complete Blocklet development workflow: environment setup, branch management, PR submission, and release |
 | **thinking-framework** | Technical thinking framework and proposal review methodology (AFS/AINE) |
 | **plugin-development** | Scaffold, validate, and distribute Claude Code plugins |
+| **workspace-onboarding** | Voice-friendly entry point for compatible web/content workspaces. Discovers project rules and routes work to the project's native skills. |
 
 ### Content Creation
 

@@ -1,0 +1,17 @@
+{
+  "name": "workspace-onboarding",
+  "version": "0.1.0",
+  "description": "Discover project rules, authoritative context, and local task skills before a voice or text agent works in a compatible web workspace.",
+  "author": {
+    "name": "ArcBlock Team"
+  },
+  "license": "MIT",
+  "keywords": [
+    "workspace",
+    "onboarding",
+    "voice",
+    "web",
+    "content",
+    "routing"
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Workspace Onboarding"
+  short_description: "Orient an agent safely in a web workspace."
+  default_prompt: "Use $web-workspace-onboarding to map this workspace and route my task safely."
