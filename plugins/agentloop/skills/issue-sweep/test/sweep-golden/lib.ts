@@ -218,6 +218,58 @@ export function decodeMarkerEntities(body: string): string {
 }
 
 /**
+ * Matches a "结论性批量处置清单" — an audit/rollup body or comment embedding a
+ * suggested-close/merge/delete table ("建议关闭"/"建议合并"/"建议删除"). Per SKILL.md's
+ * Direction-B rule (arc#2914, archetype #1863): such a list is EVIDENCE, never an executable
+ * instruction, on its own — see `suggestionListIsActionable` below.
+ */
+const SUGGESTION_LIST_PATTERN = /建议关闭|建议合并|建议删除|suggested[- ]close|suggested[- ]merge/i;
+
+/** True when `text` contains a conclusion-style batch-disposition list. */
+export function containsSuggestionList(text: string): boolean {
+  return SUGGESTION_LIST_PATTERN.test(text);
+}
+
+/**
+ * A human comment that EXPLICITLY confirms a batch disposition — "确认关闭"/"同意批量关
+ * 闭"/"已核实可以关闭" etc. A generic human reply ("谢谢"/"收到") does not count: arc#1863's
+ * own incident had ZERO such comments when the wrongful batch-close happened, and the list's
+ * own caveat sentence ("等人扫一眼表格后批量关即可") is not itself a confirmation — it is the
+ * thing requiring confirmation.
+ */
+const CONFIRM_PATTERN =
+  /确认.{0,10}(关闭|合并|执行|批量)|同意.{0,10}(关闭|合并|批量|清单)|已核[实验].{0,10}(可以)?(关闭|合并)|可以(批量)?(关闭|合并)/;
+
+/**
+ * An INDEPENDENT human confirmation: a human comment (never the list-bearing body/comment
+ * itself — `containsSuggestionList` excludes it) that explicitly confirms the disposition.
+ * Independence is enforced two ways: the comment must not itself be agent-authored
+ * (`isAiAgentComment`), and it must not simply be re-quoting the suggestion list
+ * (`containsSuggestionList`) — a list restating itself is not a second, independent voice.
+ */
+export function hasIndependentConfirmation(issue: Issue): boolean {
+  return issue.comments.some(
+    (c) =>
+      !isAiAgentComment(c.body) && !containsSuggestionList(c.body) && CONFIRM_PATTERN.test(c.body),
+  );
+}
+
+/**
+ * Core Direction-B gate (SKILL.md Step 2 "conclusion-style batch-disposition list" rule): may
+ * sweep treat a suggestion-list embedded in this issue's body/comments as an executable batch
+ * instruction? Only true when BOTH a suggestion list is present AND an independent human
+ * confirmation comment exists. Absent confirmation, sweep may read/cite the list as evidence
+ * but must NOT act on any item in it — this is the fix for arc#2914 (archetype #1863: 12
+ * issues were closed by consuming the list directly, bypassing the human-confirmation gate the
+ * audit issue itself declared).
+ */
+export function suggestionListIsActionable(issue: Issue): boolean {
+  const text = [issue.body ?? "", ...issue.comments.map((c) => c.body)].join("\n");
+  if (!containsSuggestionList(text)) return false;
+  return hasIndependentConfirmation(issue);
+}
+
+/**
  * Extract sweep-trace markers from comment bodies.
  * Format: <!-- sweep-trace: {...} --> (also matches the HTML-escaped form).
  */

@@ -15,6 +15,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export interface CheckResult {
   /** stable id, e.g. "build" / "types" (semantic) */
@@ -24,16 +27,94 @@ export interface CheckResult {
   pass: boolean;
   /** hard gate? false = warn-only */
   blocking: boolean;
-  /** check was intentionally not run (e.g. gated off by `when`) */
-  skipped?: boolean;
-  /** measured by the engine, never hand-filled — this is the determinism gate */
-  durationMs: number;
-  /** numeric/string stats parsed from the tool output (errors, passed, …) */
-  stats: Record<string, number | string>;
+  /**
+   * check was intentionally not run (e.g. gated off by `when`). `true`, or the
+   * reason string — a reason renders in the report row so a SKIP is never a
+   * silent hole (issue #2734).
+   */
+  skipped?: boolean | string;
+  /**
+   * measured by the engine, never hand-filled — this is the determinism gate.
+   * Optional because a skipped check has no duration to measure; renderers MUST
+   * degrade rather than assume it (see `dur`).
+   */
+  durationMs?: number;
+  /**
+   * numeric/string stats parsed from the tool output (errors, passed, …).
+   * Optional for the same reason as `durationMs` — a skip parses no output.
+   */
+  stats?: Record<string, number | string>;
   /** failure output tail, detailed enough for an agent to fix directly */
   rawTail?: string;
   /** complete tool output — always captured, collapsed in report for full log access */
   rawFull?: string;
+}
+
+/** Monotonic within one process — enough to keep concurrent `run()`s apart. */
+let pgidFileSeq = 0;
+
+function newPgidFile(): string {
+  pgidFileSeq += 1;
+  return join(tmpdir(), `agentloop-pgid-${process.pid}-${pgidFileSeq}`);
+}
+
+/**
+ * Wrap `cmd` so it runs as a bash JOB in its own process group, and publish that
+ * group's id to `pgidFile` for `reapGroup`.
+ *
+ * Why not `spawnSync({ detached: true })` — the obvious answer? Because it is not
+ * honored everywhere: under bun (the runtime these scripts declare in their
+ * shebang) the child keeps the CALLER's pgid. `kill(-childPid)` then either hits
+ * ESRCH or, worse, signals whatever unrelated group happens to own that id — and
+ * the caller's own shell is in the group we would have aimed at. Verified by
+ * reading `ps -o pgid` of the spawned child.
+ *
+ * `set -m` (job control) makes bash give each background job a fresh process
+ * group whose pgid == the job's pid, which bash hands us as `$!`. Every
+ * descendant inherits it unless it calls setsid itself, so one `kill -- -pgid`
+ * takes down the tree. `wait` propagates the job's exit status, so the wrapper is
+ * transparent to callers.
+ *
+ * Monitor mode goes back OFF once the job exists (the group is already assigned
+ * and does not move): while it is on, bash writes `[1]+ Done  { … }` job-status
+ * lines into the captured output, and every check here parses that output.
+ */
+function wrapInOwnGroup(cmd: string, pgidFile: string): string {
+  return [
+    "set -m",
+    "{",
+    cmd,
+    "} &",
+    "__agentloop_job=$!",
+    "set +m",
+    `printf %s "$__agentloop_job" > ${JSON.stringify(pgidFile)}`,
+    'wait "$__agentloop_job"',
+  ].join("\n");
+}
+
+/**
+ * Kill the process group `wrapInOwnGroup` created, then drop the pgid file.
+ * Only fires when the run actually timed out: on a normal exit the job is already
+ * gone, and signalling a recycled pid would be the very bug this guards against.
+ */
+function reapGroup(pgidFile: string, timedOut: boolean): void {
+  try {
+    if (timedOut) {
+      const pgid = Number.parseInt(readFileSync(pgidFile, "utf8").trim(), 10);
+      // > 1 rejects both a failed parse (NaN) and pgid 1/0, which would mean
+      // "every process I am allowed to signal".
+      if (Number.isFinite(pgid) && pgid > 1) {
+        try {
+          process.kill(-pgid, "SIGKILL");
+        } catch {
+          /* ESRCH — the group already drained, which is the good case */
+        }
+      }
+    }
+  } catch {
+    /* no pgid file: bash died before writing it — nothing identified to reap */
+  }
+  rmSync(pgidFile, { force: true });
 }
 
 /**
@@ -46,6 +127,12 @@ export interface CheckResult {
  * check-native.ts) with `timedOut: true`, instead of hanging the caller
  * forever (issue #1922: an affected-test run against a slow package could
  * block pre-pr.ts indefinitely with no report ever produced).
+ *
+ * spawnSync's own timeout kill only reaches the DIRECT child (the `bash -c`), so
+ * every grandchild survives and reparents to init — a timed-out `turbo run test`
+ * left the whole turbo + test-runner tree (and any daemons those tests spawned)
+ * running forever, once per timed-out sweep round. `wrapInOwnGroup`/`reapGroup`
+ * close that leak on the timeout path.
  */
 export function run(
   cmd: string,
@@ -54,7 +141,8 @@ export function run(
   timeoutMs?: number,
 ): { code: number; out: string; ms: number; timedOut?: boolean } {
   const start = Date.now();
-  const r = spawnSync("bash", ["-c", cmd], {
+  const pgidFile = timeoutMs === undefined ? undefined : newPgidFile();
+  const r = spawnSync("bash", ["-c", pgidFile ? wrapInOwnGroup(cmd, pgidFile) : cmd], {
     encoding: "utf8",
     env: { ...process.env, ...env },
     maxBuffer: 128 * 1024 * 1024,
@@ -64,6 +152,7 @@ export function run(
   const ms = Date.now() - start;
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
   const timedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
+  if (pgidFile) reapGroup(pgidFile, timedOut);
   return {
     code: timedOut ? 124 : typeof r.status === "number" ? r.status : 1,
     out,
@@ -105,9 +194,19 @@ export function head(): string {
   return run("git rev-parse HEAD").out.trim();
 }
 
+/**
+ * Was the check skipped? `skipped` carries a reason string, so plain truthiness
+ * is wrong: an empty reason (`skipped: ""` — a check that computed its reason
+ * and came up blank) would silently render as PASS. Anything other than
+ * absent/`false` means skipped.
+ */
+function isSkipped(r: CheckResult): boolean {
+  return r.skipped !== undefined && r.skipped !== false;
+}
+
 /** all blocking, non-skipped checks passed */
 export function passed(results: CheckResult[]): boolean {
-  return results.every((r) => r.skipped || r.pass || !r.blocking);
+  return results.every((r) => isSkipped(r) || r.pass || !r.blocking);
 }
 
 export function exitCode(results: CheckResult[]): number {
@@ -120,17 +219,47 @@ export function emit(result: CheckResult): void {
 }
 
 function icon(r: CheckResult): string {
-  if (r.skipped) return "⊘ SKIP";
+  if (isSkipped(r)) return "⊘ SKIP";
   if (r.pass) return "✅ PASS";
   return r.blocking ? "❌ FAIL" : "⚠️ WARN";
 }
 
-function statsStr(r: CheckResult): string {
-  const e = Object.entries(r.stats);
-  return e.length ? e.map(([k, v]) => `${k}=${v}`).join(" ") : "—";
+/** Longest skip reason rendered in a table cell — the report has a comment budget. */
+const REASON_CAP = 200;
+
+/**
+ * Make a value safe for a markdown table cell: `|` would open a phantom column
+ * and a newline would end the row, so both are neutralized. Reason text comes
+ * from check authors (shell commands, URLs), so it is not trusted to be inert.
+ */
+function cell(s: string): string {
+  const flat = s.replace(/\s+/g, " ").replaceAll("|", "\\|").trim();
+  return flat.length > REASON_CAP ? `${flat.slice(0, REASON_CAP)}…` : flat;
 }
 
-const dur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+/**
+ * Stats cell. Total by construction: a check that carries no `stats` (every
+ * skip path) must not be able to take down the whole report — this kernel is
+ * the shared collection point for EVERY check, including ones written in a
+ * consuming repo (issue #2734).
+ *
+ * A skip with a reason string shows the reason here, so `⊘ SKIP` always says
+ * why rather than leaving a bare `—`.
+ */
+function statsStr(r: CheckResult): string {
+  const e = Object.entries(r.stats ?? {});
+  if (e.length) return cell(e.map(([k, v]) => `${k}=${v}`).join(" "));
+  const reason = typeof r.skipped === "string" ? r.skipped : isSkipped(r) ? r.rawTail : undefined;
+  return cell(reason ?? "") || "—";
+}
+
+/**
+ * Duration cell. Non-finite input (absent, null, NaN) reads as 0 rather than
+ * printing `NaNs` into the report — a garbled number in the one artifact that
+ * is supposed to be measured, not hand-filled, is worse than a zero.
+ */
+const dur = (ms: number | undefined): string =>
+  `${(Number.isFinite(ms) ? (ms as number) / 1000 : 0).toFixed(1)}s`;
 
 /** Render a deterministic markdown report — suitable for a PR/issue comment. */
 export function renderReport(
@@ -138,12 +267,12 @@ export function renderReport(
   opts: { scenario: string; base?: string; sha?: string; identity?: string },
 ): string {
   const ok = passed(results);
-  const total = results.reduce((a, r) => a + r.durationMs, 0);
+  const total = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
   const rows = results
     .map((r) => `| ${r.title} | ${icon(r)} | ${statsStr(r)} | ${dur(r.durationMs)} |`)
     .join("\n");
 
-  const failures = results.filter((r) => !r.pass && !r.skipped && r.rawTail);
+  const failures = results.filter((r) => !r.pass && !isSkipped(r) && r.rawTail);
   const failBlock = failures.length
     ? `\n\n### Failures\n${failures
         .map(
@@ -154,14 +283,14 @@ export function renderReport(
     : "";
 
   // Notes: passing checks that carry a rawTail warning (cache hits, zero tests)
-  const notes = results.filter((r) => r.pass && !r.skipped && r.rawTail);
+  const notes = results.filter((r) => r.pass && !isSkipped(r) && r.rawTail);
   const notesBlock = notes.length
     ? `\n\n### Notes\n${notes.map((r) => `\n- **${r.title}**: ${r.rawTail}`).join("")}`
     : "";
 
   // Full logs — collapsed, capped so the report stays under GitHub's 65536-char
   // comment limit. Keep the TAIL of each log (where errors land); note truncation.
-  const withLogs = results.filter((r) => !r.skipped && r.rawFull);
+  const withLogs = results.filter((r) => !isSkipped(r) && r.rawFull);
   const LOG_BUDGET = 45000;
   const per = withLogs.length ? Math.max(2000, Math.floor(LOG_BUDGET / withLogs.length)) : 0;
   const clip = (s: string): string =>
@@ -205,10 +334,13 @@ ${rows}
  * `postComment` retries once with this trimmed body on that specific error so
  * a large-but-legitimate report still lands instead of failing to post at all.
  */
-export function trimFullLogsSection(report: string): string {
+export function trimFullLogsSection(report: string, sha?: string): string {
   const start = report.indexOf("\n\n### Full Logs\n");
   if (start === -1) return report;
   const subStart = report.indexOf("\n\n<sub>Generated by", start);
   const rest = subStart === -1 ? "" : report.slice(subStart);
-  return `${report.slice(0, start)}\n\n### Full Logs\n\nOmitted — the full report exceeded this environment's PR-comment size gate (issue #1922). Full output is in the local \`.verify/<sha>.md\` cache from the run that generated this report.${rest}`;
+  // Name the actual file when the caller knows the sha — this pointer is the only
+  // route left to the dropped output, so it should not make the reader guess.
+  const cacheRef = `\`.verify/${sha ?? "<sha>"}.md\``;
+  return `${report.slice(0, start)}\n\n### Full Logs\n\nOmitted — the full report exceeded this environment's PR-comment size gate (issue #1922). Full output is in the ${cacheRef} cache on the machine that generated this report.${rest}`;
 }

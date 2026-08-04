@@ -196,7 +196,7 @@ export function postComment(
 ): PostCommentResult {
   const first = postOnce(pr, stickyBody(report, sha, result, markerPrefix), runner, markerPrefix);
   if (first.ok || !isCommentFilterBudgetError(first.out)) return first;
-  const trimmedReport = trimFullLogsSection(report);
+  const trimmedReport = trimFullLogsSection(report, sha);
   if (trimmedReport === report) return first; // nothing to trim — retrying repeats the same body
   return postOnce(pr, stickyBody(trimmedReport, sha, result, markerPrefix), runner, markerPrefix);
 }

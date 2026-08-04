@@ -15,7 +15,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type Comment,
+  containsSuggestionList,
   extractSweepTraces,
+  hasIndependentConfirmation,
   type Issue,
   isAiAgentComment,
   isNonTerminalAiComment,
@@ -23,6 +25,7 @@ import {
   isTestSweepFinding,
   labelStance,
   shouldProcess,
+  suggestionListIsActionable,
 } from "./lib.ts";
 
 // ---------------------------------------------------------------------------
@@ -500,6 +503,104 @@ describe("isTestSweepFinding", () => {
   it("false when neither label is present", () => {
     expect(isTestSweepFinding({ number: 1, labels: ["bug", "P2"], comments: [] })).toBe(false);
     expect(isTestSweepFinding({ number: 1, comments: [] })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// suggestionListIsActionable (arc#2914 Direction B: a "建议关闭"-style batch-disposition
+// list is evidence, never an instruction, absent an independent human confirmation)
+// ---------------------------------------------------------------------------
+describe("containsSuggestionList / hasIndependentConfirmation / suggestionListIsActionable (arc#2914)", async () => {
+  const fixtures = await loadFixtures();
+
+  it("detects a 建议关闭 table in a body", () => {
+    expect(
+      containsSuggestionList("## 建议关闭\n\n| Issue | 证据 |\n|---|---|\n| #390 | ... |"),
+    ).toBe(true);
+  });
+
+  it("detects English suggested-close/suggested-merge aliases", () => {
+    expect(containsSuggestionList("## Suggested-close list\n- #390")).toBe(true);
+    expect(containsSuggestionList("## suggested merge candidates")).toBe(true);
+  });
+
+  it("plain audit text with no batch-disposition table does not match", () => {
+    expect(containsSuggestionList("This issue looks stale, maybe someone should look at it.")).toBe(
+      false,
+    );
+  });
+
+  it("hasIndependentConfirmation is false with zero comments (the #1863 pre-incident state)", () => {
+    const issue: Issue = {
+      number: 1863,
+      comments: [],
+      body: "## 建议关闭\n\n| Issue |\n|---|\n| #390 |\n\n『建议关闭』一栏本次没有代关,等人扫一眼表格后批量关即可。",
+    };
+    expect(hasIndependentConfirmation(issue)).toBe(false);
+    expect(suggestionListIsActionable(issue)).toBe(false);
+  });
+
+  it("a generic human reply ('谢谢'/'收到') is NOT an independent confirmation", () => {
+    const issue: Issue = {
+      number: 1863,
+      comments: [{ body: "谢谢,辛苦了。" }],
+      body: "## 建议关闭\n\n| Issue |\n|---|\n| #390 |",
+    };
+    expect(hasIndependentConfirmation(issue)).toBe(false);
+    expect(suggestionListIsActionable(issue)).toBe(false);
+  });
+
+  it("an AI-authored 'confirmation' comment does NOT count (must be human)", () => {
+    const issue: Issue = {
+      number: 1863,
+      comments: [{ body: `> 🤖 AI Agent — issue-sweep\n同意批量关闭,已核实无残留依赖。${TRACE}` }],
+      body: "## 建议关闭\n\n| Issue |\n|---|\n| #390 |",
+    };
+    expect(hasIndependentConfirmation(issue)).toBe(false);
+    expect(suggestionListIsActionable(issue)).toBe(false);
+  });
+
+  it("a real independent human confirmation comment makes the list actionable", () => {
+    const issue: Issue = {
+      number: 1863,
+      comments: [{ body: "逐条重查了实时状态,确认可以批量关闭这份清单。" }],
+      body: "## 建议关闭\n\n| Issue |\n|---|\n| #390 |",
+    };
+    expect(hasIndependentConfirmation(issue)).toBe(true);
+    expect(suggestionListIsActionable(issue)).toBe(true);
+  });
+
+  it("no suggestion list present → actionable is trivially false regardless of comments", () => {
+    const issue: Issue = {
+      number: 1,
+      comments: [{ body: "确认可以关闭。" }],
+      body: "Please fix the flaky login test.",
+    };
+    expect(suggestionListIsActionable(issue)).toBe(false);
+  });
+
+  it("the #1863 archetype fixture is NOT actionable (no independent confirmation exists)", () => {
+    const f = fixtures.find(({ name }) => name.startsWith("1863-"));
+    expect(f, "1863 fixture not found").toBeDefined();
+    const issue = fixtureToIssue(f!.fixture);
+    expect(containsSuggestionList(issue.body ?? "")).toBe(true);
+    expect(suggestionListIsActionable(issue)).toBe(false);
+    // The Direction-B rule still lets Step 2 keep the audit issue itself as a normal candidate —
+    // the fix is about not treating the embedded list as an instruction, not about freezing the
+    // audit issue.
+    expect(shouldProcess(issue)).toBe(f!.fixture.expected.step2_keep);
+  });
+
+  it("the #1863 fixture's forbidden_actions cover every named issue's close command", () => {
+    const f = fixtures.find(({ name }) => name.startsWith("1863-"));
+    expect(f, "1863 fixture not found").toBeDefined();
+    const forbidden = f!.fixture.forbidden_actions;
+    for (const n of [390, 1204, 1207, 1252, 1359, 1446, 1458, 1461, 1688, 1789, 1790, 1833]) {
+      expect(
+        forbidden.some((a) => a.includes(`gh issue close ${n}`)),
+        `forbidden_actions must forbid closing #${n}`,
+      ).toBe(true);
+    }
   });
 });
 

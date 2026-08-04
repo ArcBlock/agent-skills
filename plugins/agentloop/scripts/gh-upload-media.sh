@@ -38,6 +38,10 @@
 # Environment variables:
 #   ASSETS_REPO      asset repo slug,               default: ArcBlock/loop-agent-assets (shared)
 #   ASSETS_REPO_DIR  local clone for channel B,     default: probed (git-source mounts)
+#                    MUST be clean (no uncommitted changes, tracked or untracked) — channel B
+#                    checks out/resets it onto origin/main and fails closed (exit 1, no writes)
+#                    instead if it's dirty (#3011). Point it at a clone dedicated to asset
+#                    uploads, not an arbitrary working tree.
 #   SOURCE_REPO      repo the asset belongs to,     default: auto-detected from git remote origin
 #   ASSET_CONTEXT    pr<N> | ts-<TS> | issue-<N>,   default: misc
 #   SOURCE_URL       backlink for the index row,    default derived from ASSET_CONTEXT
@@ -155,6 +159,17 @@ channel_gh() {
 channel_git_push() {
   local root="$1" media_dest="${1}/${ASSET_PATH}" idx_dest="${1}/${INDEX_PATH}"
   ( cd "$root"
+    # #3011: this dir is caller-supplied (ASSETS_REPO_DIR), not guaranteed to be an
+    # agent-owned scratch clone — `git reset --hard` here has previously been about to
+    # discard someone else's in-flight work (measured: a real /private/tmp clone with
+    # 18,058 tracked deletions + 4 untracked files). Fail closed on a dirty tree instead
+    # of resetting over it; only a clean clone gets checked out/reset.
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+      echo >&2 "error: ASSETS_REPO_DIR (${root}) has uncommitted changes — refusing to 'git checkout'/'git reset --hard' over them."
+      echo >&2 "  ASSETS_REPO_DIR must be a clean clone dedicated to asset uploads."
+      echo >&2 "  Point it at a fresh clone, or commit/clean the existing one, then retry."
+      exit 1
+    fi
     git fetch origin main >&2 2>&1 || true
     git checkout main >&2 2>&1 || git checkout -B main origin/main >&2 2>&1 || true
     git reset --hard origin/main >&2 2>&1 || true
@@ -177,7 +192,17 @@ channel_git_push() {
     done )
 }
 
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+# `gh auth status` only validates token *shape* — in a gh-403 session (org disabled the GitHub
+# App for this session type) it still exits 0 while every real `gh api` call against the org
+# returns 403 (arc#2802, independently reproduced by 5 test-sweep sub-agents in one run). Probe
+# with a real, non-destructive read against the actual target repo instead of trusting that exit
+# code, so a session that can't actually write falls through to channel B instead of failing dry.
+gh_channel_usable() {
+  command -v gh >/dev/null 2>&1 || return 1
+  gh api "repos/${ASSETS_REPO}" >/dev/null 2>"$WORKDIR/gh-probe-err"
+}
+
+if gh_channel_usable; then
   channel_gh
 else
   ASSETS_CLONE="${ASSETS_REPO_DIR:-}"
@@ -187,7 +212,7 @@ else
     done
   fi
   if [[ -z "$ASSETS_CLONE" || ! -d "$ASSETS_CLONE/.git" ]]; then
-    echo >&2 "error: no gh auth AND no ${ASSETS_REPO} clone (set ASSETS_REPO_DIR or mount it as a git source) — caller should fall back to SendUserFile."
+    echo >&2 "error: no usable gh channel AND no ${ASSETS_REPO} clone (set ASSETS_REPO_DIR or mount it as a git source) — caller should fall back to SendUserFile."
     exit 2
   fi
   channel_git_push "$ASSETS_CLONE"

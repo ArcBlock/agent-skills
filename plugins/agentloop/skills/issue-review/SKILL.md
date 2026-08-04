@@ -56,7 +56,7 @@ description: Process one GitHub issue end-to-end — read the issue + referenced
 
 | label | 含义 | 谁加/摘 | 谁尊重 |
 |---|---|---|---|
-| **`agent:hold`** | **人类保留 = 终态冻结**——"没我反馈别做不可逆动作(close/merge)",**不是"别理它"**(**issue/PR 通用**) | **只人加、只人摘**;agent 永不自动摘 | **`issue-sweep` / `pr-sweep` 冻结终态动作**(永不 close/去重关闭/合并),但**人类新评论/新 commit 照常触发 review + 响应**(人的反馈是最高优先级输入);无新输入才跳过。**`issue-review` / `pr-review` 显式手工调用只提示不挡**(人点名就是要处理) |
+| **`agent:hold`** | **人类保留 = 终态冻结**——"没我反馈别做不可逆动作(close/merge)",**不是"别理它"**(**issue/PR 通用**) | **只人加、只人摘**;agent 永不自动摘。**唯一例外(arc#2914)**:本 skill 产出「建议关闭」类结论清单时,**自动加**给清单点名的 issue(见下 ★「建议关闭」类结论清单)——**摘除仍然只人**。 | **`issue-sweep` / `pr-sweep` 冻结终态动作**(永不 close/去重关闭/合并),但**人类新评论/新 commit 照常触发 review + 响应**(人的反馈是最高优先级输入);无新输入才跳过。**`issue-review` / `pr-review` 显式手工调用只提示不挡**(人点名就是要处理) |
 | **`agent:processing`** | **处理中互斥锁**(advisory,带 TTL 30min) | agent 开工 acquire、收尾 release | 任何 run 见**新鲜**的锁就 **SKIP**;**过期**(上一个 runner 崩了)则抢锁重做 |
 
 > **跨 issue/PR 边界:** `agent:hold` 两边通用——「人类保留」是与对象类型无关的预约(GitHub label 仓库级共享),两侧语义一致:**冻结终态动作(close/merge),不冻结响应**——人类新评论照常处理,`pr-review` 显式调用只提示不挡(见各自 SKILL)。`agent:processing`(TTL 互斥锁)**只用于 issue**:PR 侧的并发去重由 `pr-sweep` 自己的确定性分支 `claude/issue-<N>` + 开 PR 前认领检查 + disposition label 承载,不复用这个锁。
@@ -277,6 +277,36 @@ issue 是一个**内部提案/想法**——作者自己都标注「可能可行
 6. **release claim**:`claim.ts --release <claimId>`;带 `agent:ready` 的同时摘掉
    (消费方处理完摘——close 的 producer 下轮也会清,留开的必须现在摘,否则队列视图
    一直显示"可干"误导人和其他 worker)。
+
+## ★「建议关闭」类结论清单 → 落地时立即挂 `agent:hold`(arc#2914)
+
+任何本 skill 产出的**结论性批量处置清单**——doc-audit 汇总、★父级 rollup 综合 comment、
+一次性全量 backlog audit 等场景里,表格/列表形式列出**多个 issue**并给出「建议关闭」/
+「建议合并」/「建议删除」这类**需要人工复核才能执行**的结论——**在这份清单落地
+(post 到 issue body 或 comment)的同一时刻**,必须对清单里点名的**每一个** issue 打上
+`agent:hold`:
+
+```bash
+for n in <清单里点名的每个 issue 号>; do
+  gh issue edit "$n" --add-label agent:hold
+done
+```
+
+(label 不存在则先按 ★并发锁 acquire 段落的 `gh label create agent:hold ... || true` 幂等创建。)
+
+**为什么不能只靠正文文字承诺(arc#1863 教训):** `#1863` 是一次一次性 138-issue 全量
+backlog audit,body 末尾明确写「『建议关闭』一栏本次没有代关,等人扫一眼表格后批量关即
+可」——这段自然语言承诺没有配套任何结构化信号。下一轮无人值守 sweep 把这段文字里点名的
+12 个 issue 直接当成可执行指令关闭了,绕开了这里声明的人工确认闸(事后核对基本站得
+住,但那是运气,不是设计——见 arc#2914)。`agent:hold` 是 `issue-sweep` Step 1「Then
+drop the reserved/locked ones」已经尊重的既有确定性机制——**用它承载「等人复核」的承
+诺,而不是指望下一轮 sweep 去解析 issue body 里的自然语言限定语**。这与 `issue-sweep`
+Step 2 的对应规则互补:Step 2 保证即便某个被点名的 issue 意外漏挂 `agent:hold`,清单
+本身也不会被当成指令消费——需要独立人工确认才行。
+
+**人复核完摘 label**:批准 → 人自己 close(或摘掉 `agent:hold` 后走正常 sweep 流程);
+否决 → 摘掉 `agent:hold` 并留一条说明。**agent 永不自动摘这个 label**(同上 ★并发锁
+表的通用规则:`agent:hold` 只人加只人摘,本节是唯一的"自动加"例外,且不含"自动摘")。
 
 ## Doc-from-Issue 生命周期(这个 skill 所处的流程)
 

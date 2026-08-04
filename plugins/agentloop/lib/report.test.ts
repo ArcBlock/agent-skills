@@ -6,6 +6,9 @@
  * `.claude/verify/identity.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type CheckResult, renderReport, run, sumNum, trimFullLogsSection } from "./report.ts";
 
 const results: CheckResult[] = [
@@ -73,6 +76,99 @@ describe("renderReport", () => {
   });
 });
 
+describe("renderReport totality (#2734 — a check's missing optional field must not kill the report)", () => {
+  // Regression: check-publish-drift's skip path returned neither `stats` nor
+  // `durationMs`, so `Object.entries(undefined)` threw inside the renderer and
+  // the ENTIRE report was lost — including the N checks that really ran. The
+  // report kernel is the shared collection point for every check (incl. ones a
+  // consuming repo writes), so it must degrade, never throw.
+  const skipOnly = [
+    {
+      check: "publishDrift",
+      title: "Plugin publish drift",
+      pass: true,
+      blocking: false,
+      skipped: "gh not available — cannot read the mirror",
+    },
+  ] as CheckResult[];
+
+  test("a skip carrying only the required fields renders instead of throwing", () => {
+    expect(() => renderReport(skipOnly, { scenario: "pre-pr" })).not.toThrow();
+    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    expect(md).toContain("⊘ SKIP");
+    expect(md).toContain("**Overall: ✅ PASS**");
+  });
+
+  test("missing durationMs renders 0.0s, never NaNs — in the row and in the total", () => {
+    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    expect(md).not.toContain("NaN");
+    expect(md).toContain("| 0.0s |");
+    expect(md).toContain("(0.0s total)");
+  });
+
+  test("a skip reason surfaces in the row so ⊘ SKIP always says why", () => {
+    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    expect(md).toContain("gh not available — cannot read the mirror");
+  });
+
+  test("a sibling check's real results survive alongside a field-less skip", () => {
+    const md = renderReport([...skipOnly, ...results], { scenario: "pre-pr" });
+    expect(md).toContain("| Build | ✅ PASS |");
+    expect(md).toContain("(1.2s total)");
+  });
+
+  test("skipped: true with no stats and no reason still renders a bare cell", () => {
+    const bare = [
+      { check: "native", title: "Native", pass: true, blocking: false, skipped: true },
+    ] as CheckResult[];
+    expect(() => renderReport(bare, { scenario: "pre-pr" })).not.toThrow();
+    expect(renderReport(bare, { scenario: "pre-pr" })).toContain("| — |");
+  });
+
+  // Found by adversarially fuzzing the renderer while fixing #2734: `null` is not
+  // `undefined`, so `?? {}` alone would not have covered a JSON-round-tripped result.
+  test("stats/durationMs explicitly null degrade like absent ones", () => {
+    const nulled = [
+      { check: "a", title: "A", pass: true, blocking: false, skipped: true, stats: null },
+    ] as unknown as CheckResult[];
+    expect(() => renderReport(nulled, { scenario: "pre-pr" })).not.toThrow();
+    expect(renderReport(nulled, { scenario: "pre-pr" })).not.toContain("NaN");
+  });
+
+  test("a NaN durationMs renders 0.0s, not NaNs", () => {
+    const nan = [
+      { check: "b", title: "B", pass: true, blocking: true, durationMs: NaN, stats: {} },
+    ] as CheckResult[];
+    expect(renderReport(nan, { scenario: "pre-pr" })).not.toContain("NaN");
+  });
+
+  test("an empty skip reason still reads as SKIP, never as PASS", () => {
+    // `skipped: ""` is falsy — plain truthiness silently mislabels the row.
+    const blank = [
+      { check: "c", title: "C", pass: true, blocking: false, skipped: "" },
+    ] as CheckResult[];
+    expect(renderReport(blank, { scenario: "pre-pr" })).toContain("⊘ SKIP");
+  });
+
+  test("a reason containing | is escaped so it cannot forge a table column", () => {
+    const piped = [
+      { check: "d", title: "D", pass: true, blocking: false, skipped: "cmd a | b failed" },
+    ] as CheckResult[];
+    const row = renderReport(piped, { scenario: "pre-pr" })
+      .split("\n")
+      .find((l) => l.startsWith("| D |")) as string;
+    expect(row).toContain("cmd a \\| b failed");
+    expect(row.split(" | ")).toHaveLength(4);
+  });
+
+  test("a runaway reason is capped so one check cannot eat the comment budget", () => {
+    const huge = [
+      { check: "e", title: "E", pass: true, blocking: false, skipped: "x".repeat(50_000) },
+    ] as CheckResult[];
+    expect(renderReport(huge, { scenario: "pre-pr" }).length).toBeLessThan(1_000);
+  });
+});
+
 describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () => {
   test("strips the Full Logs appendix, keeping the summary table and a note", () => {
     const results: CheckResult[] = [
@@ -98,6 +194,24 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
     expect(trimmed).toContain("Omitted");
     // The trailing generated-by line survives the trim (plugin's de-arc-ified text).
     expect(trimmed).toContain("Generated by the `agentloop` verification engine");
+  });
+
+  test("names the cache file when the sha is known — the pointer is the only route left", () => {
+    const results: CheckResult[] = [
+      {
+        check: "build",
+        title: "Build",
+        pass: false,
+        blocking: true,
+        durationMs: 1000,
+        stats: {},
+        rawFull: "a".repeat(100),
+      },
+    ];
+    const md = renderReport(results, { scenario: "pre-merge", sha: "deadbeef123" });
+    expect(trimFullLogsSection(md, "deadbeef123")).toContain("`.verify/deadbeef123.md`");
+    // Without a sha it degrades to the placeholder rather than inventing a path.
+    expect(trimFullLogsSection(md)).toContain("`.verify/<sha>.md`");
   });
 
   test("is a no-op when the report has no Full Logs section", () => {
@@ -178,5 +292,60 @@ describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts 
     expect(r.code).toBe(0);
     expect(r.out.trim()).toBe("hi");
     expect(r.timedOut).toBeUndefined();
+  });
+
+  test("the timeout kills GRANDCHILDREN too — no orphaned process tree survives", () => {
+    // The regression: spawnSync's kill only reaches the `bash -c` it started, so a
+    // timed-out `turbo run test` left the whole test tree (and any daemon it had
+    // spawned) running under init, once per timed-out run.
+    const pidFile = join(tmpdir(), `agentloop-orphan-test-${process.pid}`);
+    rmSync(pidFile, { force: true });
+    const r = run(`bash -c 'echo $$ > ${pidFile}; sleep 60' & wait`, {}, undefined, 1500);
+    expect(r.timedOut).toBe(true);
+
+    const grandchild = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+    rmSync(pidFile, { force: true });
+    expect(Number.isFinite(grandchild)).toBe(true);
+
+    // signal 0 = existence probe. Poll rather than probe once: SIGKILL is
+    // delivered asynchronously and the corpse stays visible until init reaps it,
+    // so a single immediate probe reports "alive" on a loaded machine even when
+    // the kill landed. What is being asserted is that it goes away at all — an
+    // un-reaped tree stays up for its full 60s sleep.
+    const gone = () => {
+      try {
+        process.kill(grandchild, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    const deadline = Date.now() + 5000;
+    while (!gone() && Date.now() < deadline) Bun.sleepSync(50);
+    const alive = !gone();
+    if (alive) process.kill(grandchild, "SIGKILL"); // don't leak out of the test either
+    expect(alive).toBe(false);
+  });
+
+  test("the process-group wrapper stays invisible: no job-control lines in the output", () => {
+    // Job control has to be ON to get a fresh process group, but while it is on
+    // bash narrates `[1]+ Done  { … }` into the stream every check parses.
+    const r = run("echo payload; exit 5", {}, undefined, 5000);
+    expect(r.code).toBe(5);
+    expect(r.out.trim()).toBe("payload");
+    expect(r.out).not.toContain("[1]+");
+  });
+
+  test("stdin still reaches the command under the wrapper", () => {
+    const r = run("cat", {}, "piped\n", 5000);
+    expect(r.out.trim()).toBe("piped");
+  });
+
+  test("the pgid handoff file is cleaned up on both paths", () => {
+    const leftovers = () =>
+      readdirSync(tmpdir()).filter((f) => f.startsWith(`agentloop-pgid-${process.pid}-`));
+    run("true", {}, undefined, 5000);
+    run("sleep 999", {}, undefined, 300);
+    expect(leftovers()).toEqual([]);
   });
 });

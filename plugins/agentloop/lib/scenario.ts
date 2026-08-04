@@ -260,13 +260,19 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
 
   // Cache a PASS for the pre-push gate — only when the tree is clean, so the
   // cached sha matches exactly what was verified.
-  if (ok) {
-    const dirty = run("git status --porcelain").out.trim();
-    if (!dirty) {
-      mkdirSync(".verify", { recursive: true });
-      writeFileSync(`.verify/${sha}.md`, report, "utf8");
-      writeFileSync(`.verify/${sha}.result`, "PASS", "utf8");
-    }
+  //
+  // A FAIL is cached too, and unconditionally: it is a DIAGNOSTIC artifact, not a
+  // gate token (`.result` says FAIL, and every consumer — pre-push, merge-gate,
+  // --deliver-cached — requires PASS/NA). Without it the failure output could be
+  // lost outright: when a report is too big for the PR comment, `postComment`
+  // strips the Full Logs section and points the reader at this very file
+  // (`trimFullLogsSection`), which under the old PASS-only rule was never written
+  // on the one run that needed it. Real loss, arc PR #3062.
+  const dirty = run("git status --porcelain").out.trim();
+  if (ok ? !dirty : true) {
+    mkdirSync(".verify", { recursive: true });
+    writeFileSync(`.verify/${sha}.md`, report, "utf8");
+    writeFileSync(`.verify/${sha}.result`, result, "utf8");
   }
 
   finalExit(exitCode(results), commentArgs.post, delivery.posted);
