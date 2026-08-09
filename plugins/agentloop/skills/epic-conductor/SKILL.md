@@ -60,11 +60,14 @@ Before dispatching, gate the plan: run **`agentloop:design-review`** on the epic
 
 Record scope decisions on the epic as a pinned comment: what's in this build wave, what's deferred and why (e.g. gated on an unbuilt primitive), what's handled by an existing mechanism (don't rebuild). Use the **safe-default ratchet**: for any choice you can make safely, decide it and note "proceeding with X, object if wrong." Reserve the human for genuine forks only (irreversible, security, undecidable A-vs-B, aesthetic, resource-level). **Never package decomposable work as a decision menu** — if the "options" are not mutually exclusive, they're a dependency order, not a question.
 
-### 2. Lock (prevent fleet collisions)
-This repo may have `issue-sweep`/`pr-sweep` cron runners that will otherwise grab your issues and open duplicate PRs.
-- Put `agent:processing` on the epic + every sub-issue (advisory TTL lock, ~30min). Run a background refresher that re-adds it every ~12min until you clear the lock list.
-- Put `agent:hold` on **every PR your pipeline opens** the moment it exists — this freezes the sweeps' terminal actions (they won't auto-merge or dedup-close your PRs). You remove `agent:hold` yourself at merge time.
-- Keep the lock list in a file the refresher reads; empty it at the end so the refresher exits cleanly.
+### 2. Group + fence off (prevent fleet collisions, keep epics untangled)
+This repo may have `issue-sweep`/`pr-sweep` cron runners that will otherwise grab your issues and open duplicate PRs — and once this mechanism exists you'll run *several* epics whose issues/PRs must not tangle. Two standing labels do both jobs (the load-bearing fix; the old advisory `agent:processing` lock is racy — add-then-check, 30min TTL — and has really collided, e.g. a fleet runner opening a duplicate PR seconds before the lock landed):
+
+- **`epic-managed`** (standing, epic-agnostic) — the **fleet-exclusion key**. Apply it to the epic + every sub-issue + every PR your pipeline opens, the moment each exists. `issue-sweep`/`pr-sweep` skip anything carrying it ENTIRELY (not triaged, not claimed, not reviewed, not commented) — the conductor is the sole driver. One rule covers all epics, present and future. This is stronger than `agent:hold` (which only freezes *terminal* actions but still responds to human comments): `epic-managed` means "another agent owns this end-to-end."
+- **`epic:<epic#>`** (per-epic) — the **grouping/filter key**. Apply to the epic + every sub-issue + PR. `gh issue list --label "epic:<n>"` / `gh pr list --label "epic:<n>"` pulls exactly one epic's items — so multiple concurrent epics stay cleanly separable.
+- Create both labels up front (`gh label create`). Optionally also open a **milestone** per epic and assign the sub-issues to it — purely for the GitHub UI's native progress bar (X/Y closed); the machine mechanism is the labels, not the milestone.
+- Keep `agent:hold` on each opened PR too as belt-and-suspenders (and as the human-facing "reserved" signal), and remove it at merge time — but `epic-managed` is the primary fence. `agent:processing` becomes optional (only meaningful if two *conductors* could run the same repo); the standing exclusion, not the TTL lock, is what keeps the fleet out.
+- Keep the label list / epic number in a file a small background refresher reads; the refresher re-asserts labels periodically and exits when you clear the list at closeout. At closeout, remove `epic-managed` (and `agent:hold`) as each item reaches terminal state; the `epic:<n>` label stays as a permanent grouping record.
 
 ### 3. Dispatch a worker per ready sub-issue
 Launch an Agent (isolated worktree, model by weight) with a precise brief. Every worker brief MUST include:
