@@ -200,6 +200,7 @@ Step 3 的分派行有了正确的 work-type),再并入本轮候选集走 Step 2
     --jq '[.[]|select(.event=="labeled" and .label.name=="agent:processing")]|last|.created_at'
   ```
   (无 `gh` 时用 `mcp__github__*` 读 timeline。)`agent:processing` 是 advisory——**硬去重仍靠 Step 4 的确定性分支 + 认领检查**;这一步只是早点短路、省掉重复的读/核验/测试。
+- **`epic-managed`** — 该 issue 属于一个 **epic-conductor 独占驱动**的 epic(见 [`epic-conductor`](../epic-conductor/SKILL.md))。**整条排除:不 triage、不认领、不做、不评论。** 这不是 `agent:hold`(冻结终态但仍响应人类评论)——epic 子 issue 由那个 conductor 端到端调度自己的一批 worker 处理,sweep 插手只会撞车、开重复 PR(archetype:#3407 撞 #3395)。`agent:hold` 是「人类保留」,`epic-managed` 是「另一个 agent 保留」;两者都跳过认领,但 `epic-managed` 连人类评论也不由 sweep 代答(那是 conductor 的活)。一条规则管所有现在与未来的 epic。**过滤某个具体 epic 的全部子项**:`gh issue list --label "epic:<父issue#>"`(issue+PR 通用)。
 
 ## Step 2 — Keep only "last comment = unprocessed human reply"
 
