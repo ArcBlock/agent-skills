@@ -5,11 +5,13 @@ description: >-
   decomposes an epic into dependency-ordered sub-issues, fans out an isolated
   worker per sub-issue (implement, verify, open PR), spawns an independent
   clean-context reviewer per PR, routes review and bot findings to a fixer,
-  then gates and merges each PR and unlocks the next wave. Human stays for
-  high-level forks only (safe-default ratchet). Distinct from issue-sweep and
-  pr-sweep (unattended batch over existing items) and build-phases (single
-  agent phases of one issue). Use when implementing a whole epic end-to-end
-  with a reachable human. Composes pr-review, verification, and the repo merge gate.
+  then gates and merges each PR and unlocks the next wave. Codex/bot review is
+  short-wait (≤10m): findings or 👍 or silence-then-advance — never multi-hour
+  stall. Human stays for high-level forks only (safe-default ratchet). Distinct
+  from issue-sweep and pr-sweep (unattended batch over existing items) and
+  build-phases (single agent phases of one issue). Use when implementing a whole
+  epic end-to-end with a reachable human. Composes pr-review, verification, and
+  the repo merge gate.
 allowed-tools: Agent, Bash, Read, Grep, Glob, Edit, Write, Task, AskUserQuestion, Skill
 ---
 
@@ -106,14 +108,37 @@ If the verdict is BLOCK/COMMENT with real findings (or the bot left legit findin
 - The fixer re-verifies, re-runs the verification report to the new HEAD, and re-runs the merge gates.
 Re-review if the fix was substantial or security-relevant (a security fix deserves a second independent agent that runs the original exploit against the patched code).
 
-### 6. Bot code-review (e.g. Codex) — non-blocking
-Automated PR reviewers may or may not appear, and may re-review new commits. Workers/fixers check **once** after opening/pushing (at most one short re-check), then proceed — **never stall waiting**. Legit finding → fix + reply; disagree → reply with reasoning; a P1 never dangles. The conductor does a final bot-review check at merge time and routes any late finding back.
+### 6. Bot code-review (e.g. Codex) — short-wait, then advance
+
+**Observed contract (this org):** after open / ready / push, Codex (`chatgpt-codex-connector[bot]`) almost always responds **within minutes** — either inline findings (P1/P2 badges) **or a single 👍** meaning *no suggestions*. That 👍 is a **positive signal**, not "still thinking." Multi-hour silence is rare and is **not** a merge gate; late post-merge comments are owned by [`codex-review-backlog`](../codex-review-backlog/SKILL.md).
+
+**Procedure after `gh pr create` or after pushing a fix commit (workers, fixers, and conductor all obey):**
+
+1. **Short wait only — default ≤10 minutes** (one re-check mid-window is fine; no long poll loop). Look for bot activity **on the current HEAD**:
+   - **👍** on the PR (or a review shell with no inline findings) → **clean. Proceed** to step 4 independent review / step 7 merge gate. Do **not** wait longer "just in case."
+   - **Inline findings** → handle **now** (step 3 below). Do not open the next wave until every **P1** is either fixed or REJECT-replied on-thread.
+   - **Silence past the short wait** → **proceed**. Do not park the epic. Final pre-merge check still re-fetches bot comments (below).
+2. **Hard ban:** multi-hour `sleep`/poll loops; "waiting for Codex re-review" as a status for more than the short wait; blocking wave *N+1* because wave *N*'s bot has not 👍'd after the short wait.
+3. **On findings:**
+   - **Agree + fix** → commit on the PR branch, re-run verification to the new HEAD, reply on the Codex thread with evidence (sha + what changed). Then **one** short re-check (≤10m) for re-review or 👍; if silent, proceed.
+   - **Disagree (by design / wrong layer / false positive)** → reply on the thread with reasoning + architecture pointer; treat as **addressed** for merge purposes (thread open ≠ block). Record REJECT for backlog if useful.
+   - **Out of scope but real** → open a **follow-up issue**; never silently fold into this PR; never drop.
+4. **Addressed** (merge-relevant) means: every bot **P1** on the current HEAD is either fixed in a commit on the PR **or** disagreed with a posted reason on that thread. P2s: fix if cheap in-scope, else follow-up issue — do not stall the wave on P2 polish.
+5. **Conductor pre-merge re-check (once, cheap):** re-fetch `pulls/<n>/comments` filtered to `chatgpt-codex-connector[bot]` (and reviews if useful). If a **new** unaddressed P1 appeared since the last fix reply → route to fixer; else merge. **Bot reviews are not human `CHANGES_REQUESTED`** — the human Review 闸 in pr-sweep does not apply to Codex; you own bot findings via this section.
+6. **Late findings after merge** → do **not** reopen the wave mid-flight; leave them to `codex-review-backlog` (daily / `--open-too`). Epic closeout may note outstanding OPEN_HARD items.
+
+**Anti-patterns that stall epics (do not do these):**
+- Treating "no Codex comment yet" after 10m as blocked.
+- Waiting hours for a second Codex pass after you already fixed P1 and replied.
+- Holding merge solely because a disagreed-by-design thread is still open.
+- Asking the human to "wait for Codex" when gates + independent review + short-wait policy are already green.
 
 ### 7. Gate + merge (the conductor's act)
 Merge a PR only when ALL hold:
 - the repo's **merge gate** exits 0 (verification + e2e-gate + ui-verify + native, per what the diff touches),
-- the review verdict is MERGE,
-- **no unaddressed bot P1.**
+- the independent review verdict is MERGE (or COMMENT with only non-blocking notes),
+- **no unaddressed bot P1** per §6 (fixed **or** REJECT-replied — not "still waiting for bot"),
+- short-wait / 👍 / silence-after-short-wait satisfied per §6 (you do **not** need a green human GitHub review from Codex).
 For a **security-face** PR, post a short **risk-summary** comment before merging (what it opens, why it's safe, residual risk, revert path) — the human authorized auto-merge but deserves the audit line. Then: remove `agent:hold`, merge (squash, correct Conventional-Commit scope in the squash title if the branch commits drifted), delete the branch, remove the issue's `agent:processing`, drop it from the lock list. Unblock dependents and dispatch the next wave.
 
 ### 8. Hazards you WILL hit (name them so you handle, not flail)
@@ -122,6 +147,7 @@ For a **security-face** PR, post a short **risk-summary** comment before merging
 - **Main moved under a branch**: rebase before the gates; resolve keeping both features (workers touching the same file's adjacent regions is common — note merge order).
 - **Out-of-scope findings**: a reviewer/bot surfaces something real but outside this PR's scope → open a **follow-up issue**, never silently fold it in, never drop it.
 - **Flaky pre-existing test**: confirm it fails on merge-base too; don't let it block; file a flaky-test issue.
+- **Bot-review multi-hour hang**: treating Codex silence (or waiting for re-👍 after a fix) as a hard gate freezes the wave while the real gates are already green. Obey §6 short-wait; late comments → `codex-review-backlog`.
 - **Worktree cleanup**: `git worktree remove` / `prune` leftover worktrees at the end.
 
 ### 9. Closeout (mandatory — the epic isn't done until this is posted)
