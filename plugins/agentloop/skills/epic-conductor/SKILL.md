@@ -83,11 +83,18 @@ Launch an Agent (isolated worktree, model by weight) with a precise brief. Every
 - **Spec = the issue** (`gh issue view <n> --comments`) + the epic's scope-decision comment.
 - **Invariants**: strict TDD; the repo's I/O / architecture rules; reuse existing primitives (name them + their files) rather than re-inventing; no new error classes unless the repo lacks one; the accept-path iron law.
 - **Verify before push**: run the repo's verification gate to PASS; never `--no-verify`; never skip.
-- **Open a PR, DO NOT merge.** PR title = Conventional Commits; body starts with the repo's identity line (`scripts/agent-identity.sh …`), then summary / design decisions / acceptance evidence / `Closes #<n>` / the repo's footer.
+- **Open a PR, DO NOT merge — and label it atomically at create time** (Codex P1 on arc#3558: the window between `gh pr create` and the conductor learning the PR# is when hourly `pr-sweep` can still grab an unlabeled PR). PR title = Conventional Commits; body starts with the repo's identity line (`scripts/agent-identity.sh …`), then summary / design decisions / acceptance evidence / `Closes #<n>` / the repo's footer. **Create command MUST carry all three labels in one shot** (do not open bare then label later as the primary path):
+  ```bash
+  gh pr create ... \
+    --label epic-managed \
+    --label "epic:<epic#>" \
+    --label agent:hold
+  ```
+  If create without labels somehow happens (tooling gap), the **first** action after create is `gh pr edit <PR#> --add-label epic-managed --add-label "epic:<epic#>" --add-label agent:hold` before any long verify wait.
 - **Post the verification report** to the PR (`… --comment <PR#>` or equivalent).
 - **Bot review self-handling is NON-BLOCKING** (see §6).
 - **Report back**: PR#/URL, decisions made, gate results, deviations/concerns — raw facts, no marketing.
-When a worker returns, immediately put `agent:hold` on its PR.
+When a worker returns, the conductor **re-asserts** `agent:hold` + `epic-managed` + `epic:<n>` (idempotent) — that is a safety net, **not** the first time those labels appear.
 
 ### 4. Independent review per PR
 Spawn a **separate, clean-context** reviewer agent (never the worker) that runs `agentloop:pr-review <PR#> --post`. In its brief, point it at the exact things to scrutinize hardest for THIS PR (the security boundary, the forge channel, the accept-path coverage, the reuse claims), and for security-relevant PRs tell it to **reproduce the exploit against the code**, not just read it. It emits a verdict (MERGE / COMMENT / BLOCK / …) and posts one verdict comment.
