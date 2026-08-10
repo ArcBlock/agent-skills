@@ -537,7 +537,18 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 ```
 
 - **新发现 = 新 comment;更新既有结论(翻译、补证据、回应 human)= 原地编辑那条 comment**,别堆重复 comment。
-- **截图证据的两道硬验收**(破图事故的防复发规则):① 上传**只走** `<ui_upload_script>`(`agent_identity_script` 同节的 Agent Tooling,arc 默认 `<ui_upload_script>`;`ASSET_CONTEXT=issue-<N>`)或 ui-verify Path B(MCP),脚本 **exit 3** = 本地脚本与 origin/<default_branch> 不一致(陈旧 checkout,正是事故根因)→ `git checkout origin/<default_branch> -- <ui_upload_script>` 后重跑,不许 `ALLOW_STALE_UPLOADER=1` 绕过;② 任何要内嵌进 comment 的图片 URL 必须**无凭据 curl 200**(camo 匿名视角;Path A 脚本已内置,MCP 路径手动验)——非 200 的 URL 内嵌必破图,禁止发出。
+- **截图证据的两道硬验收**(破图事故的防复发规则,issue #3010 扩了第三条):① 上传**只走**
+  `<ui_upload_script>`(`agent_identity_script` 同节的 Agent Tooling,arc 默认 `<ui_upload_script>`;
+  `ASSET_CONTEXT=issue-<N>`),脚本 **exit 3** = 本地脚本与 origin/<default_branch> 不一致(陈旧
+  checkout,正是事故根因)→ `git checkout origin/<default_branch> -- <ui_upload_script>` 后重跑,
+  不许 `ALLOW_STALE_UPLOADER=1` 绕过;② 任何要内嵌进 comment 的图片 URL 必须**无凭据 curl 200**
+  (camo 匿名视角;脚本已内置该抽查)——非 200 的 URL 内嵌必破图,禁止发出;③ **上传器两条通道都不可用
+  (exit 2)时的确定性兜底是浏览器原生附件上传**(已登录 GitHub 的浏览器打开 issue/PR 评论框 → file
+  chooser 附件 → GitHub 附件 CDN `user-attachments`/`user-images.githubusercontent.com` URL → 提交前
+  截图确认已渲染,不是破链接;完整步骤见 [`ui-verify` SKILL 的 Step 3](../../../../skills/ui-verify/SKILL.md)兜底小节)——
+  **不再有"MCP 直传"这条路**(旧文案已随 #1037 收编移除,MCP 二进制写会双重 base64 损坏,#1079)。
+  **无论走哪条通道,上传/发布失败绝不能被写成"已完成验证"或"截图待处理"**——评论里必须显式标注
+  "截图发布失败,证据缺失"(与 `ui-verify`/`pr-sweep` 的 `BLOCKED` 语义一致),不得用中性措辞掩盖。
 - **默认自动发/改、自动开 spin-off issue、自动调 label,不必先问**(agent 有判断力)。`--dry-run` 是显式 opt-out:用户想先预览时才用(不做任何 outward 写)。
 - **审计阶段产物 = verdict comment + labels,不动 body**(body 精简、comment 紧随其下,人已易读);body 补全留到 resolve 阶段、且可选。
 

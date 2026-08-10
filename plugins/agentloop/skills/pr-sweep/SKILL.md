@@ -253,6 +253,11 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
 
 对每个命中的 PR:HEAD 若在打 label 之后又有新 push(重新走 Step 1.5 fresh 判定),仍按新 HEAD 补跑;跑 `/ui-verify --pr <n>`,截图/录屏贴回 PR 后 `gh pr edit <n> --remove-label ui-verify:pending`。**本 routine 没有 daemon → 跳过本步(静默,不是 fail)**,这是"两路环境互补"的另一半:纯静态环境负责发现+标记,daemon 环境负责补跑+摘标。
 
+> **`ui-verify:pending` ≠ `BLOCKED`(issue #3010,术语不能混用)**:`pending` label 表示"daemon/浏览器
+> 本身不可用,这轮根本没跑",不产出任何证据 comment;`BLOCKED` 是 sticky 证据 comment 的一个可能
+> `result` 值,表示"跑了、截图存在,但没能发布成公开可读的 URL"。两者都不放行合并,但语义不同——
+> **pending 的 PR 永远不能被描述成"UI 已验证"或"截图待处理即可合并"**,补跑成功前它就是缺证据。
+
 - **Model:** per-PR review 是**有界任务**(读 1 个 diff + 关联 issue + 核验 + 跑 1 次 `pre-merge` + 可能 1 个测试)→ **Sonnet**。**跨 PR 综合(定簇胜负、判矛盾真伪、合并闸决策)用强模型(Opus)** 在主控做,别下放。成本差 ~5×。
 - **并发/编排——按运行环境分两路(这条决定 routine 能不能无人值守):**
   - **无人值守(cron routine)→ 串行 inline review,绝不调 Workflow。** `Workflow` 工具需要**交互式 opt-in 确认**,且通常不在 routine 的 `allowed_tools` 里 → 它弹一个确认框,routine 里没人点 → **永久挂死**(实测:pr-sweep routine 整夜卡在"请允许 Workflow"上)。所以 routine 里**只用 allowed_tools 内、不弹确认的工具**(`Bash`/`Read`/`Write`/`Edit`/`Glob`/`Grep`/`Skill`),per-PR review 由本 session **逐个 inline 做**(读 diff + 核验 + 判 verdict)。**Step 1.5 轮次感知**已把每轮 PR 压到"真正变了的几个",串行完全够、还更省。
@@ -312,10 +317,18 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
   自决的机械修复)。**这道闸独立于 Step 0/pr-review 是否已查过三面**——两处都要有,任一处漏了
   另一处仍能拦住,不互相依赖。且
 - **PR 不带 `agent:hold`**(人类保留;hold 期间 review/响应照常但**合并一律冻结**——这里是合并前的硬闸,带 hold 一律不合,即使风险档是 🟢、即使 verdict 是 MERGE。verdict 写成 `MERGE (held)` 等人摘 label);且
-- **★ UI 证据闸(与 pre-merge 同级的 SHA 匹配硬门)**:diff 命中 profile **UI Face Paths** →
-  merge 前必须有 **对当前 PR HEAD** 的 `<ui_shot_script>` / `ui-verify` 截图证据(PR 里已内嵌且截图之后无新 push)。
-  **任何 push——包括 agent 自己的 fix commit——都使既有截图作废**,重拍再合;**无法截图的环境**（注：renderer/widget 级改动走 `<ui_shot_script>` 无需 daemon，仅页面级 `/ui-verify` 才需要 daemon——"无 daemon"≠"无法截图"，不得以"无 daemon"为由跳过 renderer 截图）→ 不合,留给带 daemon 的 routine 或人。静态 `pre-merge` 看不见"popup
-  长什么样",这道闸补的就是这只眼;且
+- **★ UI 证据闸(与后端数据面闸对称,由 `<merge_gate_entry>` 焊死,issue #3010)**:diff 命中 profile
+  **UI Face Paths** → merge 前必须有 **对当前 PR HEAD**、**已发布(publicly、无凭据可读)** 的
+  `<ui_shot_script>` / `ui-verify` 截图证据——由 `<merge_gate_entry>` 自动强制(它跑
+  `.claude/skills/ui-verify/scripts/scope.ts` 判命中,不靠自觉;检查目标是一条 `<!-- ui-verify-report`
+  sticky comment 的 `sha=`/`result=`,不是解析 PR 正文文字)。三种情况一律拒:**当前 SHA 无证据、
+  证据挂在过期 SHA 上、证据被判 `BLOCKED`**(截图只存在本地路径、上传失败、发布后匿名不可达——
+  pending-upload 的截图永远不算"已完成验证")。**任何 push——包括 agent 自己的 fix commit——都使既有
+  证据作废**,重拍/重发再合;**daemon/浏览器本身不可用**(真正的 pending,区别于 BLOCKED)→ 打
+  `ui-verify:pending` label,不合,留给带 daemon 的 routine 或人补跑(**renderer/widget 级改动走
+  `<ui_shot_script>` 无需 daemon,"无 daemon"≠"无法截图"，不得以"无 daemon"为由跳过 renderer 截图**)。
+  静态 `pre-merge` 看不见"popup 长什么样",这道闸补的就是这只眼;上传失败时的确定性兜底(浏览器原生
+  附件上传,需同时贴 PR + 关联 issue)见 [`ui-verify` SKILL 的 Step 3](../../../../skills/ui-verify/SKILL.md);且
 - **★ 后端数据面闸(与 UI 证据闸对称,由 `<merge_gate_entry>` 焊死)**:diff 命中 profile
   **Backend Face Paths**
   → merge 前必须有 **对当前 PR HEAD** 的 `e2e-gate` sticky

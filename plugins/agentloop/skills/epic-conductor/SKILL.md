@@ -1,6 +1,15 @@
 ---
 name: epic-conductor
-description: Attended multi-agent implementation of a WHOLE epic — one resident conductor decomposes an epic into dependency-ordered sub-issues, fans out an isolated worker agent per sub-issue (implement → verify → open PR), spawns an INDEPENDENT clean-context reviewer per PR, routes review + bot findings to a fixer, then gates and merges each PR itself and unlocks the next wave. The human stays in the loop for high-level forks only (safe-default ratchet), not per step. Distinct from issue-sweep/pr-sweep (unattended batch over EXISTING issues/PRs) and build-phases (single agent, phases of ONE issue): this decomposes a NEW epic and drives every sub-issue through its own worker/review/fix/merge lifecycle to completion, with a screenshotted closeout. Use when a human says "implement this whole epic / run the pipeline / get it all done" and will be reachable for decisions. Composes pr-review + verification + the repo's merge gate.
+description: >-
+  Attended multi-agent implementation of a WHOLE epic. One resident conductor
+  decomposes an epic into dependency-ordered sub-issues, fans out an isolated
+  worker per sub-issue (implement, verify, open PR), spawns an independent
+  clean-context reviewer per PR, routes review and bot findings to a fixer,
+  then gates and merges each PR and unlocks the next wave. Human stays for
+  high-level forks only (safe-default ratchet). Distinct from issue-sweep and
+  pr-sweep (unattended batch over existing items) and build-phases (single
+  agent phases of one issue). Use when implementing a whole epic end-to-end
+  with a reachable human. Composes pr-review, verification, and the repo merge gate.
 allowed-tools: Agent, Bash, Read, Grep, Glob, Edit, Write, Task, AskUserQuestion, Skill
 ---
 

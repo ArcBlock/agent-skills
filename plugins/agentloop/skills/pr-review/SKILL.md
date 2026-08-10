@@ -291,6 +291,13 @@ gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|provi
   **先判 renderer/widget 级 vs 页面级（判据优先于 daemon 有无）：**
   - **renderer/widget 级**（改的是 `<UI Face Paths>` 内的 renderer/primitive/widget/css 代码、无独立 blocklet 页面可跑）→ **必须用 `<ui_shot_script>`**（真实 shipped bundle 渲染 fixture，**无需 daemon**，参数矩阵/前后对比/交互序列）。**"无 daemon"在此路径不是跳过理由**——`<ui_shot_script>` 本来就不需要 daemon；命中此路径必须出图，不得以"无 daemon"为由跳过。
   - **页面级**（改 `blocklets/**` 的页面逻辑、需要跑着的 blocklet 渲染整页）→ 需有跑着的 daemon（cloud routine / 本地），跑 `/ui-verify --pr <n>`，它自动从 diff 推断场景、截图 + 录屏、贴回 PR；**daemon 不可用 → 打 `ui-verify:pending` label（`gh pr edit <n> --add-label ui-verify:pending`，label 不存在则先 `gh label create`）+ 注明"ui-verify 需 daemon,本环境未跑"** —— label 是让带 daemon 的 routine 能确定性扫描到（而不是靠解析 verdict 文本猜"哪些 PR 还欠 ui-verify"，见 #1205）；带 daemon 的 routine 补跑成功后摘掉该 label（见 [`pr-sweep`](../pr-sweep/SKILL.md) 的 pending 扫描步骤）。但若同时含 renderer 改动，renderer 部分仍须 `<ui_shot_script>`（不受 daemon 有无影响）。
+  - **两条路径最终都要落一条同样的 sticky 证据 comment（issue #3010）**：`merge-gate.ts` 的 UI 证据闸只认
+    `.claude/skills/ui-verify/scripts/gate-comment.ts` 生成的 `<!-- ui-verify-report` marker comment
+    （`sha=`+`result=PASS|FAIL|BLOCKED|NA`），不解析 PR 正文里的截图文字。`/ui-verify` 页面级流程内置这一步；
+    **renderer/widget 级用 `<ui_shot_script>` 出图后，review agent 必须额外拼一条 evidence JSON（8 字段：
+    headSha/route/viewport/theme/scenario/assertion/consoleStatus/screenshotUrl，`scenario` 写
+    `renderer:<组件名>`）喂给同一个 `gate-comment.ts` 脚本**，否则纯 renderer 改动的 PR 会在 Gate 3 卡住
+    ——即使 PR 正文已经内嵌了 ui-shot 截图。
   verdict 里引用截图 pass/fail（与 `pre-merge` 并列为门控输入）。**截图/自查 checklist 命中的明显缺陷(重叠/裸样式/交互失效/Unknown 框)按「★ 发现即修」处置——包括暴露出的 main 既有 bug,当场修 + issue + fix PR,不写「与本 PR 无关的观察,建议复核」了事。**
 - **未命中**(纯后端/文档/脚本/测试) → 跳过,不是 FAIL(在 verdict 注明"无 UI 面,跳过 ui-verify")。
 

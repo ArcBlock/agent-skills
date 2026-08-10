@@ -30,10 +30,10 @@ import {
 } from "./comment.ts";
 import {
   type CheckResult,
+  deriveResult,
   exitCode,
   head,
   mergeBase,
-  passed,
   renderReport,
   run,
   tail,
@@ -245,8 +245,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
 
   const results: CheckResult[] = selected.map((c) => c.run(ctx));
 
-  const ok = passed(results);
-  const result: VerifyResult = ok ? "PASS" : "FAIL";
+  const result: VerifyResult = deriveResult(results);
+  const ok = result === "PASS";
   const report = renderReport(results, { scenario: config.scenario, base, sha, identity });
 
   if (argv.includes("--json")) {

@@ -35,7 +35,12 @@ function repo(): string {
 }
 
 /** Run a one-check scenario in `dir`; returns HEAD sha + the runner's exit code. */
-function runScenarioIn(dir: string, pass: boolean, extraArgv = ""): { sha: string; code: number } {
+function runScenarioIn(
+  dir: string,
+  pass: boolean,
+  extraArgv = "",
+  stats: Record<string, number | string> = {},
+): { sha: string; code: number } {
   // OUTSIDE the repo: an untracked file in it would read as a dirty tree and
   // suppress the very PASS cache one of these cases is asserting.
   const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
@@ -57,7 +62,7 @@ function runScenarioIn(dir: string, pass: boolean, extraArgv = ""): { sha: strin
                pass: ${pass},
                blocking: true,
                durationMs: 1,
-               stats: {},
+               stats: ${JSON.stringify(stats)},
                rawFull: "log-line-that-must-survive",
              }),
            },
@@ -108,5 +113,12 @@ describe("runScenario — .verify cache", () => {
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
     const again = runScenarioIn(dir, false, `, "--deliver-cached"`);
     expect(again.code).toBe(1);
+  });
+
+  test("#3170: a watchdog timeout with 0 observed failures caches TIMEOUT, not FAIL — but still exits non-zero (unverified)", () => {
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, false, "", { timedOut: "true" });
+    expect(code).toBe(1);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("TIMEOUT");
   });
 });

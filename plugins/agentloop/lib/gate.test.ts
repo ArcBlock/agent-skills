@@ -56,6 +56,19 @@ describe("requireStickyGate", () => {
     if (!r.ok) expect(r.reason).toContain("must be PASS or NA");
   });
 
+  it("blocks when result is TIMEOUT (#3170 — a watchdog kill is still unverified, not a pass)", () => {
+    const r = requireStickyGate(
+      "1",
+      HEAD,
+      MARKER_PREFIX,
+      "verification",
+      HINT,
+      withComment(sticky(MARKER_PREFIX, HEAD, "TIMEOUT")),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("must be PASS or NA");
+  });
+
   it("blocks on sha mismatch (new commits pushed after last run)", () => {
     const r = requireStickyGate(
       "1",
