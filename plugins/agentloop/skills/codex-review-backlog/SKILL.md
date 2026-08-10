@@ -12,10 +12,14 @@ description: >
 
 # Codex Review Backlog — post-merge (and open) Codex follow-ups
 
-> **Why this exists.** Codex often posts **after** merge. `pr-sweep` reviews open
-> PRs before merge; this skill is the complementary **post-merge lag sweep**:
-> find comments that landed too late, triage them on current `main`, and open
-> small fix PRs (never one mega-PR).
+> **Why this exists.** Codex is usually **fast** on open PRs (minutes: findings or a
+> single 👍 = no opinions) — that pre-merge path is owned by
+> [`epic-conductor` §6](../epic-conductor/SKILL.md) and
+> [`pr-sweep`](../pr-sweep/SKILL.md) **short-wait (≤10m), never multi-hour stall**.
+> Codex can still post **after** merge or after the short wait. This skill is the
+> complementary **post-merge / late lag sweep**: find comments that landed too late
+> for the open-PR loop, triage them on current `main`, and open small fix PRs
+> (never one mega-PR).
 
 > **Repo profile first.** Read `.claude/repo-profile.md` for `repo_slug`,
 > `default_branch`, `verification_entry` / `pre_merge_entry`, `comment_language`.
@@ -126,14 +130,17 @@ Quiet if:
 
 Then the daily comment is a one-liner: `Codex backlog quiet — window …, 0 OPEN_EASY`.
 
-**Do not** run a 45-minute poll loop. Daily (or manual) is enough: Codex lag is
-hours, not minutes. Pair with `pr-sweep` for **pre-merge** open PRs.
+**Do not** run a multi-hour (or even 45-minute) poll loop in the open-PR path.
+Pre-merge: short-wait ≤10m then advance (👍 / findings / silence). Post-merge lag
+and anything that arrives after you already advanced is **this** skill's job
+(daily cron or manual). Pair with `pr-sweep` / `epic-conductor` for **pre-merge**.
 
 ## Relationship to other skills
 
 | Skill | When |
 |---|---|
-| `pr-review` / `pr-sweep` | Open PRs **before** merge |
+| `pr-review` / `pr-sweep` | Open PRs **before** merge; Codex short-wait + handle P1s; 👍 = clean |
+| `epic-conductor` §6 | Epic PRs: same short-wait contract; never stall waves on bot lag |
 | **`codex-review-backlog`** | **After** merge lag + optional open late comments |
 | `verification` | Gate every fix PR you open |
 
