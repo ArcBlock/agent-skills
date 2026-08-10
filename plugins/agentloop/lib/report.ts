@@ -200,7 +200,7 @@ export function head(): string {
  * and came up blank) would silently render as PASS. Anything other than
  * absent/`false` means skipped.
  */
-function isSkipped(r: CheckResult): boolean {
+export function isSkipped(r: CheckResult): boolean {
   return r.skipped !== undefined && r.skipped !== false;
 }
 
@@ -211,6 +211,27 @@ export function passed(results: CheckResult[]): boolean {
 
 export function exitCode(results: CheckResult[]): number {
   return passed(results) ? 0 : 1;
+}
+
+/**
+ * The overall sticky-marker result (issue #3170, follow-up to #2880/#3166):
+ * `"PASS"` when every blocking check passed; otherwise `"TIMEOUT"` only when
+ * EVERY non-skipped blocking failure is a watchdog kill with zero observed
+ * failures (`stats.timedOut === "true"` and `(stats.failed ?? 0) === 0`, both
+ * structurally measured by the check itself — never hand-filled); any other
+ * failure — including a single real test failure alongside a timed-out check —
+ * dominates to `"FAIL"`. Return type is a plain string union (not `VerifyResult`
+ * from comment.ts) to avoid a circular import; the values are a structural
+ * subset so callers can assign it directly.
+ */
+export function deriveResult(results: CheckResult[]): "PASS" | "FAIL" | "TIMEOUT" {
+  if (passed(results)) return "PASS";
+  const failing = results.filter((r) => !isSkipped(r) && r.blocking && !r.pass);
+  const isTimeoutNoFail = (r: CheckResult): boolean => {
+    const failedCount = r.stats?.failed === undefined ? 0 : Number(r.stats.failed);
+    return String(r.stats?.timedOut) === "true" && failedCount === 0;
+  };
+  return failing.length > 0 && failing.every(isTimeoutNoFail) ? "TIMEOUT" : "FAIL";
 }
 
 /** Emit one result as JSON (used when a check is run standalone). */

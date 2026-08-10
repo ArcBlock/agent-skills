@@ -9,7 +9,14 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CheckResult, renderReport, run, sumNum, trimFullLogsSection } from "./report.ts";
+import {
+  type CheckResult,
+  deriveResult,
+  renderReport,
+  run,
+  sumNum,
+  trimFullLogsSection,
+} from "./report.ts";
 
 const results: CheckResult[] = [
   {
@@ -267,6 +274,57 @@ describe("sumNum (arc#2080 — check-tests must total per-task summaries, not gr
 
   test("returns undefined when there are no matches", () => {
     expect(sumNum(/(\d+) pass(?=\s*(?:\/|$|\n))/gim, "no test output here")).toBeUndefined();
+  });
+});
+
+describe("deriveResult (#3170 — a watchdog timeout with 0 real failures must read as TIMEOUT, not FAIL)", () => {
+  const check = (over: Partial<CheckResult>): CheckResult => ({
+    check: "tests",
+    title: "Tests (affected)",
+    pass: false,
+    blocking: true,
+    ...over,
+  });
+
+  test("every check passing → PASS", () => {
+    expect(deriveResult([check({ pass: true }), check({ pass: true, check: "build" })])).toBe(
+      "PASS",
+    );
+  });
+
+  test("a real test failure (failed > 0, no timedOut) → FAIL", () => {
+    expect(deriveResult([check({ stats: { failed: 3 } })])).toBe("FAIL");
+  });
+
+  test("a watchdog kill with 0 observed failures and no `failed` stat at all → TIMEOUT", () => {
+    expect(deriveResult([check({ stats: { timedOut: "true" } })])).toBe("TIMEOUT");
+  });
+
+  test("a watchdog kill with an explicit failed:0 → TIMEOUT", () => {
+    expect(deriveResult([check({ stats: { timedOut: "true", failed: 0 } })])).toBe("TIMEOUT");
+  });
+
+  test("real failure always dominates: one TIMEOUT-shaped check alongside one real failure → FAIL", () => {
+    const timeoutCheck = check({ check: "testsHeavy", stats: { timedOut: "true" } });
+    const realFailure = check({ check: "build", stats: { failed: 1 } });
+    expect(deriveResult([timeoutCheck, realFailure])).toBe("FAIL");
+  });
+
+  test("timedOut:true but failed > 0 on the SAME check is a real failure, not a TIMEOUT", () => {
+    expect(deriveResult([check({ stats: { timedOut: "true", failed: 2 } })])).toBe("FAIL");
+  });
+
+  test("a skipped check never counts as a failure feeding TIMEOUT/FAIL", () => {
+    expect(
+      deriveResult([
+        check({ pass: true }),
+        check({ check: "native", skipped: "no Xcode here", pass: false }),
+      ]),
+    ).toBe("PASS");
+  });
+
+  test("a non-blocking (warn-only) failure never flips PASS", () => {
+    expect(deriveResult([check({ pass: false, blocking: false })])).toBe("PASS");
   });
 });
 

@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #3432: '[nightly-test] Full test report — 2026-08-08 19:53 UTC' — the nightly-full-test routine opens these directly, mirroring the test-sweep-failure/test-sweep-report shape (#2271 archetype): zero comments, body carries an HTML `<!-- nightly-test-report -->` marker (HTML-escaped in the real body) that MACHINE_MARKER did not recognize, and no label in the old TEST_SWEEP_FINDING_LABELS set. Before this fix, shouldProcess() read this all-green automated report as an unprocessed human directive every hourly sweep. Reference: arc#3465.",
+  "issue": {
+    "number": 3432,
+    "labels": ["nightly-test-report"],
+    "body": "&lt;!-- nightly-test-report --&gt;\n\n**结论：✅ 全部通过**\n\n- Commit: `8b106b570820f8fcd594723b69af7f6fb59cd0d7` docs(blocklet-manager): register systemBlocklets exception + fix stale Phase-1/2 references (#2064 Phase 3 T3.1/T3.9/T3.10/T3.12) (#3429)\n- Branch: `claude/dreamy-edison-y00cqg`\n- 运行时间 (UTC)：2026-08-08 19:53:52\n- TEST_EXIT：0\n\n## Turbo 摘要\n\n```\nTasks:    194 successful, 194 total\nCached:    79 cached, 194 total\n  Time:    10m9.5s\n```\n\n## 失败清单\n\n无。全量测试（含 e2e 与启动真实 arc daemon 的 heavy 测试）全部通过，未发现任何失败用例。\n\n---\n_由 nightly-full-test routine 自动生成_",
+    "comments": []
+  },
+  "expected": {
+    "step2_keep": false,
+    "reason": "Zero comments, nightly-test-report label, body carries only an HTML-escaped `<!-- nightly-test-report -->` marker (not MACHINE_MARKER-recognized) — no Bot author signal available to fixture author/comment predicates, so label is the only reliable machine-authorship signal. This is an automated all-green QA report, not a human directive; Step 2 must not treat it as unprocessed human input."
+  },
+  "forbidden_actions": []
+}

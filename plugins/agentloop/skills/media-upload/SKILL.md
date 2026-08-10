@@ -55,6 +55,28 @@ SCREENSHOT_DIR="$SHOT_DIR" CONTEXT="pr${PR}" bash "$PLUGIN/scripts/gh-upload-dir
 拿到 map 后按上表**分流内嵌**。收到 `UPLOAD_FAILED` 行时在报告顶部显示 `> ⚠️ 媒体上传失败 — <原因>`
 并降级 `SendUserFile` 直投（不能内嵌，但不产出损坏文件）。
 
+## 上传器两通道都不可用时：浏览器原生附件上传（第三层兜底，issue #3010）
+
+`SendUserFile` 只把文件发给当前对话的人，**不会**让证据落地到 GitHub——PR/issue 上依旧没有可核验的
+截图。这类 review 门控（`ui-verify` 的 UI 证据闸最典型）需要证据**持久发布在 GitHub 上**，`gh` 与图床
+仓 clone 又都不可用时，唯一确定性可重复的兜底是**驱动一个已登录 GitHub 的浏览器**走原生附件上传
+（本轮真实产出过 arc#2991 / arcblock-site#165 / Site PR #166 的截图证据）：
+
+1. 打开目标 PR/issue 的评论框，触发 file chooser（拖拽或点击 attach 按钮），选中本地媒体文件。
+2. GitHub 把文件传到自己的附件 CDN，返回 `https://github.com/user-attachments/assets/<uuid>`
+   （或旧版 `user-images.githubusercontent.com/...`）URL 并自动插入引用到评论正文。
+3. 提交前用浏览器截图/读 DOM 确认媒体已渲染成可见图片/视频，不是破链接——不能假设上传成功。
+4. **同时贴到 PR 和它关联的 issue**（`Fixes #<n>` / `Part of #<n>`），不要只贴一处。
+
+这条 URL 家族（`github.com/user-attachments/assets/…`、`user-images.githubusercontent.com/…`）与
+`raw.githubusercontent.com/<repo>/main/…` 一样被下游门控（如 `.claude/skills/ui-verify/scripts/gate-comment.ts`
+的 `isPublishedUrl()`）当作**已发布**证据；本地文件路径、`SendUserFile` 附件、或任何未验证可匿名读的
+URL 都不算——**上传/发布失败绝不能被下游报告描述成"已完成验证"**，该标注 `BLOCKED`/"证据缺失"就
+标注，不用中性措辞掩盖（术语与 `ui-verify`/`pr-review`/`pr-sweep`/`issue-review` 保持一致）。
+
+此兜底需要**已认证的 GitHub 浏览器会话**，与 `gh-upload-media.sh` 的两条自动化通道不同层级——不总是
+每个环境都可行；不可行时按上一节降级 `SendUserFile`，消费方门控按"证据缺失"处理，不得放行。
+
 ## 为什么必须是 raw.githubusercontent.com/main（脚本已强制，别自己换）
 
 - **#1334**：GitHub MCP 写侧（`add_issue_comment` / `issue_write`）的 sanitizer 把 `![](url)` **剥成纯链接**——

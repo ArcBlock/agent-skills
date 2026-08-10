@@ -63,8 +63,18 @@ done
 
 [ -z "${skill}" ] && skill="${AGENTLOOP_SKILL:-}"
 
+# engine/model fall back to the ambient $ARC_AGENT_ENGINE/$ARC_AGENT_MODEL as a PAIR, not
+# independently: they describe THIS session's own identity together. An explicit --engine
+# override (e.g. a caller reporting on a different engine than the one currently running)
+# must not then get grafted onto the ambient model — that model was measured for the
+# ambient engine, not the overridden one (agent-skills#28: "codex" was getting the CURRENT
+# claude session's model appended, e.g. "engine:codex/claude-sonnet-5").
+engine_from_flag=""
+[ -n "${engine}" ] && engine_from_flag=1
 [ -z "${engine}" ] && engine="${ARC_AGENT_ENGINE:-}"
-[ -z "${model}" ] && model="${ARC_AGENT_MODEL:-}"
+if [ -z "${engine_from_flag}" ]; then
+  [ -z "${model}" ] && model="${ARC_AGENT_MODEL:-}"
+fi
 
 host=$(python3 -c "import socket; print(socket.gethostname())" 2>/dev/null || hostname)
 

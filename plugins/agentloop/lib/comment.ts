@@ -47,7 +47,29 @@ export function resolveGhRepoEnv(runner = run): Record<string, string> {
  */
 export const MARKER_PREFIX = "<!-- verification-report";
 
-export type VerifyResult = "PASS" | "FAIL" | "NA";
+/**
+ * `BLOCKED` (issue #3010): distinct from `FAIL` — the gate RAN but its required evidence
+ * could not be durably published (e.g. an asset upload failed, or evidence exists only
+ * as a local file path never posted anywhere readable). `requireStickyGate` already
+ * rejects anything outside {PASS, NA}, so `BLOCKED` fails closed for free — it exists so
+ * reports can say WHY a gate is red (upload/publish failure) instead of conflating it
+ * with a technical assertion failure. Never derive `BLOCKED` by hand — it must come from
+ * a structural check (e.g. "is this URL a local path or an unreachable host") the same
+ * way PASS/FAIL are derived from measured outcomes, not hand-filled.
+ */
+/**
+ * `TIMEOUT` (issue #3170, follow-up to #2880/#3166): distinct from `FAIL` — the gate
+ * RAN but a watchdog killed it before any check observed a real failure (a cold
+ * turbo test-cache + wide affected surface can legitimately exceed the budget with
+ * zero test failures). Without this, a genuine "nothing was verified" reads
+ * identically to "a test broke" in the marker, so neither a human nor an agent can
+ * tell them apart without opening the rawTail. `requireStickyGate` already rejects
+ * anything outside {PASS, NA}, so `TIMEOUT` fails closed for free — same shape as
+ * `BLOCKED` above. Never derive it by hand — it must come from `deriveResult()`
+ * (report.ts), which requires every blocking failure to be a structurally-measured
+ * timeout with zero observed failures; any real failure always dominates to `FAIL`.
+ */
+export type VerifyResult = "PASS" | "FAIL" | "NA" | "BLOCKED" | "TIMEOUT";
 
 /** Build a dynamic marker encoding sha + result (parsed by a merge-gate). */
 export function makeMarker(sha: string, result: VerifyResult, prefix = MARKER_PREFIX): string {
