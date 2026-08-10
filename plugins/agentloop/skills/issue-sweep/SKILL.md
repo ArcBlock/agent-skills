@@ -171,9 +171,15 @@ founder/人随手开的 issue 常常 **0 label、0 comment**,actionable 信号�
 # 发现,不是「founder 随手开的」catch-all 目标,有自己专属的处理通道(见 Step 3b「test-sweep
 # 发现的 issue」),混进这里会被误当人类工作项二次 triage。
 # 下一节的 reserved 规则仍然适用——带 agent:hold 的冻结终态动作(人类新评论仍要响应)。
+# ★ epic-managed / epic:<n> 必须在 catch-all 的 select 里就排除(Codex P2 on arc#3558):
+#   conductor 子 issue 常常只有这两类 label、尚无 work-type label;若不在 jq 里滤掉,
+#   下面「对捞出的每条补 label / triage comment」会在 reserved 检查之前就 mutation,
+#   与 epic-managed「不 triage、不评论」矛盾。
 # -R <repo_slug> from repo-profile.md.
 gh issue list -R <repo_slug> --state open --limit 500 --json number,title,labels --jq '
-  .[] | select(([.labels[].name] | map(select(
+  .[]
+  | select(([.labels[].name] | any(. == "epic-managed" or startswith("epic:"))) | not)
+  | select(([.labels[].name] | map(select(
     . == "doc-audit" or . == "bug" or . == "P0" or . == "P1" or . == "P2" or . == "P3"
     or . == "enhancement" or . == "feature" or . == "research" or . == "idea"
     or . == "doc-audit-kb" or . == "test-sweep-failure" or . == "test-sweep-report")) | length) == 0)
@@ -183,6 +189,10 @@ gh issue list -R <repo_slug> --state open --limit 500 --json number,title,labels
 > 这条命令稳定捞出两位数条对 label 扫描不可见的 open issue,全是 founder 直开的
 > 工作项——系统性缺口,不是单条偶发个案(archetype:
 > `test/sweep-golden/fixtures/869-research-no-labels.json`)。
+
+**Before any catch-all mutation:** drop anything that still slipped through with
+`epic-managed` (belt-and-suspenders; the jq above is the primary filter). Never
+add work-type labels or post triage comments on epic-managed issues.
 
 对捞出的每条:读 title+body 判 work-type(`调研`/`研究`/`[research]` → `research`;
 `idea:`/提案语气 → `idea`;带 spec/验收标准 → `feature`;报错/复现步骤 → `bug`),
