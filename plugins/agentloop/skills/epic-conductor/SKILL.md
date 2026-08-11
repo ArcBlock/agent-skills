@@ -153,12 +153,8 @@ For a **security-face** PR, post a short **risk-summary** comment before merging
 ### 9. Closeout (mandatory — the epic isn't done until this is posted)
 - **Cohesion check**: on the merged main, run the deterministic gate / full suites across the touched packages — N PRs merged in sequence MUST cohere; catch integration breakage no single PR's CI saw.
 - **End-to-end verification**: drive the epic's actual thesis end-to-end on real infrastructure (real data, real services), as far as the merged code allows. Be HONEST about **user-reachable vs mechanism-level** where a wiring seam remains, and file the seam as a follow-up.
-- **Visual verification when there's a UI *or a content/docs site surface***: capture **screenshots of every real rendered surface**, upload them so they inline in GitHub (`raw.githubusercontent.com/.../main/...` only — branch raw URLs die after merge), and post ONE walkthrough comment on the epic with captioned inline screenshots + the terminal evidence for non-UI steps.
-  - **HTTP 200 / build logs are NOT closeout.** If the epic ships pages people read (docs boards, landing pages, product UI), screenshots are the deliverable.
-  - For **docs/content epics**: after merge, boot the local blocklet, hit directory-based routes (not frontmatter slug paths), screenshot each board's overview + a task page + at least one locale, upload via media-upload, post the walkthrough on the epic. Skipping this and only reporting curl status is a **closeout defect**.
-  - If the human asked for a screenshotted closeout, this step is the deliverable, not an extra.
-- **Gate honesty on content sites**: when merge gate is red on main for reasons outside the epic diff, say so in the closeout; file baseline follow-ups separately.
-- **Wrap**: close sub-issues + the epic with a summary (deliverables table, closeout verdict, screenshot links, follow-ups filed), clear the lock list (refresher exits), report to the human with the epic + PR URLs and what each screenshot proves.
+- **Visual verification when there's a UI**: capture **screenshots of every real rendered surface**, upload them so they inline in GitHub (raw host on the default branch — a bare comment post can drop images), and post ONE walkthrough comment on the epic with captioned inline screenshots + the terminal evidence for non-UI steps. If the human asked for a screenshotted closeout, this step is the deliverable, not an extra.
+- **Wrap**: close sub-issues + the epic with a summary (deliverables table, closeout verdict, follow-ups filed), clear the lock list (refresher exits), report to the human with the epic + PR URLs and what each screenshot proves.
 
 ## Tracking
 Keep a task list mirroring the sub-issues with dependencies (`addBlockedBy`), mark in_progress on dispatch and completed on merge, plus one closeout task blocked by all. It's how you and the human both see wave progress.

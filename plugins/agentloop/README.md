@@ -32,7 +32,7 @@ skills/*/SKILL.md              # the skills themselves (see below)
 
 **Skills:** loop — `issue-sweep` `issue-review` `pr-sweep` `pr-review` `impact-check`
 `design-review` `build-phases` `issue-graph`; gate — `verification`; fleet — `fleet-setup`
-`fleet-report`; adoption — `repo-setup`; utility — `media-upload`.
+`fleet-report`; adoption — `repo-setup`; utility — `media-upload` `git-hygiene`.
 
 These skills still contain arc-specific case-law and paths; de-arc-ifying them into
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and

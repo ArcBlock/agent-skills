@@ -246,6 +246,8 @@ marker 容易和真实 sha 不一致(短 sha 手写 marker 被全量比对判 mi
 verdict 写成独立的普通 PR comment(`gh pr comment`/`mcp__github__add_issue_comment`),
 verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合并成一条手写 comment。
 
+**verdict/讨论类评论正文里绝不逐字粘贴任何 upsert marker(`<!-- verification-report ...` / `<!-- pr-review-verdict ...` 等)**——哪怕只是引用/说明它是什么。`postOnce` 的 upsert 定位只认评论**第一条非空行**上的 marker(#3576 起收紧,narrows #1246),按此规则一条纯讨论评论不会被误覆盖;但更安全的做法是**根本不要逐字粘贴**——要提及就用代码块转义、去掉尖括号或加空格断开,别让它以合法 marker 形态出现在评论正文里。
+
 **核心原则:门控是信号不是判官。** 失败必须定根因:
 
 | 根因 | 信号 | 处置 |
@@ -274,7 +276,7 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 
 ```bash
 # diff 命中 UI Face Paths(regex 见 repo-profile.md「UI Face Paths」;下方为 arc 的值)→ 触发
-gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|providers/runtime/web-device/|packages/aup/|packages/core/)' \
+gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|providers/runtime/web-device/|providers/.+/aup/|packages/aup/|packages/core/)' \
   && echo "UI 面命中 → 跑 /ui-verify --pr $n"
 ```
 

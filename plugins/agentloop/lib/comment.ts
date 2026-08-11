@@ -169,6 +169,16 @@ function isCommentFilterBudgetError(out: string): boolean {
  * sha is found and updated, not duplicated. Exported so non-verification callers
  * (e.g. scripts/team-report.ts's `--post-issue`) can reuse the same upsert-by-
  * marker-prefix dance instead of re-implementing the lookup+PATCH/POST.
+ *
+ * The lookup requires the marker to open the comment's **first non-empty line**
+ * (`stickyBody` always writes it there) — a comment that merely *mentions* or
+ * quotes the marker text somewhere in its prose does NOT match. Before #3576 this
+ * was a plain substring `test()` anywhere in the body: a pr-review verdict comment
+ * that quoted the marker to explain a cached report got matched and overwritten by
+ * the next `postOnce` upsert, destroying the verdict. This intentionally narrows
+ * #1246's old accommodation (a hand-written header pushing the real marker to line
+ * 2 no longer upserts, it now posts a duplicate) — that trade was made explicitly
+ * on #3576, see the issue for both incidents.
  */
 export function postOnce(
   pr: string,
@@ -178,9 +188,12 @@ export function postOnce(
 ): PostCommentResult {
   const payload = JSON.stringify({ body });
   const ghRepoEnv = resolveGhRepoEnv(runner);
+  const firstLineTest =
+    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "")) | ` +
+    `test("^${markerPrefix}")`;
   const found = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
-      `--jq '[.[] | select(.body|test("${markerPrefix}"))][-1].id // empty'`,
+      `--jq '[.[] | select(${firstLineTest})][-1].id // empty'`,
     ghRepoEnv,
   );
   // Trust the lookup only when the call succeeded AND it looks like a numeric id
