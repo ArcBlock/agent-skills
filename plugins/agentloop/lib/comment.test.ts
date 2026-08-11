@@ -126,9 +126,13 @@ describe("postComment", () => {
     expect(cmds.some((c) => c.includes("-X POST"))).toBe(false);
   });
 
-  it("upsert query uses `test` (not `startswith`) so a marker embedded mid-body is still found (#1246)", () => {
-    // Regression: a reviewer hand-wrote `> 🤖 AI Agent PR Review ...\n\n<!-- verification-report ... -->`,
-    // pushing the marker off line 1. `startswith` missed it and a duplicate comment got posted.
+  it("upsert query still uses `test` (not `startswith`), now anchored to the first non-empty line (#1246, narrowed by #3576)", () => {
+    // #1246's original accommodation (match the marker anywhere via substring `test()`,
+    // to survive a hand-written header pushing it off line 1) was intentionally narrowed
+    // by #3576: a comment that only *quotes* the marker in prose was getting matched and
+    // overwritten. The lookup is still `test()` (not `startswith`), but now scoped to the
+    // comment's first non-empty line — see the real jq-behavior tests below for the actual
+    // match/no-match semantics against sample comment bodies.
     const cmds: string[] = [];
     const runner = (cmd: string) => {
       cmds.push(cmd);
@@ -142,7 +146,52 @@ describe("postComment", () => {
     const jqCmd = cmds.find((c) => c.includes("--jq"));
     expect(jqCmd).toContain("test(");
     expect(jqCmd).not.toContain("startswith(");
+    expect(jqCmd).toContain('split("\\n")'); // first-line extraction, not a bare substring scan
     expect(cmds.some((c) => c.includes("-X PATCH") && c.includes("comments/999"))).toBe(true);
+  });
+
+  describe("marker lookup jq filter (#3576, real jq execution — no gh/network)", () => {
+    // Runs the ACTUAL filter `postOnce` sends to `gh api --jq`, via a real local `jq`
+    // binary, against crafted comment bodies. This is deliberately not a command-string
+    // shape assertion: it proves the match/no-match behavior the issue asked for.
+    const runJqLookup = (bodies: string[]): string => {
+      const firstLineTest =
+        `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "")) | ` +
+        `test("^${MARKER}")`;
+      const filter = `[.[] | select(${firstLineTest})][-1].id // empty`;
+      const comments = bodies.map((body, i) => ({ id: i + 1, body }));
+      const proc = Bun.spawnSync(["jq", filter], {
+        stdin: Buffer.from(JSON.stringify(comments)),
+        stdout: "pipe",
+      });
+      return proc.stdout.toString("utf8").trim();
+    };
+
+    it("accept: matches when the marker opens the comment's first line (real generator output)", () => {
+      const body = stickyBody("## Verification Report\nPASS", SHA, RESULT);
+      expect(runJqLookup([body])).toBe("1");
+    });
+
+    it("reject: does NOT match a comment that only quotes the marker in prose (#3576's real incident)", () => {
+      const body =
+        `> 🤖 AI Agent PR Review @ host · runner:x\n\n` +
+        `## Verdict: APPROVE\n\n` +
+        `The verification-report marker (\`${MARKER} sha=abc result=PASS -->\`) is cache-only, ` +
+        `so I re-ran it manually.\n`;
+      expect(runJqLookup([body])).toBe("");
+    });
+
+    it("reject: does NOT match #1246's old accommodation (header pushes marker to line 2) — the narrowed trade-off", () => {
+      const body = `> 🤖 AI Agent PR Review @ host · runner:x\n\n${MARKER} sha=abc result=PASS -->\nbody`;
+      expect(runJqLookup([body])).toBe("");
+    });
+
+    it("picks the LAST matching comment id when several genuine reports exist (upsert targets the latest)", () => {
+      const older = stickyBody("older report", "sha1", "FAIL");
+      const newer = stickyBody("newer report", "sha2", "PASS");
+      const unrelated = "just a normal human comment, no marker at all";
+      expect(runJqLookup([older, unrelated, newer])).toBe("3");
+    });
   });
 
   it("surfaces the raw gh output on failure (e.g. a proxy rejection reason)", () => {

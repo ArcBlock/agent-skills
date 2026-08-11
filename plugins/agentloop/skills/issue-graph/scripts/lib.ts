@@ -125,7 +125,7 @@ export function isAgentAuthored(body: string): boolean {
  * 评论,跨 3 台机器、近 3 周,结论从未变化,纯浪费)。
  *
  * 判定:最后一条评论是 agent 发的 rollup 核对结论(标题含 rollup/kick/父级
- * 类关键词,紧邻"核对"或"复核"),且它的时间晚于所有已知子 issue 的关闭
+ * 类关键词,紧邻"核对"/"复核"/"核实"),且它的时间晚于所有已知子 issue 的关闭
  * 时间——即上次核对之后没有任何子 issue 状态变化,再核一次只会得到相同结论。
  * 子 issue 关闭时间未知(maxChildClosedAt 为 null)时保守按"已复核"处理,
  * 不空转。
@@ -136,13 +136,16 @@ export function isRollupAlreadyReviewed(
   maxChildClosedAt: string | null,
 ): boolean {
   if (!lastCommentBody || !lastCommentCreatedAt) return false;
-  // "核对"/"复核" 是同义的"已过一遍结论"措辞变体，且触发词不止"父级 rollup"——
-  // 真实评论里见过 "Rollup 收尾核对"、"Rollup 复核"（arc#1104）、"Kick 复核"
-  // （arc#114，close-kick 反查同样落到这个 rollup 判定上）。逐字硬编码每个
-  // 组合会漏下一个变体，改成"关键词与核对/复核彼此靠近（20 字内）"的邻近匹配，
-  // 覆盖已知变体也不必每次撞见新措辞就再改一次正则。
+  // "核对"/"复核"/"核实" 是同义的"已过一遍结论"措辞变体，且触发词不止"父级
+  // rollup"——真实评论里见过 "Rollup 收尾核对"、"Rollup 复核"（arc#1104）、
+  // "Kick 复核"（arc#114，close-kick 反查同样落到这个 rollup 判定上）、
+  // "父级 rollup 核实"（arc#753，arc#3715）。逐字硬编码每个组合会漏下一个
+  // 变体，改成"关键词与核对/复核/核实彼此靠近（20 字内）"的邻近匹配，覆盖
+  // 已知变体也不必每次撞见新措辞就再改一次正则。
   const isRollupVerdict =
-    /(rollup|kick|父级).{0,20}(核对|复核)|(核对|复核).{0,20}(rollup|kick)/i.test(lastCommentBody);
+    /(rollup|kick|父级).{0,20}(核对|复核|核实)|(核对|复核|核实).{0,20}(rollup|kick)/i.test(
+      lastCommentBody,
+    );
   if (!isAgentAuthored(lastCommentBody) || !isRollupVerdict) return false;
   if (!maxChildClosedAt) return true;
   return lastCommentCreatedAt > maxChildClosedAt;

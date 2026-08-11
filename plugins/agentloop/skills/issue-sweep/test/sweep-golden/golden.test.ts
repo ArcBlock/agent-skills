@@ -161,6 +161,15 @@ describe("isAiAgentComment (marker-based: a machine sweep-trace, not the copyabl
     expect(isAiAgentComment("I asked the 🤖 AI Agent to fix this")).toBe(false);
     expect(isAiAgentComment("")).toBe(false);
   });
+
+  // arc#3669 / arc#3716: codex-review-backlog's report marker wasn't in the MACHINE_MARKER
+  // whitelist, so a real automated backlog report (identity header + its own report marker)
+  // was misread as an unprocessed human comment.
+  it("recognizes a codex-backlog-report comment as agent-authored (arc#3669/#3716)", () => {
+    const body =
+      "> 🤖 AI Agent @ vm · runner:x · skill:codex-review-backlog\n\n<!-- codex-backlog-report: {} -->\n\n## Codex backlog...";
+    expect(isAiAgentComment(body)).toBe(true);
+  });
 });
 
 describe("labelStance (arc#1722: which of agent:ready / needs-human-confirm was applied last)", () => {
@@ -378,6 +387,15 @@ describe("isTerminalAiComment", () => {
   it("still ignores a deferral-looking word inside a fenced code block when no terminal indicator is present", () => {
     const body = "> 🤖 AI Agent\n配置示例:\n```yaml\ncancel-in-progress: false\n```\n仅供参考。";
     expect(isNonTerminalAiComment(body)).toBe(false);
+  });
+
+  // arc#3119 / arc#3716: a real "已开 PR：\n\n**#3703 — ..." verdict uses a fullwidth
+  // colon + two newlines + markdown-bold before the PR number — the ASCII-only
+  // `PR\s*#\d+` pattern didn't match, so a genuinely terminal comment could have been
+  // misread as non-terminal on a repeat of the same wording without another coincidental hit.
+  it("recognizes a terminal PR-linked verdict using fullwidth colon + newline + markdown bold before the number (arc#3119/#3716)", () => {
+    const body = "落地实现，已开 PR：\n\n**#3703 — feat(release): ...**";
+    expect(isTerminalAiComment(body)).toBe(true);
   });
 });
 
