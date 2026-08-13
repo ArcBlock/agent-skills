@@ -32,7 +32,14 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
   exit 2
 fi
 
-ROOT="$(git rev-parse --show-toplevel)"
+# Always operate on the PRIMARY checkout (git worktree list's first entry),
+# not whichever worktree happened to invoke this script — apply's
+# "return to default branch" step collides with the default branch already
+# being checked out in the primary worktree when run from a linked one.
+ROOT="$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
+if [ -z "$ROOT" ]; then
+  ROOT="$(git rev-parse --show-toplevel)"
+fi
 cd "$ROOT"
 
 remote="${GIT_HYGIENE_REMOTE:-origin}"
@@ -81,6 +88,19 @@ echo "current: $CURRENT  dirty_lines: $DIRTY_PRIMARY"
 echo "origin/${DEFAULT}: $(git rev-parse --short "$OD")"
 echo
 
+# Emit one TSV line per worktree: path<TAB>branch(or HEAD)<TAB>locked(0/1).
+# Porcelain output (not the human `git worktree list` table) so paths
+# containing spaces survive intact instead of being truncated by
+# whitespace-splitting (`awk '{print $1}'`).
+list_worktrees_tsv() {
+  git worktree list --porcelain | awk '
+    /^worktree / { if (p != "") print p "\t" b "\t" l; p = substr($0, 10); b = "HEAD"; l = "0"; next }
+    /^branch refs\/heads\// { b = substr($0, 19); next }
+    /^locked/ { l = "1"; next }
+    END { if (p != "") print p "\t" b "\t" l }
+  '
+}
+
 echo "=== worktrees ==="
 printf '%-8s %-6s %-50s %s\n' "dirty" "lock" "branch" "path"
 
@@ -90,42 +110,14 @@ SAFE_BR_FILE="$(mktemp)"
 KEEP_BR_FILE="$(mktemp)"
 trap 'rm -f "$SAFE_WT_FILE" "$KEEP_WT_FILE" "$SAFE_BR_FILE" "$KEEP_BR_FILE"' EXIT
 
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  path="$(echo "$line" | awk '{print $1}')"
-  if echo "$line" | grep -q '\[.*\]'; then
-    br="$(echo "$line" | sed -n 's/.*\[\(.*\)\].*/\1/p')"
-  else
-    br="HEAD"
-  fi
-  locked=0
-  echo "$line" | grep -qi locked && locked=1
+while IFS="$(printf '\t')" read -r path br locked; do
+  [ -z "$path" ] && continue
   d=0
   if [ -d "$path" ]; then
     d="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   fi
   printf '%-8s %-6s %-50s %s\n' "$d" "$locked" "$br" "$path"
-
-  # classify worktree (skip primary)
-  if [ "$path" = "$ROOT" ]; then
-    continue
-  fi
-  if [ "$d" != "0" ] || [ "$locked" = "1" ]; then
-    echo "$path|$br|dirty=$d locked=$locked" >>"$KEEP_WT_FILE"
-    continue
-  fi
-  case "$path" in
-    /tmp/*|/private/tmp/*)
-      if [ "$br" = "HEAD" ]; then
-        echo "$path|$br|detached-tmp" >>"$SAFE_WT_FILE"
-        continue
-      fi
-      ;;
-  esac
-  # branch classification deferred after SAFE_BR list; mark pending
-  echo "$path|$br|pending" >>"$KEEP_WT_FILE.tmp" 2>/dev/null || true
-  echo "$path|$br" >>"${KEEP_WT_FILE}.pending"
-done < <(git worktree list)
+done < <(list_worktrees_tsv)
 
 # --- classify local branches ---
 while IFS= read -r br; do
@@ -155,19 +147,11 @@ else
 fi
 echo
 
-# Re-classify pending worktrees using SAFE branch list
+# Re-classify worktrees using the SAFE branch list computed above.
 : >"$KEEP_WT_FILE"
 : >"$SAFE_WT_FILE"
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  path="$(echo "$line" | awk '{print $1}')"
-  if echo "$line" | grep -q '\[.*\]'; then
-    br="$(echo "$line" | sed -n 's/.*\[\(.*\)\].*/\1/p')"
-  else
-    br="HEAD"
-  fi
-  locked=0
-  echo "$line" | grep -qi locked && locked=1
+while IFS="$(printf '\t')" read -r path br locked; do
+  [ -z "$path" ] && continue
   d=0
   if [ -d "$path" ]; then
     d="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
@@ -181,7 +165,15 @@ while IFS= read -r line; do
   if [ "$br" = "HEAD" ]; then
     case "$path" in
       /tmp/*|/private/tmp/*)
-        echo "$path|$br|detached-tmp" >>"$SAFE_WT_FILE"
+        # SAFE only when the detached HEAD is already reachable from
+        # origin/<default> — otherwise `worktree remove` can strand
+        # unique, unpushed commits that only this detached HEAD points to.
+        wt_head="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$wt_head" ] && git merge-base --is-ancestor "$wt_head" "$OD" 2>/dev/null; then
+          echo "$path|$br|detached-tmp" >>"$SAFE_WT_FILE"
+        else
+          echo "$path|$br|detached-tmp-unreachable" >>"$KEEP_WT_FILE"
+        fi
         ;;
       *)
         echo "$path|$br|detached" >>"$KEEP_WT_FILE"
@@ -194,7 +186,7 @@ while IFS= read -r line; do
   else
     echo "$path|$br|unmerged" >>"$KEEP_WT_FILE"
   fi
-done < <(git worktree list)
+done < <(list_worktrees_tsv)
 
 echo "=== SAFE worktrees (eligible for remove) ==="
 if [ ! -s "$SAFE_WT_FILE" ]; then
@@ -251,7 +243,10 @@ while IFS= read -r entry; do
   [ -z "$entry" ] && continue
   path="${entry%%|*}"
   echo "worktree remove: $path"
-  git worktree remove --force "$path" || echo "WARN: failed remove $path"
+  # No --force: let git re-check dirty/locked state at removal time in case
+  # something changed it since the inventory scan above (multi-agent race);
+  # --force would silently override that safety net and discard the change.
+  git worktree remove "$path" || echo "WARN: failed remove $path"
 done <"$SAFE_WT_FILE"
 
 while IFS= read -r br; do
