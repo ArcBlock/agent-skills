@@ -41,7 +41,7 @@ description: Independent clean-context review of ONE open GitHub pull request �
 
 | recommendation | 含义 | 下一步 |
 |---|---|---|
-| `MERGE` | 声明已核实、verification 无真实阻断、无未解冲突 | 可合(由 pr-sweep 按风险闸自动合,或人合) |
+| `MERGE` | 声明已核实、verification 无真实阻断、无未解冲突、无 OPEN 的 bot P1/High | 可合(由 pr-sweep / epic-conductor 按风险闸自动合,或人合) |
 | `COMMENT` | 原则可合但有值得提的关注点(部分修复、缺测试、小问题),**或**是重复对中的**保留方**(注明要关掉的 peer) | 发 comment,通常仍可合 |
 | `SUPERSEDE` | 是重复/矛盾对中**冗余/较差的一方** | 发 comment 说明 + 指向保留方 → **关闭本 PR**(关闭是 pr-sweep 的动作) |
 | `BLOCK` | 有真实缺陷 / verification 失败是本 PR 的错 / 未解冲突 | 发 comment 指出,**不可合** |
@@ -78,6 +78,7 @@ push 前 `git ls-remote origin refs/heads/claude/issue-<N>` 做认领检查—�
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ 0. 读 PR 全貌 + 关联 issue + 已有 review/comments            │
+│ 0.4 ★ bot P1/High 清单(Codex+Cursor);OPEN 则不得 MERGE     │
 │ 0.6 ★ 复审去重(sha 机器键):fresh→跳过;stale→增量,不从零   │
 │ 1. 读 diff + 受影响文件在「当前 main」里的真实样子            │
 │ 2. ★ 逐条核验声明 vs 已落地代码/测试(path:line 或 NOT FOUND)│
@@ -86,7 +87,7 @@ push 前 `git ls-remote origin refs/heads/claude/issue-<N>` 做认领检查—�
 │    门控信号;每次必跑(read-only 安全),--comment 落 PR      │
 │    简单失败可自修;复杂失败 → BLOCK + 完整日志 context       │
 │ 4. ★ 检测与兄弟 PR 的冲突/重复/矛盾(同 issue + 同文件)       │
-│ 5. 出判定:5 类之一 + 证据;MERGE 必须以 Step3 通过为前提     │
+│ 5. 出判定:5 类之一 + 证据;MERGE = Step3 过 + 无 OPEN bot P1 │
 │ 6. (--post)落 verdict comment;never merge、never close    │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -116,6 +117,28 @@ gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate \
 > 一条 `CHANGES_REQUESTED` 是比普通评论更强的信号,merge 前另有独立硬闸拦([pr-sweep Step 5](../pr-sweep/SKILL.md))。
 
 PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲突检测的主键)。读关联 issue(`gh issue view <N>`)拿"这个 PR 到底要解决什么"。
+
+### Step 0.4 — ★ bot findings 清单(Codex + Cursor + 同类 connector)
+
+独立 review 必须**清点** bot 意见,不等待它们、也不代替 conductor 合。等待/回线程/推进的协议只有一处:[`epic-conductor` §6](../epic-conductor/SKILL.md)(pr-sweep Step 5 同契约)。本步只回答「当前 HEAD 上还有没有未处理的 P1/High」。
+
+**Vendors:** `chatgpt-codex-connector[bot]`(P1/P2 或 👍)、`cursor[bot]`(Bugbot High/Medium/Low)、以及任何在 open/push 后发 **inline** finding 的 connector。
+
+从 Step 0 的 ② inline comments + ③ reviews 里筛这些 login。REST `pulls/<n>/comments` 若 404,改 GraphQL `reviewThreads` 或 `gh pr view --comments`——**取失败 ≠ 没有 finding**。
+
+GitHub 会把旧 inline comment 的 `commit_id` 改挂到新 HEAD。**不要**用 `commit_id == HEAD` 当「这条是针对本 SHA 的新意见」。用 `created_at >= 上次 addressing commit` 的、且该线程上还没有 fix/REJECT 回复的,才算 OPEN。
+
+对每条 **P1 / High**(P2/Medium 顺手记,不挡 MERGE):
+
+| 状态 | 判据 |
+|---|---|
+| **fixed** | 其后有 commit,且该线程有 in-thread 回复写了 sha + 改了什么 |
+| **REJECT** | 该线程有不同意的理由(设计层 / 错层 / 假阳性) |
+| **OPEN** | 以上都没有 |
+
+- 任一 P1/High **OPEN** → 不得 `MERGE`。安全/正确性 → `BLOCK`;已有明确修法、该 conductor/fixer 去干 → `COMMENT`(写清 comment id + 修法)。
+- 最新 commit 若只是为了消一条 bot finding:核验**原来的 accept-path 还在不在**(修 A 搞出 B、来回翻,是假 addressed)。
+- 👍 / 无 inline finding → 记「bot clean」,不是「还在想」。
 
 > **`agent:hold`(人类保留 = 终态冻结,不是处理冻结):** Step 0 已取到 `labels`;若见 PR 带 `agent:hold`——**显式手工 `/agentloop:pr-review <n>` 只提示不挡**(人点名就是要看;且本 skill 默认 read-only、永不 merge,风险低)。hold 的含义是"没人反馈之前别合/别关",**不是"别处理"**:review 照常做,**人类在 hold PR 上的新评论必须读并响应**(那往往是修改要求或拍板条件)。verdict 上的体现:即使全绿,也写 `MERGE (held)` 并注明"等人摘 `agent:hold` 后才可合";若人类评论给了明确修改要求 → 按 `COMMENT`/`BLOCK` 处理并把"响应人类反馈"作为下一步(--post 模式可直接在 PR 分支实现人类明确要求的改动)。真正执行合并闸拦截(带 hold 一律不合)的是 [`pr-sweep`](../pr-sweep/SKILL.md)。只人加只人摘,agent 永不自动摘。
 
@@ -348,7 +371,7 @@ bun .claude/skills/e2e-gate/scripts/scope.ts --pr "$n" --json   # backendHit + �
 - **横切影响结论**(Step 2.5 六维度):每维度给证据或显式判"不适用"——反向引用悬空清单(`path:line`)/ parity 缺口 / 端到端使用场景闭环(不只看有没有 caller)/ 性能可疑点(含请求链·init)/ 缺测试 / 该清理的死代码。
 - **verification 结果**:`pre-merge` PASS/FAIL + 失败根因归类(a/b/c/d)。
 - **冲突结论**:与哪个 peer、什么关系、留谁关谁、为什么。
-- **recommendation**:5 类之一。**`MERGE` 必须以 Step 3 验证通过为前提**;未运行或未通过 = 不得发 MERGE。
+- **recommendation**:5 类之一。**`MERGE` 必须以 Step 3 验证通过为前提,且 Step 0.4 无 OPEN 的 bot P1/High**;未运行或未通过 = 不得发 MERGE。有 hold → 写 `MERGE (held)`,等人摘 `agent:hold`(epic-conductor / 人合,本 skill 永不 merge)。
 - **「PR 类型是 feature」不是升级/降档理由。** 全绿 + 逐条核验过 + 非 breaking 的 feature,verdict 就是 `MERGE`,不写"feat 需人批准合并"。要人介入的只有:security 面、breaking change(不兼容协议/wire、schema 无迁移、数据破坏)、架构方向/设计 A/B 未定、人已明确异议——判据与风险档全文见 [`pr-sweep` Step 5](../pr-sweep/SKILL.md)(含「默认放行,出问题再收紧」ratchet)。升级时写清**具体拿不准什么**,而不是 commit type。
 - 价值在**独立发现 + 定责**,不在复述已有 review。
 
@@ -440,6 +463,7 @@ fi
 6. **引擎只判不合。** merge/close 的不可逆动作留给 pr-sweep 的受闸 ladder + 人的边界。
 7. **要人介入时,给可照跑的验证,不给笼统"请确认"。** escalation verdict 必带「需人确认块」(Step 5.5):要你判什么 + agent 已核验什么(免重做) + **怎么验(可还原成命令就给命令 + path:line + 预期,security 逐条列;还原不了的判断题给选项+判据+推荐,绝不造假命令)** + 定了之后各分支解锁动作。拍板块两要素硬性检查:**问题+建议回答、选择+区别+推荐——两个都给不出 = 发现真正的问题,显式升级,不许拿"请人工确认"糊过去**。
 8. **一 PR 一 verdict,以 sha 为界。** verdict comment 全 PR 唯一(marker upsert,跨 runner 也刷同一条);sweep-trace 的 `sha` 是新鲜度机器键——fresh 就跳过(零产出是正确产出),stale 就增量复审。三个 agent 各自 full review、评论堆成六条、没一条对当前 HEAD 有效(#1812)是本条规则要根除的形态。
+9. **Bot P1/High 未 addressed 不得 MERGE。** 清单在 Step 0.4;等/回/推进在 [`epic-conductor` §6](../epic-conductor/SKILL.md)。本 skill 只判合不合,不合。
 
 ## ★ sweep-trace 埋点（L2 可观测层）
 
