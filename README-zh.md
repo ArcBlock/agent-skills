@@ -30,6 +30,12 @@ claude
 /plugin install content-creation@arcblock-agent-skills
 ```
 
+## Kimi Code CLI 支持
+
+本仓库中的 Agent Skills（位于 `.claude/skills/`）也可以在 [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) 中使用。`plugins/` 下的 Claude 专用插件与 Kimi 不兼容。
+
+安装说明和兼容性细节请参见 [docs/kimi-zh.md](docs/kimi-zh.md)。
+
 ## 可用插件
 
 ### 核心知识

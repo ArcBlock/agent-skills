@@ -30,6 +30,12 @@ claude
 /plugin install content-creation@arcblock-agent-skills
 ```
 
+## Kimi Code CLI Support
+
+The Agent Skills in this repository (under `.claude/skills/`) also work with [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli). The Claude-specific plugins under `plugins/` are not compatible with Kimi.
+
+See [docs/kimi.md](docs/kimi.md) for setup instructions and compatibility details.
+
 ## Available Plugins
 
 ### Core Knowledge
