@@ -104,7 +104,24 @@ When a worker returns, the conductor **re-asserts** `agent:hold` + `epic-managed
 Spawn a **separate, clean-context** reviewer agent (never the worker) that runs `agentloop:pr-review <PR#> --post`. In its brief, point it at the exact things to scrutinize hardest for THIS PR (the security boundary, the forge channel, the accept-path coverage, the reuse claims), and for security-relevant PRs tell it to **reproduce the exploit against the code**, not just read it. It emits a verdict (MERGE / COMMENT / BLOCK / …) and posts one verdict comment.
 
 ### 5. Route findings to a fixer
-If the verdict is BLOCK/COMMENT with real findings (or a bot left legit P1/High), route them to a fixer:
+**Compact first — mandatory, no exceptions.** Before a fixer is dispatched, run the raw pile
+(independent-review findings + bot P1/High + any still-open inline comments) through
+[`compact-findings.ts`](./scripts/compact-findings.ts):
+```bash
+bun .claude/plugins/agentloop/skills/epic-conductor/scripts/compact-findings.ts <raw-findings.json>
+```
+It judges each finding against the **current PR HEAD** (not the commit it was originally posted
+against — GitHub reassociates stale `commit_id`s onto new HEADs) and returns `still-valid` /
+`stale` / `duplicate` for every one, never a bare count. The fixer brief is
+`fixerBrief(compacted)` — **only** `still-valid` entries. A conductor that skips this step and
+hands the fixer the raw pile is not following this skill: that is exactly the failure this step
+exists to close (fixers re-fixing already-patched defects, two bots on one line producing two
+fix attempts). Compact's only permitted failure mode is under-killing — a finding it cannot
+judge (no expected-snippet to compare, or the file/line is unreadable) stays `still-valid`;
+losing a real P1 silently is strictly worse than keeping a stale one one round longer.
+
+If the verdict is BLOCK/COMMENT with real findings (or a bot left legit P1/High), route the
+**compacted, still-valid** findings to a fixer:
 - Prefer **resuming the original worker** with the consolidated findings (comment id + `path:line` + intended direction).
 - If its transcript is gone, **spawn a fixer on its existing worktree** (pass the worktree path; it inherits the branch).
 - **Conflicting bot Highs are one synthesis, not a ping-pong.** If fix A (to satisfy finding 1) *is* finding 2, do not undo A and do not ignore 2. Keep the constraint from 1 and the accept-path from 2 in **one** commit.
