@@ -15,10 +15,10 @@ description: Process one GitHub issue end-to-end — read the issue + referenced
 - **Doc-review**:人起源的**新设计**在 issue 里被讨论/评审(找漂移、独立发现、reframe)。轻量、讨论导向,产出 = 评审 comment + 拆分建议。
 - **Doc-audit**:repo 里的**存量老文档**被逐篇审计(对照代码重验、跑测试、给 5 类结论)。**有界**单元,按价值分档投入。
 - **System-audit(comprehensive code audit)**:issue 要求对一个**子系统 / 跨平台 parity / runtime 本身**做全面代码审计(如「Swift/Kotlin 实现是否落后于 Node/CF 参考」)。**无界**任务,**完整执行是契约**——见下「★ System-audit」。
-- **Research(研究类)**:issue 要求**调研一个外部系统/技术与本系统的结合点**(如「研究 perkeep 和 did space 的结合点」)。**只产出 comment,绝不改 repo 代码**——见下「★ Research」。
-- **Idea(想法类)**:issue 是一个**内部提案/想法**(如「提供一个 DID Space + MCP endpoint 给 loop 里的 agent」)——可能可行、可能不可行、可能太模糊、可能与现有设计矛盾。**第一步是 clarify,不是执行**;产出 = 评估 comment + 澄清问题,**绝不改 repo 代码、不开 spin-off**——见下「★ Idea」。
+- **Research(研究类)**:issue 要求**调研一个外部系统/技术与本系统的结合点**(如「研究 perkeep 和 did space 的结合点」)。**调研这一轮只产出 comment,不改 repo 代码**;下一轮按 ratchet 转执行管道——见下「★ Research」(铁律 1 与铁律 10)。
+- **Idea(想法类)**:issue 是一个**内部提案/想法**(如「提供一个 DID Space + MCP endpoint 给 loop 里的 agent」)——可能可行、可能不可行、可能太模糊、可能与现有设计矛盾。**首轮是 clarify,不是执行**;首轮产出 = 评估 comment + 澄清问题 + 行动声明,**首轮不改 repo 代码、不开 spin-off**;**第二轮起按 ratchet 开工**——见下「★ Idea」(铁律 2 与铁律 10)。
 
-五类共用同一台引擎(读 → 对照现实 → 带证据落 comment),但**投入档位和产出形态不同**:doc-review 轻、doc-audit 按价值分档、**system-audit 必须全量**、research 双侧深调但产物只落 comment、idea 对照现有架构评估但产物只落 comment(下面「省 token」那套**不适用于 system-audit 和 research/idea 的调研深度**)。
+五类共用同一台引擎(读 → 对照现实 → 带证据落 comment),但**投入档位和产出形态不同**:doc-review 轻、doc-audit 按价值分档、**system-audit 必须全量**、research/idea 深调但**首轮**只落 comment(下面「省 token」那套**不适用于 system-audit 和 research/idea 的调研深度**)。**research/idea 的「只落 comment」是首轮限定,不是永久状态**——两者的铁律 10 都要求第二轮起转成动作,否则就是原地打转。
 
 > **怎么判类型**:issue 锚定**单篇文档** = doc-review / doc-audit;issue 说「comprehensive audit」「review 整个 runtime / 跨平台是否一致」「需要完整 test run」「发现 gap/bug 开 issue」= **system-audit**;标题带 `[research]` / 正文是「研究一下 X 和我们的 Y」「调研 X 是否适合我们」= **research**;标题带 `idea:` / 正文自称「这是个 idea,首先需要分析可行性和价值」/ 是一段**提案性质**的构想(常附 Slack/讨论原文,无验收标准、无明确 spec)= **idea**。拿不准 audit 类就按 system-audit 的高标准做(宁可多投入,不可粗略);**拿不准「指令还是想法」就按 idea 处理**(先 clarify 的代价远低于把模糊想法当指令执行错方向)。
 
@@ -212,17 +212,21 @@ issue 要求研究一个**外部项目/技术**(开源系统、协议、竞品)�
 
 **铁律(与其他各类的关键差异):**
 
-1. **绝不改本 repo 代码。** 产物 = 一条证据化研究 comment(+ label),不是 PR、不是文件。skill 改进等衍生工作是另一件事,不混在 research 交付里。
+1. **调研这一轮绝不改本 repo 代码。** 产物 = 一条证据化研究 comment(+ label),不是 PR、不是文件。skill 改进等衍生工作是另一件事,不混在 research 交付里。**边界:这条约束的是「research 交付本身」**——铁律 9/10 把 issue 转进 feature 管道之后,它就不再按 research 处理,那一轮该开 PR 就开 PR(切到 feature 的纪律)。**不许拿本条当「永远不动手」的挡箭牌。**
 2. **默认只留 comment + 外部资源链接,不下载保存。** 外部 repo clone 到 scratchpad 用完即弃。**仅当 issue 明确说要收集数据保存在 repo 里**时,才在 `research/<task-slug>/` 开专门目录收集值得保存的(仍走 PR,人签名)。
 3. **两侧都必须代码级,不许只读 README。** 外部侧:shallow clone 到 scratchpad,读架构文档 + 关键源码包,结论带 repo 内相对路径(尽量带行号)+ 官方 doc 链接;我方侧:读本 repo 代码/intent/planning,结论带 `path:line`。**并行 fan-out 两个 subagent(一侧一个)**,主控综合——两侧独立取证,防止先入为主。
 4. **外部项目健康度必查**:`git log` 最近 12 个月提交曲线、最近 release、核心作者近期是否活跃、license、`gh api repos/<owner>/<repo>` 的 pushed_at/stars。结合点结论强依赖对方活性(死项目和刚复活的项目结论完全不同),这常是**独立发现**的来源(如发现 perkeep 2025-10 复活、7 年来首个 release)。
 5. **诚实优先,反「为用而用」。** issue 主人常自带警惕(「不能为用 X 而用」),研究结论必须敢说「这个方向不建议」;每个结合点标注真实受益方和前提条件。
-6. **产物结构**(comment,中文):TL;DR 逐条直接回答 issue 提出的具体问题 → 两侧架构对照表(均代码坐实) → 冲突面 → 结合点**分档**(⭐ 推荐 / ◐ 待定或仅借鉴 / ✗ 不建议,每条给理由) → 待人拍板的下一步选项(**不预设、不自动开 spin-off**——research 的结论天然是 needs-decision,人选定方向后才拆自足的 feature issue) → 外部资源链接清单。
-7. **Label**:`research` + `needs-human-confirm`;并发锁照常(`agent:processing`)。issue 保持 open 等人拍板方向。
+6. **产物结构**(comment,中文):TL;DR 逐条直接回答 issue 提出的具体问题 → 两侧架构对照表(均代码坐实) → 冲突面 → 结合点**分档**(⭐ 推荐 / ◐ 待定或仅借鉴 / ✗ 不建议,每条给理由) → **行动声明收尾**(铁律 10 的 ratchet 格式:「下一轮我会做 X,除非你说不」,X 默认取 ⭐ 档) → 外部资源链接清单。**首轮不自动开 spin-off**(先给人一个廉价的纠错点),但**收尾不是选项菜单**——异议窗口过了就按声明执行。
+7. **Label**:`research`;并发锁照常(`agent:processing`)。**`needs-human-confirm` 只在存在真分叉(互斥且不可逆)时才加**——见铁律 10;能给安全默认的一律不加。issue 保持 open。
 8. **投入档位**:调研深度不省(两侧 subagent 各自全量),但**验证层不同**——research 不跑本 repo 测试套件(没有要验收的实现),证据 = 双侧源码引用 + 官方文档 + 项目活性数据。
-9. **★ 纯调研才以 needs-human-confirm 收尾(#1947 反馈,2026-07-19)。** issue 同时载有**明确终局目标**(「不可动摇的目标」「最终应该…」式表述)时,research 只是 phase 0:调研 comment 落地后**立即转 feature 管道**(拆 sub-issue 图 + 原生边 + 可测终局验收写进父 issue,能做即做),不得以「待拍板选项」冻结。**拍板项必须是互斥分叉**——非互斥的工作项是依赖序,列成 phases 直接执行;可由工程判断决定的选择(API 形态、实现路线)由 agent 自决并在 PR/issue 记录 rationale;只有真正不确定的(不可逆分叉、审美、优先级)才需要人,且用「**推荐 + 默认执行的异议窗口**」(不同意在 issue 喊停)而不是阻塞等待。把工作分解包装成拍板项交给人 = 用拍板换工作量,禁止。(与 ★Idea 铁律 9 同源同判据——#1947/#1949 同日反馈;改其一必同步另一处及 issue-sweep 表对应两行。)
+9. **★ 自带明确终局目标的 issue,调研只是 phase 0,不许停在调研(#1947 反馈,2026-07-19)。**
+   〔本条原标题是「纯调研才以 needs-human-confirm 收尾」——**已被铁律 10 取代**:现在纯调研也不
+   以 needs-human-confirm 收尾,而是 ratchet 行动声明。本条只保留它真正管的那一档:自带终局目标的。〕
+   issue 同时载有**明确终局目标**(「不可动摇的目标」「最终应该…」式表述)时,research 只是 phase 0:调研 comment 落地后**立即转 feature 管道**(拆 sub-issue 图 + 原生边 + 可测终局验收写进父 issue,能做即做),不得以「待拍板选项」冻结。**拍板项必须是互斥分叉**——非互斥的工作项是依赖序,列成 phases 直接执行;可由工程判断决定的选择(API 形态、实现路线)由 agent 自决并在 PR/issue 记录 rationale;只有真正不确定的(不可逆分叉、审美、优先级)才需要人,且用「**推荐 + 默认执行的异议窗口**」(不同意在 issue 喊停)而不是阻塞等待。把工作分解包装成拍板项交给人 = 用拍板换工作量,禁止。(与 ★Idea 铁律 9 同源同判据——#1947/#1949 同日反馈;改其一必同步另一处及 issue-sweep 表对应两行。)
+10. **★ 调研不得以「仍需拍板」收尾——收尾必须是 ratchet(2026-08-20 老冒反馈,镜像 ★Idea 铁律 10)。** 铁律 9 修的是「issue 自带明确目标」那一档;这条修的是**剩下的那档**——纯调研也不许无限期挂在「待人选方向」。研究 comment 的最后一段固定为行动声明:「**下一轮我会做 X**(具体到第一个 spin-off 的标题和第一步),**除非你在此之前说不**」;下一轮人若没有否决也没有改方向,**直接执行 X,不再重新调研**——再写一篇「更完整的调研」是本条明确禁止的动作。分档结论仍然照给,但 ⭐ 档就是默认选中的那个。完整措辞与三条边界见 ★Idea 铁律 10(两处同源,改其一必同步另一处及 issue-sweep 表对应两行)。
 
-**后续轮**:人选定方向(如「做 A」)后,按选项拆自足 feature issue(照「partial → 拆分剩余工作」的自足配方),或转入 `/agentloop:design-review` → `/agentloop:build-phases` 管道;若人只是追问,原地编辑/追加 comment 回答。
+**后续轮**:人选定方向(如「做 A」)后,按选项拆自足 feature issue(照「partial → 拆分剩余工作」的自足配方),或转入 `/agentloop:design-review` → `/agentloop:build-phases` 管道;**人什么都没说 → 按铁律 10 的 ratchet 执行 ⭐ 档,不是再调研一轮**;若人只是追问,原地编辑/追加 comment 回答(仍以行动声明收尾)。
 
 ## ★ Idea(想法类 issue)——先 clarify,open 评估,不当指令
 
@@ -231,18 +235,34 @@ issue 是一个**内部提案/想法**——作者自己都标注「可能可行
 **铁律(与其他四类的关键差异):**
 
 1. **不当指令,当提案。** 第一步是**理解复述**(把 idea 用自己的话讲一遍,分解成可独立评估的价值主张),而不是拆任务。复述放 comment 最前——它给人一个廉价的纠错点(「你理解错了」比「你做错了」便宜一百倍)。
-2. **绝不改 repo 代码、不开 PR、不开 spin-off。** idea 的结论天然是 needs-decision;方向没定之前开 issue/写码都是预设。产物 = 一条证据化评估 comment + label。
+2. **首轮**绝不改 repo 代码、不开 PR、不开 spin-off——方向没定之前开 issue/写码都是预设。产物 = 一条证据化评估 comment + label。**但这条只管首轮,而且首轮只有一次。** 见铁律 10:第二轮起,除非人明确否决,评估必须转成动作。
 3. **Open 评估,三个方向都真查:** ① **可行且有价值**——对照代码找「地基已有多少」(常见惊喜:构件早已存在,idea 只缺接线);② **不可行 / 价值不明**——缺口带 `path:line` 坐实,不糊「应该可以」;③ **与现有设计矛盾**——点名矛盾对象(哪个机制/纪律/在途设计),把张力摆出来而不是悄悄选边。**每条断言 `path:line` 坐实**,grounding 纪律与审计同级。
 4. **诚实优先,敢泼冷水。** idea 作者(常是 founder/架构师)要的是可行性分析,不是附和。「这半个价值主张有实打实的工程量缺口」比「好主意」有价值;同时**先肯定确实成立的部分**再指缺口(同 system-audit 的分层判定)。
-5. **信息不足 → 列具体澄清问题,请人下一轮补,不硬编方案。** 问题要**具体到能拍板**(「作用域是共享还是 per-repo?」「认证接受 owner token 共享吗?」),不是开放式的「你觉得呢」。每个问题说明**为什么它 block 后续**(影响什么设计分叉)。issue 保持 open,多轮迭代收敛。
-6. **产物结构**(comment,中文):理解复述(价值主张分解)→ 现状对照表(地基已有什么,`path:line`)→ 真实缺口(要落地必须补的,带证据)→ 张力/矛盾检查(与现有机制、与在途设计、拓扑分叉)→ 价值评估分档(⭐/◐/✗,按主张分别给,不整体二值判)→ 需人补充的 context(具体澄清问题)→ 下一步选项(A/B/C,不预设)。
-7. **Label**:`idea` + `needs-human-confirm`;并发锁照常(`agent:processing`)。issue 保持 open 等人拍板。
+5. **信息不足 → 列具体澄清问题,请人下一轮补,不硬编方案。** 问题要**具体到能拍板**(「作用域是共享还是 per-repo?」「认证接受 owner token 共享吗?」),不是开放式的「你觉得呢」。每个问题说明**为什么它 block 后续**(影响什么设计分叉)。issue 保持 open。**但「多轮迭代」指的是问题逐轮变少、方案逐轮收窄,不是每轮重出一份评估**——每个问题都必须同时给出「没人答时按哪个默认走」(铁律 10),**没有默认可给的才算真 block**;有默认的问题不阻塞开工。
+6. **产物结构**(comment,中文):理解复述(价值主张分解)→ 现状对照表(地基已有什么,`path:line`)→ 真实缺口(要落地必须补的,带证据)→ 张力/矛盾检查(与现有机制、与在途设计、拓扑分叉)→ 价值评估分档(⭐/◐/✗,按主张分别给,不整体二值判)→ 需人补充的 context(具体澄清问题,**每条附「没人答时我按哪个默认走」**)→ **行动声明收尾**(铁律 10 的 ratchet 格式:「下一轮我会做 X,除非你说不」)。**不以选项菜单 / 「仍需拍板」结尾。**
+7. **Label**:`idea`;并发锁照常(`agent:processing`)。**`needs-human-confirm` 只在存在真分叉(互斥且不可逆)时才加**——见铁律 10;能给安全默认的一律不加。issue 保持 open。
 8. **投入档位**:评估深度不省(对照代码逐主张坐实),但**验证层不同**——idea 不跑测试套件(没有要验收的实现),证据 = 本 repo 源码引用 + 既有设计文档 + 相关讨论原文。
 9. **需求已明确的 idea → 不出拍板菜单(Robert 纠错,#1949/#1947,2026-07-19)。** 作者已把目标说清、只是路径/细节未定时,评估不得把「可给安全默认的决策」做成选择题——那是变相让人替 AI 砍 scope,且人选完后 agent 容易「解决几个具体问题就以为全部完成」。正确形态:①凡能给**安全默认**的决策直接选定并标注「按此推进,不同意请指出」(ratchet,同 Step 5.5);②产出必须附**终局验收清单**(对齐 issue 原始目标、逐项可验证)——它是父 issue close 的唯一条件(rollup 核对的就是它),「子 issue 全关 ≠ 完成」;③人确认方向后**立即全量分解**成自足 spin-off + 写边(此刻铁律 2 的「不开 spin-off」解除),分期是优先级顺序、不是删减;④只有真不确定项(资源级投入、不可逆动作、外部依赖时机)才留给人拍板,且不 block 其他 workstream。判据:拍板项之间若**不互斥**,那它们就不是拍板项,是依赖序——直接排进计划执行。(与 ★Research 铁律 9 同源同判据——#1947/#1949 同日反馈;改其一必同步另一处及 issue-sweep 表对应两行。)
 
+10. **★ 评估不得以「仍需拍板」收尾——收尾必须是 ratchet(2026-08-20 老冒反馈)。** 铁律 5 的「信息不足就列澄清问题」和铁律 2 的「首轮不开 spin-off」,在旧写法下(铁律 7 曾无条件挂 `needs-human-confirm` + 「issue 保持 open 等人拍板」)合起来给了 idea 一个**结构性的原地打转出口**:每一轮都能合法地产出一篇高质量分析然后停在「仍需拍板」,人再说一句,下一轮再分析一篇。实测这就是「两个 agent 互相附和、没有人去做」的来源。**本条与铁律 2/5/7 的现行文字是配套改的**——修法是**把默认方向反过来**:
+
+    - **评估 comment 的最后一段不是问题清单,是行动声明。** 格式固定:
+      「**下一轮我会做 X**(具体到第一个 spin-off 的标题和第一步动作),**除非你在此之前说不**。」
+      仍然可以在上面列澄清问题——但它们是**优化输入**,不是**开工前置**;你必须同时给出
+      「问题没人答时我按哪个默认走」。**给不出安全默认的,才是真拍板项**(同 Step 5.5 硬前置)。
+    - **异议窗口过了就开工。** 第二轮起(评估 comment 已发、人没有明确否决也没有改方向),
+      **不再重新评估**——直接按上一轮声明的 X 执行:拆自足 spin-off + 写原生边(此刻铁律 2
+      的「不开 spin-off」解除)、能做即做、走 `/agentloop:design-review` →
+      `/agentloop:build-phases`。**再写一篇「更完整的评估」是本条明确禁止的动作。**
+    - **`needs-human-confirm` 只贴给真分叉。** 「这个方向对不对」不是分叉(给推荐 + 异议窗口);
+      「A 和 B 互斥且都不可逆」才是。判据同铁律 9:**拍板项之间若不互斥,那它们就不是拍板项,
+      是依赖序——直接排进计划执行。**
+    - 唯一维持原地不动的情形:**人明确否决**(建议 close,人来 close),或**人提出了新的、
+      与上一轮不同的问题**(答它,然后仍以 ratchet 收尾)。
+
 **与 Research 的区别**:research 调研**外部系统**与本系统的结合点(双侧 subagent、查对方项目活性);idea 评估**内部提案**(单侧,但重点在「对照现有架构找已有/缺口/矛盾」+「把模糊处变成可拍板的问题」)。一个 idea 可能内嵌 research 需求(「用 X 来做这个」)——那就在评估里嵌套 research 那套双侧纪律。
 
-**后续轮**:人答了澄清问题/拍了方向 → 按选定项拆自足 feature issue,或转 `/agentloop:design-review` 出设计;人否决 → 建议 close(人来 close,agent 不动手);人追问 → 原地编辑/追加 comment 回答。**多轮之后 idea 常收敛成 feature/design issue——那一刻起它就不再按 idea 处理**,切到对应类型的纪律。
+**后续轮**:人答了澄清问题/拍了方向 → 按选定项拆自足 feature issue,或转 `/agentloop:design-review` 出设计;**人什么都没说 → 按铁律 10 的 ratchet 开工,不是再评估一轮**;人否决 → 建议 close(人来 close,agent 不动手);人追问 → 原地编辑/追加 comment 回答(仍以行动声明收尾)。**多轮之后 idea 常收敛成 feature/design issue——那一刻起它就不再按 idea 处理**,切到对应类型的纪律。
 
 ## ★ 父级 rollup(孩子全关的父 issue 收尾)——授权的自动 close 例外
 
@@ -411,7 +431,7 @@ tombstone 保住反向引用的链接(反例:#253 想删 context-builder,结果 
 
 review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏洞、未接线死代码该不该留、明确的 bug)。这些**不要埋在审计 comment 里**,也**不要等用户点头**——**直接开一个独立 issue**:贴切 label、assign 相关代码提交者、双向回链审计 issue,并在审计 comment 里一句话提"已 spin-off 到 #N"。开 issue 可逆可追溯,属"自动做"。
 
-- **只为「清楚 / 已确认」的问题自动开**:有坐实证据的 bug/漏洞、或 human 已批准要开的。**仍悬而未决的疑问 / 方案 A-B-C 没定的,不要先开 issue**——留在 comment 里给人拍板,定了再开。
+- **只为「清楚 / 已确认」的问题自动开**:有坐实证据的 bug/漏洞、或 human 已批准要开的。**仍悬而未决的疑问 / 方案 A-B-C 没定的,不要先开 issue**——留在 comment 里给人拍板,定了再开。**「定了」包含 ratchet 选定**(★Idea/★Research 铁律 10:上一轮声明了默认方向、异议窗口已过而人未否决)——那已经是「已确认」,不是「没定」;本条禁的是**方向从没被声明过**就先开 issue,不是禁 ratchet。
 - **开完必写原生边(写边纪律)**:body 首行 `<!-- spinoff-of: #N -->` 标记之外,同时
   `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <新号>`(幂等)。
   标记是 provenance,**原生边才进确定性图计算**(close-kick / rollup);不写边 = 这个
@@ -423,7 +443,7 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
 
 上面 Spin-off 讲的是 review 中**附带撞到**的独立问题。**这一节讲不同的场景**:当审计的**主结论就是 `partial`**(主体已落地、剩几个有界子任务没做),正确动作是把**剩余工作分解成独立、无依赖、自足的实现 issue**——别只在 comment 里列 gap 等人。
 
-**触发(证据坐实即自动拆,不问):** gap 有 `path:line` 坐实确属未完成(如「`grep this.emit providers/iot/frigate/` → 0 命中」),就自动拆。**仍推测性 / 方案 A-B-C 没定的 gap 不拆**,留 comment 给人拍板,定了再拆(和 Spin-off 同一条原则)。
+**触发(证据坐实即自动拆,不问):** gap 有 `path:line` 坐实确属未完成(如「`grep this.emit providers/iot/frigate/` → 0 命中」),就自动拆。**仍推测性 / 方案 A-B-C 没定的 gap 不拆**,留 comment 给人拍板,定了再拆(和 Spin-off 同一条原则,「定了」同样包含 ratchet 选定)。
 
 **拆分纪律:**
 
@@ -464,8 +484,11 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
 │                                                             │
 │  5. 出结论:逐条验证表 + 测试结果 + gap + 推荐 status,带证据  │
 │                                                             │
-│  6. 落 comment(中文),挂 status + needs-human-confirm 标签   │
-│     不 close、不删文件、不改 frontmatter                     │
+│ 5.5 能给安全默认就别升级(needs-human-confirm 硬前置)         │
+│ 5.7 沉默闸:agent 自发 + 无动作无新信息 → 本条不发,只记账    │
+│                                                             │
+│  6. 落 comment(中文),挂 status(+ 真分叉才挂                │
+│     needs-human-confirm);不 close、不删文件、不改 frontmatter│
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -516,6 +539,50 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 
 打 `needs-human-confirm` 标之前先问一遍:**我能不能说出一个安全默认动作?** 能 → 禁止升级,当场按 ratchet(默认放行,出问题再收紧,同 [`pr-review` Step 5.5](../pr-review/SKILL.md))执行该动作并留 trace;不能,才是真判断题,才配打 `needs-human-confirm` 走 Step 6 的结构化拍板块。这条硬前置在**打标动作之前**过,不是打完标再补。
 
+### ★ Step 5.7 — 沉默闸:没有状态变化就不要发言(硬前置,在 Step 6 之前过)
+
+**发 comment 之前先答一道判断题:这一轮我让世界发生了什么变化?** 三选一,只有前两类配发 comment:
+
+| 本轮产出 | 发不发 | 形态 |
+|---|---|---|
+| **动作**——开了 PR / 关了 issue / 改了 label / 提了 spin-off / 推进了一个 phase | **发** | 说做了什么,附产物链接 |
+| **新信息**——上一条 agent comment 里没有的发现、结论翻转、新证据、新缺口、真需要人拍板的分叉 | **发** | 说新在哪 |
+| **以上都不是**——核验了一遍,结论与既有 thread 一致,没有新动作也没有新信息 | **不发**(仅限 agent 自发路径,见下「适用面」) | **零 outward 写**,只写进 run report |
+
+第三类的典型措辞就是它自己的判据——**你正准备写下这些句子中的任何一句,就说明该闭嘴**:
+
+```
+复核确认:现状与描述一致 / 结论成立,无需改动
+premise 复核:与当前 main 一致
+状态跟踪:三个子 issue 现状如下(与上一轮相同)
+本轮不新开动作 / 本轮无进展 / 继续等待
+确认收到 / 已阅 / 同意上述判断
+```
+
+**为什么这是硬闸,不是风格偏好:** 一条「我看过了,没变」的 comment 对读它的人是**净负担**——它把 issue 顶到 timeline 最前面、发一次通知、占一屏,换来的信息量是零。更糟的是它有**自激回路**:sweep 的 round-awareness 判据是「最后一条是未回应的人类评论」,人一回话就触发下一轮 agent 回话;多台机器覆盖同一个 repo 时,就变成两个 agent 在同一条 issue 下轮流附和「这个想法对,我们应该这么做」而**没有人动手**。实测(arc,2026-08-13→20 一周):261 条 agent 评论 : 21 个 PR ≈ 12:1,其中约一半是本表第三类。
+
+**沉默 ≠ 没干活。** 本轮的核验结果写进 `$AGENTLOOP_RUN_REPORT`(`{"noop":true,"summary":"…"}`)——它是给机器看的记账面,不是给人看的通知面。**「查过了没问题」属于记账面。**
+
+#### 适用面:只管 agent 自发的复核,绝不管对人的应答(这条是机制性的,不是礼貌)
+
+**沉默闸只适用于 agent 自己发起的处理路径**:`--autofix-green` 扫描、Step 0.5 的 graph-scan / rollup 候选、状态跟踪、定期复核。
+
+**人类输入触发的路径必须回应,哪怕答案是「没变」。** 理由不是礼貌,是**它会造成每轮重复核验的死循环**:
+[`issue-sweep` Step 2](../issue-sweep/SKILL.md) 的判据是「最后一条是**未回应的**人类评论」,而「已回应」的唯一证据就是那条带
+[sweep-trace](#-sweep-trace-埋点round-awareness-判据--l2-可观测层) 的 agent comment。
+**agent 对人类评论保持沉默 = thread 里永远没有那条 trace = 下一轮 sweep 认定它仍未处理 = 重新读、重新核验、重新判定沉默——每轮都花全额的钱,一条 comment 都不产出。** 那比刷屏更糟:刷屏至少人看得见。
+
+所以判据要**两问连读**,顺序不能反:
+
+1. **这一轮是谁触发的?** 人类输入触发 → **必须发**(内容按下面第 2 问约束),跳过沉默闸。
+2. **(仅 agent 自发时)有动作或新信息吗?** 没有 → 沉默。
+
+#### 边界(在适用面之内)
+
+1. **结论从上一轮翻转 → 必须发**(哪怕方向是「上次说能做,这次发现不能」)。翻转就是新信息。
+2. **要更新既有结论 → 原地编辑那一条**(`--edit-last`),不是新发一条也不是不发。
+3. **人类触发时「必须发」约束的是发不发,不是发什么。** 「复核确认,现状不变」**依然不是合法内容**——回应人类的正确形态是**答他的具体问题 + 一条行动声明**(★Idea/★Research 铁律 10 的 ratchet 格式),而不是复述现状。**#4384 那类 1400 字分析停在「仍需拍板」,归铁律 10 管,不归本闸管;本闸管的是 agent 自己跑去把一条没人问的 issue 重新核验一遍然后宣布「没变」。** 两条规则分工不重叠。
+
 ### Step 6 — 落 comment(产物归宿)
 用 `comment_language` 指定的正文语言写(arc 默认:中文),顶部标 AI 身份与读取/运行范围:
 
@@ -531,11 +598,15 @@ bash <agent_identity_script> --header "Audit" --skill issue-review
 runner 解析优先级、skills hash 语义、前缀谓词纪律见根 CLAUDE.md「Agent Comment 格式」。
 
 ```bash
+# ★ 先过 Step 5.7 沉默闸:agent 自发路径 + 无动作 + 无新信息 ⇒ 这三行一行都不跑。
 gh issue comment <n> --body-file <draft.md>                 # 新发现 = 新 comment
 gh issue comment <n> --edit-last --body-file <draft.md>     # 改写/补充既有结论(如翻译)= 原地编辑,不新发
-gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
+gh issue edit <n> --add-label "status:<x>"                  # needs-human-confirm 另说,见下
 ```
 
+- **`needs-human-confirm` 不是默认搭配。** 上面的命令刻意只加 `status:<x>`——这个标要过 Step 5.5
+  硬前置(说得出安全默认就禁止升级),★Research/★Idea 另有铁律 7 收紧到「只贴真分叉(互斥且不可逆)」。
+  确属真分叉时单独加:`gh issue edit <n> --add-label needs-human-confirm`。
 - **新发现 = 新 comment;更新既有结论(翻译、补证据、回应 human)= 原地编辑那条 comment**,别堆重复 comment。
 - **截图证据的两道硬验收**(破图事故的防复发规则,issue #3010 扩了第三条):① 上传**只走**
   `<ui_upload_script>`(`agent_identity_script` 同节的 Agent Tooling,arc 默认 `<ui_upload_script>`;
@@ -549,7 +620,7 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
   **不再有"MCP 直传"这条路**(旧文案已随 #1037 收编移除,MCP 二进制写会双重 base64 损坏,#1079)。
   **无论走哪条通道,上传/发布失败绝不能被写成"已完成验证"或"截图待处理"**——评论里必须显式标注
   "截图发布失败,证据缺失"(与 `ui-verify`/`pr-sweep` 的 `BLOCKED` 语义一致),不得用中性措辞掩盖。
-- **默认自动发/改、自动开 spin-off issue、自动调 label,不必先问**(agent 有判断力)。`--dry-run` 是显式 opt-out:用户想先预览时才用(不做任何 outward 写)。
+- **默认自动发/改、自动开 spin-off issue、自动调 label,不必先问**(agent 有判断力)。`--dry-run` 是显式 opt-out:用户想先预览时才用(不做任何 outward 写)。**「自动发」的前提是有东西可发**——Step 5.7 判定沉默的那一轮,「自动」的正确表现是**什么都不发**,不是照旧发一条。两者不冲突:5.7 决定发不发,本条决定发的时候要不要请示(不请示)。
 - **审计阶段产物 = verdict comment + labels,不动 body**(body 精简、comment 紧随其下,人已易读);body 补全留到 resolve 阶段、且可选。
 
 ### Step 7 — release 并发锁(收尾必做)
@@ -582,7 +653,9 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 
 13. **验收 / human 点名的验证是契约,「本环境跑不动」要先证明。** 结构性门控走 `/agentloop:verification`(`pre-pr.ts`,数字由脚本测、不手填);验收点名的集成 e2e 走 `/e2e-verify`(`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`)——这些 skill 你完全能调,缺依赖先补 setup(编译原生插件、link CLI、build),只有实际撞上硬工具链缺失(repo profile **Deployment Environments** 所列平台工具链,arc 例:无 Xcode/Android SDK/Playwright)才算「跑不动」,且贴确切报错 + 显式标注跳过哪层。**不拿 unit test 顶替点名的 e2e,不手搓命令手填数字,不预先开脱,不假装跑过。**
 
-14. **生成方案设计时,grounding 纪律和审计时一样严:客观、精确、实事求是。** issue-review 不只审计既有文档——也常被用来给 feature/design issue **产出新方案**(issue-sweep feature 行)。产出设计时同样守纪律:① 每条关于**现状**的断言(架构、存储后端、API、文件布局、现有行为)`path:line` 坐实——**代码是唯一权威**,与引用的 planning/docs 冲突时以代码为准**并指出文档过时**;② 每个**数字**(延迟/吞吐/大小/数量/上限)要么**实测**(附命令+输出)、要么**显式标注为未验证估计**、否则删掉——**凭空的延迟/性能数字是最高发的幻觉**,与 human 在 issue 给的实测冲突时以实测为准;③ 明确区分 **as-is(已核实)** 与 **proposed(新增)**。臆造的后端/布局会让后续所有 phase 建在错地基上。方案 **post 回 issue 前过 `/agentloop:design-review`**(其事实+数字 grounding 是 HARD GATE),别手 post 未审的设计。
+15. **发言要有由头,评估要有出口(2026-08-20 老冒反馈,两条配套)。** ① **沉默闸**(Step 5.7):agent **自发**跑完一轮核验、既无动作也无新信息时,**不发 comment**,结果只进 run report——「我看过了,没变」对人是净负担,且多机覆盖同一 repo 时会退化成两个 agent 互相附和而无人动手。**但对人类输入必须回应**,否则 round-awareness 认定「未处理」,每轮重新全额核验(比刷屏更糟)。② **ratchet 收尾**(★Idea / ★Research 铁律 10):回应人类时,收尾必须是「下一轮我会做 X,除非你说不」,不是「仍需拍板」;异议窗口过了就开工,**禁止再写一篇更完整的评估**。`needs-human-confirm` 只留给互斥且不可逆的真分叉。两条分工:①管**要不要开口**,②管**开口说什么**。
+
+16. **生成方案设计时,grounding 纪律和审计时一样严:客观、精确、实事求是。** issue-review 不只审计既有文档——也常被用来给 feature/design issue **产出新方案**(issue-sweep feature 行)。产出设计时同样守纪律:① 每条关于**现状**的断言(架构、存储后端、API、文件布局、现有行为)`path:line` 坐实——**代码是唯一权威**,与引用的 planning/docs 冲突时以代码为准**并指出文档过时**;② 每个**数字**(延迟/吞吐/大小/数量/上限)要么**实测**(附命令+输出)、要么**显式标注为未验证估计**、否则删掉——**凭空的延迟/性能数字是最高发的幻觉**,与 human 在 issue 给的实测冲突时以实测为准;③ 明确区分 **as-is(已核实)** 与 **proposed(新增)**。臆造的后端/布局会让后续所有 phase 建在错地基上。方案 **post 回 issue 前过 `/agentloop:design-review`**(其事实+数字 grounding 是 HARD GATE),别手 post 未审的设计。
 
 
 ## ★ sweep-trace 埋点（round-awareness 判据 / L2 可观测层）
@@ -592,5 +665,12 @@ gh issue edit <n> --add-label "status:<x>,needs-human-confirm"
 ```html
 <!-- sweep-trace: {"ver":1,"issue":N,"gate":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
+
+> **与 Step 5.7 沉默闸的关系(先读这条,别自相矛盾):** 「每一条 comment 必须带 trace」约束的是
+> **发出去的** comment,不是「每轮必须发一条」。沉默轮不发 comment,自然也没有 trace——**这正是
+> 沉默闸只适用于 agent 自发路径的原因**:没有 trace,下一轮 sweep 就认定「未回应」。对**人类输入**
+> 保持沉默会让那条人类评论永远处于「未回应」状态,每轮重新全额处理一遍。所以:人类触发 ⇒ 必发
+> ⇒ 必带 trace;agent 自发且无产出 ⇒ 不发 ⇒ 无 trace,而这条 issue 本来也不是靠 trace 被跳过的
+> (它压根没有未回应的人类输入)。
 
 **这不只是可观测——它是 issue-sweep 轮次感知的判据。** sweep 靠**机器标记**（sweep-trace / `Generated by [Claude Code]` footer / Bot 作者）区分「agent 裁决（跳过）」与「人类输入（响应）」，**不靠 `> 🤖` 头**——因为人和 agent 用同一个 `<agent_identity_script>` 生成头、格式逐字节相同（实盘 arc#1722：人手贴的指令被当成 agent 裁决跳过 19h）。**本 skill 的评论若不带 trace，会被 issue-sweep 误判成「未处理的人类输入」→ 每轮重复处理/重复评论**（arc#1722 的反向作用正是这个缺口）。identity 头和 `runner:…·skills@…` 行**不算**机器标记（人也会有）。

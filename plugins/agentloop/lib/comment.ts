@@ -40,6 +40,63 @@ export function resolveGhRepoEnv(runner = run): Record<string, string> {
 }
 
 /**
+ * Undo the HTML-entity escaping GitHub's `mcp__github__add_issue_comment` tool
+ * applies to comment bodies (`<` `>` `&` `'` `"`) — the `gh` CLI path posts
+ * bodies verbatim, but a session blocked from `gh` (e.g. a 403'd proxy) falls
+ * back to MCP, and every literal `<!-- marker` prefix then arrives as
+ * `&lt;!-- marker`. Any code that matches a marker literally against the raw
+ * body must decode through this first, or an MCP-posted gate/verdict comment
+ * becomes invisible to it (#4283 — merge-gate read "no verification comment
+ * found on PR" against a PR that actually had one, MCP-escaped).
+ * `&amp;` decodes last so a (hypothetical) double-escaped `&amp;lt;` isn't
+ * mangled by the earlier `&lt;` pass.
+ */
+export function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * jq expression fragment (assumes a string is piped in) applying the same
+ * decode as `decodeHtmlEntities` — for filters that must match a marker
+ * prefix server-side, inside `gh api --jq`, before the body ever reaches TS.
+ * Built via `JSON.stringify` (not hand-escaped) so jq's JSON-compatible string
+ * syntax is correct by construction, including the embedded `"` for `&quot;`.
+ */
+export const HTML_DECODE_JQ = (
+  [
+    ["&lt;", "<"],
+    ["&gt;", ">"],
+    ["&quot;", '"'],
+    ["&#39;", "'"],
+    ["&amp;", "&"],
+  ] as const
+)
+  .map(([from, to]) => `gsub(${JSON.stringify(from)};${JSON.stringify(to)})`)
+  .join(" | ");
+
+/**
+ * Escape a string for safe embedding as a single-quoted POSIX shell argument
+ * (`'...'`). Required for any `--jq` filter built from `HTML_DECODE_JQ` — its
+ * `&#39;` → `'` mapping embeds a literal single quote in the filter text, which
+ * breaks a naively single-quoted shell argument (`--jq '...'''...'`) with an
+ * "unexpected EOF" parse error, silently degrading every caller: `gate.ts`'s
+ * `requireStickyGate` read it as "could not fetch comments" (failing the merge
+ * gate closed, at least safely), while `postOnce`'s upsert lookup below read the
+ * error text as a non-numeric id and fell through to POST — duplicating the
+ * sticky comment on every run instead of patching it in place. Neither failure
+ * mode surfaced in the hermetic unit tests because they inject a mock `runner`
+ * that never touches a real shell (see `gate.test.ts`'s `withComment`).
+ */
+export function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Stable prefix used to find existing verification-report comments (upsert key).
  * Full marker line is dynamic: <!-- verification-report sha=<sha> result=<PASS|FAIL> -->
  * Matching on the prefix ensures a comment written with an older sha is still
@@ -188,12 +245,15 @@ export function postOnce(
 ): PostCommentResult {
   const payload = JSON.stringify({ body });
   const ghRepoEnv = resolveGhRepoEnv(runner);
+  // Decode HTML entities on the extracted first line before testing — an MCP-posted
+  // sticky comment (marker escaped to `&lt;!-- ...`) must still be found, or the next
+  // `gh`-posted run can't PATCH it and spams a duplicate instead (#4283).
   const firstLineTest =
-    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "")) | ` +
+    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
     `test("^${markerPrefix}")`;
   const found = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
-      `--jq '[.[] | select(${firstLineTest})][-1].id // empty'`,
+      `--jq ${shQuote(`[.[] | select(${firstLineTest})][-1].id // empty`)}`,
     ghRepoEnv,
   );
   // Trust the lookup only when the call succeeded AND it looks like a numeric id

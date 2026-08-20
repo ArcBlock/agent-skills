@@ -353,7 +353,18 @@ human's latest comment — this is `issue-review`'s resolve phase:
    未做限制时一天在 `/private/tmp` 下堆了约 36G 孤儿 worktree,而配置的外置盘却几乎
    是空的。**driver 每轮都会兜底清扫一次 `$AGENTLOOP_WORKTREE_BASE` 下超过 15 分钟、
    且没有活跃进程的残留**,但那是安全网,不是借口——worker 自己清理不了的话,残留
-   至少要撑到下一轮才会被回收,别指望它替代及时清理。分支仍严格使用 Step 4 的
+   至少要撑到下一轮才会被回收,别指望它替代及时清理。
+
+   > **★ 同理:不要用会在 `<repo>/.claude/worktrees/` 下建树的 harness 工具**(编码 harness
+   > 自带的 worktree/隔离开关)。那个位置**不由 `$AGENTLOOP_WORKTREE_BASE` 管**,而且它建的树会
+   > **一直 check out 着 `claude/issue-<N>` 分支**——于是下一次(任何机器、任何轮次)对同一个
+   > issue 跑 Step 4 的确定性认领 `git checkout -B claude/issue-<N>` 会 **fatal: already used by
+   > worktree at …,exit 128**,这个 issue 号就此永久锁死。实测(arc,2026-08-20):一个 base clone
+   > 里攒了 16 棵,占 60G,横跨 15 天;已在隔离环境复现过 exit 128。driver 从 0.29.4 起也会兜底
+   > 清扫这些位置(clean 的才删,脏的留下并报告),同样是安全网不是借口——**照上面的
+   > `$AGENTLOOP_WORKTREE_BASE` 显式建、显式删**。
+
+   分支仍严格使用 Step 4 的
    `claude/issue-<N>`（或 phase 变体）。禁止
    多个写 worker 在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
    `AGENTLOOP_SETUP_COMMAND`（fleet driver 从当前 repo 的 `setupCommand` 注入）并在
@@ -382,11 +393,11 @@ unclaimed queue 取下一条,直到候选耗尽或触及真实的运行预算/�
 | Asks to **update** a `drifted` doc ("update 文档"/"补齐发 pr") | First check doc kind: **`planning/`/`intent/` docs default to historical-archive, NOT doc-update** (2026-07-17 policy, see issue-review「historical 归档」— shipped planning docs are historical artifacts; syncing them to code is negative-ROI, they re-drift immediately). Tombstone banner PR, no content rewrite; extract still-valuable rationale into `docs/guides/` first if any. Only `docs/` living guides get doc-update: decide **doc-drift vs code-drift** (verify the shipped surface); if doc-drift, edit the doc to match shipped reality, each addition checked against `path:line`. **Doc-update PR**, no code change. If another human is already drafting a PR for the same cluster, **skip to avoid collision**. |
 | Approves a **bug fix** ("同意"/"easy fix") | Implement the fix; verify locally where possible (typecheck / targeted test). **One PR per bug.** |
 | **Feature / design request**(multi-phase / 架构 / feature) | **先判大小(match vehicle to size):小而明确的 feature(单点、验收清晰、代码可触达)= 直接 reproduce→fix→test→PR,不启动 design-review/build-phases(那套对 leaf 是杀鸡用牛刀);只有真正多阶段/架构级才走下面的 pipeline。** **评估 → 能做就做,绝不冻结。** 旧的「(1) 只发计划、不写码 →(2) 等 human 确认才执行」是 bug:卡在等确认,而那个确认基本会变成「你先评估试试」,于是永远不动。改为:**(a) 评估(必做)** —— 读 issue + 引用代码,判「本环境能否自主起步」:issue 自带 spec/验收标准 + 代码可触达 = 能起步(绝大多数 feature 属此)。**(b) 能起步就直接跑 pipeline,不等确认**:`/agentloop:design-review` 定/优化方案(精炼计划 post 回 issue;**post 的设计必须 grounded:现状断言 `path:line` 坐实、代码权威优先于文档并指出文档过时、数字实测或显式标注估计——design-review 的事实+数字 grounding 是 HARD GATE,别手 post 未审的设计**)→ `/agentloop:build-phases` 分阶段实现(phase = issue checkbox;每 phase 一 commit + 进度评论;PR 按耦合切——见 design-review/build-phases「Issue-driven plans」)。issue 即 source of truth;**drive 能做的 phase 到完成**;跨 hourly run 的用 **in-progress** 续做(round-aware 接力 phase N→N+1,不重做、不冻结)。**(c) 只有真正 human-only fork 才停**(无法判定的架构 A-vs-B、安全、不可逆),且停时给**评估结论 + 具体待决项 + 你的推荐 + 已完成的 phase**,**绝不写「不在本轮范围 / 留开放」**那种冻结性 disposition。**(d) 撞墙 → 给详细问题**:实现中卡住,贴**具体 blocker(试了什么、什么失败、确切缺哪个决定/信息)**作为 in-progress 续做点,不是含糊的「需人定方向」。Never skip 评估;never freeze。 |
-| **Research 请求**(`research` label / `[research]` 标题,如「研究 perkeep 和 did space 的结合点」;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Research](../issue-review/SKILL.md):**绝不改 repo 代码、不开 PR**。并行 fan-out 两个 subagent 双侧代码级调研(外部 repo shallow clone 到 scratchpad + 本 repo `path:line`)→ 综合成一条证据化 comment(TL;DR 逐条答 issue 问题 + 对照表 + 冲突面 + 结合点分档 ⭐/◐/✗ + 待拍板选项 + 外部链接)→ 挂 `research,needs-human-confirm`。**默认只留 comment + 链接,不下载保存数据**;仅当 issue 明确要求收集数据入库时才在 `research/<task-slug>/` 开目录(走人签名 PR)。**不自动开 spin-off**(research 结论天然 needs-decision);人选定方向后下一轮按选项拆自足 feature issue 或转 `/agentloop:design-review`→`/agentloop:build-phases`。**例外(#1947 反馈):issue 同时含明确终局目标(「不可动摇的目标」式表述)→ research 只是 phase 0,调研 comment 后立即按上面 feature 行转执行管道(sub-issue 图 + 能做即做),绝不以「待拍板」收尾;拍板项必须互斥,非互斥的是依赖序直接做,真分叉用「推荐 + 默认执行的异议窗口」。** |
-| **Idea 提案**(`idea` label / `idea:` 标题;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Idea](../issue-review/SKILL.md):**不当指令,当提案——绝不改 repo 代码、不开 PR、不开 spin-off**。理解复述(价值主张分解)→ 对照代码找「地基已有/真实缺口/与现有矛盾」(每条 `path:line`)→ 价值分档 ⭐/◐/✗ → **具体到能拍板的澄清问题** + 下一步选项(不预设)→ 挂 `idea,needs-human-confirm`。信息不足就请人下一轮补 context,多轮收敛;人拍板方向后才拆自足 feature issue 或转 `/agentloop:design-review`。**拿不准「指令还是想法」就按 idea 处理**(clarify 的代价远低于执行错方向)。**例外(#1949 反馈,镜像 Research 行):idea 作者已把需求/目标说清(只是路径/细节未定)→ 评估 comment 后立即按 feature 行转执行管道——可默认的决策直接选定(ratchet + 异议窗口)、终局验收清单写进父 issue(close 唯一条件,子 issue 全关 ≠ 完成)、全量拆自足 spin-off + 写边,能做即做;不出拍板菜单,拍板项必须互斥,详见 issue-review ★Idea 铁律 9。** |
+| **Research 请求**(`research` label / `[research]` 标题,如「研究 perkeep 和 did space 的结合点」;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Research](../issue-review/SKILL.md):**调研这一轮不改 repo 代码、不开 PR**(转进 feature 管道后不受此限)。并行 fan-out 两个 subagent 双侧代码级调研(外部 repo shallow clone 到 scratchpad + 本 repo `path:line`)→ 综合成一条证据化 comment(TL;DR 逐条答 issue 问题 + 对照表 + 冲突面 + 结合点分档 ⭐/◐/✗ + **行动声明收尾** + 外部链接)→ 挂 `research`(`needs-human-confirm` 只在真分叉时加)。**默认只留 comment + 链接,不下载保存数据**;仅当 issue 明确要求收集数据入库时才在 `research/<task-slug>/` 开目录(走人签名 PR)。**首轮不自动开 spin-off**;人选定方向后下一轮按选项拆自足 feature issue 或转 `/agentloop:design-review`→`/agentloop:build-phases`。**例外(#1947 反馈):issue 同时含明确终局目标(「不可动摇的目标」式表述)→ research 只是 phase 0,调研 comment 后立即按上面 feature 行转执行管道(sub-issue 图 + 能做即做),绝不以「待拍板」收尾;拍板项必须互斥,非互斥的是依赖序直接做,真分叉用「推荐 + 默认执行的异议窗口」。** **★ ratchet 收尾(铁律 10,2026-08-20):纯调研也不许挂在「待人选方向」——comment 末尾必须是「下一轮我会做 X,除非你说不」,下一轮人没否决就直接执行 ⭐ 档,禁止再调研一遍。`needs-human-confirm` 只贴真分叉(互斥且不可逆)。** |
+| **Idea 提案**(`idea` label / `idea:` 标题;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Idea](../issue-review/SKILL.md):**首轮不当指令,当提案——不改 repo 代码、不开 PR、不开 spin-off**。理解复述(价值主张分解)→ 对照代码找「地基已有/真实缺口/与现有矛盾」(每条 `path:line`)→ 价值分档 ⭐/◐/✗ → 澄清问题(**每条附「没人答时按哪个默认走」**)→ **以行动声明收尾**(「下一轮我会做 X,除非你说不」)→ 挂 `idea`。**★ ratchet(铁律 10,2026-08-20 老冒反馈):首轮只有一次——第二轮起人没否决也没改方向,就直接执行上一轮声明的 X(拆 spin-off + 写边 + 开工),禁止再写一篇「更完整的评估」;「仍需拍板」不是合法收尾。`needs-human-confirm` 只贴真分叉(互斥且不可逆),能给安全默认的一律不贴。****拿不准「指令还是想法」就按 idea 处理**(clarify 的代价远低于执行错方向)。**例外(#1949 反馈,镜像 Research 行):idea 作者已把需求/目标说清(只是路径/细节未定)→ 评估 comment 后立即按 feature 行转执行管道——可默认的决策直接选定(ratchet + 异议窗口)、终局验收清单写进父 issue(close 唯一条件,子 issue 全关 ≠ 完成)、全量拆自足 spin-off + 写边,能做即做;不出拍板菜单,拍板项必须互斥,详见 issue-review ★Idea 铁律 9。** |
 | PR already **merged** but issue still open | **Close** it (`completed`). `Fixes #N` usually auto-closes; close manually if it didn't. **★ 例外(完整测试闸,Robert 拍板 2026-07-20)**:多 phase / 带 sub-issue 图 / 带终局验收的大块 issue,merge 齐 ≠ 可 close——close 前必须有真实 surface 的完整端到端场景测试报告(见 [`issue-review` ★父级 rollup](../issue-review/SKILL.md) 第 3 步测试闸);缺则先补测试再 close。 |
 | **父级 rollup**（Step 0.5 `rollupCandidates`：open 父 issue 的孩子已全部关闭） | 走 [`issue-review` ★父级 rollup](../issue-review/SKILL.md)：`claim.ts` fencing 抢到才做 → 核对父 issue 验收标准/问题清单（逐条对应到子 issue/PR 证据）→ 综合 comment（带 rollup marker）→ **全覆盖则 close**（这是「自动 close」的显式例外，但 **`agent:hold` 一票否决 close**：hold 禁止一切终态动作，优先级高于本例外——照常综合 comment，但留开等人摘 label），有残留 gap 列出并留开。research/idea 类父 issue 同样综合后 close——结论已在子 issue 落地，父级只是收口。 |
-| Conditional / asks a third party to confirm / **security-sensitive** (e.g. P0 security) / needs an A-vs-B decision / "要人类 review 不要完全用 ai" | **Comment only** — surface the finding + the decision needed; do not act. |
+| Conditional / asks a third party to confirm / **security-sensitive** (e.g. P0 security) / needs a **genuine** A-vs-B decision / "要人类 review 不要完全用 ai" | **Comment only** — surface the finding + the decision needed; do not act. **「A-vs-B」指真互斥且不可逆的分叉**——能给安全默认的不算(Step 5.5 硬前置 + ★Idea/★Research 铁律 10:给推荐 + 异议窗口,照做);**把依赖序包装成拍板项交给人是禁止的**。这一行的 comment-only 不覆盖那种情形。 |
 
 Every finding/action carries reproducible evidence (`path:line`, grep hit, real
 test output). One verdict/PR-link comment per issue — don't stack duplicates.
@@ -690,6 +701,29 @@ premise-check 的要求都不一样,分开处理:
 If no issue has an unprocessed human reply this round: **post nothing, open no
 PR, message nothing.** A no-op sweep is silent. Only speak when you acted.
 
+**★ 沉默也是 PER-ISSUE 的,不只是 per-round。** 上面那条只覆盖「本轮一个候选都没有」。
+下一层的漏斗:一条 issue 被处理了,不等于这一轮就该在它下面留一条 comment。收尾前过
+[`issue-review` 的 Step 5.7 沉默闸](../issue-review/SKILL.md)——**动作 / 新信息 / 都不是**,
+第三类零 outward 写,结果只进 `$AGENTLOOP_RUN_REPORT`。判据是**状态变化**,不是**是否处理过**。
+
+**适用面(照抄 Step 5.7,别记反):沉默闸只管 agent 自发的路径**——`--autofix-green` 扫描、
+Step 0.5 的 kicks / rollupCandidates、定期复核、状态跟踪。**人类输入触发的必须回应**,
+否则 Step 2 的谓词永远看到「未回应的人类评论」,**每轮重新全额核验一遍、一条 comment 都不产出**
+——那比刷屏更贵。回应的内容照 ★Idea/★Research 铁律 10 的 ratchet 收尾,不是「复核确认,现状不变」。
+
+**这条和 Step 3b 的三类沉默规则是同一套,别当成两套:**
+
+| 情形 | 发不发 | 出处 |
+|---|---|---|
+| 🟢 判得可做但本轮没容量 | **不发**(留着下轮重新发现) | Step 3b「唯一正确的沉默」 |
+| 判了「此处做不了 / 要人」却一声不吭 | **必须发**(silence 是失败模式) | Step 3b |
+| **同一条 disposition 上一轮已发过、本轮判定完全相同** | **不重发**(要更新就 `--edit-last` 原地改) | 本条 + Step 5.7 |
+| agent 自发核验完,无动作无新信息 | **不发** | Step 5.7 |
+| 人类输入触发 | **必发**(内容走 ratchet) | Step 5.7 适用面 |
+
+第三行是本次新增的那条:🟡 not-verifiable-here / 🔴 security 这类**终态 disposition 只发一次**——
+它们本来就是「跳到 unlock 才动」的档位,每轮重贴一遍同样的结论既没有新信息,也不会加快 unlock。
+
 ## --dry-run
 
 Do Steps 1–2 and report the candidate list + what each *would* trigger. Make **no**
@@ -737,7 +771,11 @@ afs_search /user/memory 关键词:<本轮重点 label / 子系统 / 常见问题
    (b) **确定性分支 `claude/issue-<N>` + 开 PR 前认领检查 + 一 issue 一 PR + `Fixes #N` + never
    auto-merge** 是收尾硬去重:描述性 slug 分支名是多机重复 PR 的根因,必须只由 issue 号派生、创建前
    查重 SKIP。锁是 advisory(有残留竞态),分支claim 顶上;残留重复由 `pr-sweep` 去重关闭兜底。
-6. **Silent no-op when nothing is pending.**
+6. **Silent no-op when nothing is pending — 而且沉默是 per-issue 的,不只是 per-round。** agent
+   **自发**处理完一条 issue 却既无动作也无新信息 → 不发 comment,结果只进 run report(Step 5 +
+   [`issue-review` Step 5.7](../issue-review/SKILL.md));同一条终态 disposition 也只发一次,要更新就
+   `--edit-last` 原地改。**但人类输入触发的必须回应**——否则 Step 2 谓词永远判它「未回应」,每轮
+   全额重跑。回应的收尾走 ratchet(「下一轮我会做 X,除非你说不」),不是「复核确认,现状不变」。
 6b. **图计算决定候选与传播,LLM 只负责做。** 每轮 Step 0.5 跑
    `graph-scan`:kicks/rollupCandidates 注入候选(无需人类 comment),blocked 确定性
    SKIP;开 spin-off 必写原生边(`link.ts`);无分支兜底的终态动作(rollup)用

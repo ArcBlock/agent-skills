@@ -70,8 +70,11 @@ git log --oneline -1                # 确认在真正的 tip
 
 ```bash
 gh pr list --state open --limit 100 \
-  --json number,title,author,headRefName,baseRefName,mergeable,files,labels,body,createdAt
+  --json number,title,author,headRefName,baseRefName,mergeable,files,labels,body,createdAt,updatedAt,isDraft
 ```
+> **`updatedAt` 不是可选字段**——Step 1.5 的**冻结集**完全靠它判定,而且靠的就是**这一次**调用
+> 的结果(整个机制的意义就是不为「要不要跳过」再花 per-PR 的 API)。漏掉它,冻结集要么失效、
+> 要么退化成每个 PR 多三次调用,那正是它要消灭的开销。
 > 门控形态由 profile `gate_mode` 决定:arc = `scripts`(删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,`pre-merge` 脚本是唯一门控);`ci`/`both` 的 repo 还要 `gh pr checks` 绿——
 > 门控信号来自 Step 3 扇出的 `pre-merge` verification,不再从 status check 读红绿。
 
@@ -127,6 +130,11 @@ gh pr list --state open --limit 100 \
 - **不适用**:因外部依赖(`pr-sweep:blocked-deps`)红而 BLOCK 的不计入轮次(那是等 dependent 修好,不是 agent 自己反复失败)。
 
 **判定"需要重新 full review"(起 agent)—— 满足任一:**
+
+> **⛔ 顺序硬性:先剔除[冻结集](#-冻结集久无人动的-awaiting--连判断要不要跳过都不该花钱2026-08-20),
+> 剩下的 PR 才跑下面这段。** 下面的 needsReview 判定要为**每个** PR 取三个评论面(3 次 API);
+> 冻结集的整个意义就是让长期无人动的 `awaiting-*` PR **连这三次都不花**。顺序反了 = 钱已经花完
+> 了才想起来跳过,冻结集等于没有。
 
 1. 从没 review 过(无 agent 评论 —— 按下方谓词判,不是按某个字面前缀);或
 2. **head commit 时间 > 最后一条 agent 评论时间**(代码改了 → 旧结论作废,重判);或
@@ -207,6 +215,67 @@ if [[ -z "$ai" || "$head" > "$ai" || ( -n "$hu" && "$hu" > "$ai" ) || ( -n "$cod
 **否则(已 review、无新 commit、无人类新评论):**
 - `pr-sweep:awaiting-*`(四档任一)→ **本轮 0 动作**,直接跳过。
 - `pr-sweep:blocked-deps` → 跳过 review,只做 Step 5 的廉价 gate 重查;满足闸就合(治本仍是修那个坏 dependent 包)。
+
+### ★ 冻结集:久无人动的 `awaiting-*` 连「判断要不要跳过」都不该花钱(2026-08-20)
+
+**这一节在执行顺序上排在上面那段 needsReview 判定之前**(文档里写在后面只是因为它要引用前面的
+label 词表);Step 1 的列表一到手就先算冻结集,冻结的 PR 直接出局。
+
+上面那条 skip 只省掉了 **review**,没省掉**判定 skip 本身的成本**——它要按 needsReview 代码块
+取三个评论面(会话 comment + inline review comment + review 总评),**每个 PR 三次 API**,每轮
+重来一遍。当一个 repo 的开放 PR 几乎全是长期无人处理的 `awaiting-caution` 时,这就是全部开销:
+**实测(ArcBlock/did,2026-08-13→20 一周)85 轮 pr-sweep,23.9 小时 agent 工时,10 个开放 PR
+里 8 个是 7 月 19 日就挂上 `security`+`awaiting-caution` 的,产出:0 合并、0 关闭、0 PR。**
+那 24 小时全部花在反复确认一潭按契约本来就不能动的死水。
+
+**冻结判据只吃 Step 1 那一次 `gh pr list` 的结果,不再发任何请求**——`updatedAt` 是 GitHub 对
+「这个 PR 有任何变化」的权威时间戳(新 commit / 新评论 / 新 review / 改 label 都会推它),
+Step 1 的 `--json` 已经把它和 `labels` 一起取回来了。**不要为这一步再调一次 `gh pr list`**:
+再调一次虽然只多一个请求,但它标志着你把这一步理解成了「额外一轮扫描」,而它是「对已有数据做一次
+本地过滤」。
+
+一个 PR 进**冻结集**,当且仅当三条同时成立:
+1. 带 `pr-sweep:awaiting-*`(四档任一);
+2. `updatedAt` 距今 **> `pr_sweep_freeze_ttl_days`**(`.claude/repo-profile.md`,缺省 **14 天**);
+3. **不带任何「agent 还有活干」的 label**:`pr-sweep:needs-fix`(明确修复路线,agent 拥有)、
+   `pr-sweep:blocked-deps`(只需廉价 gate 重查)、`ui-verify:pending`(Step 2.5 的确定性补跑队列
+   ——它欠的是**证据**不是**人的输入**,冻掉它等于让那条队列永远排不到)。
+   这三档**永不冻结**,不管闲置多久。
+
+**对冻结集的动作:一个都不做。** 不取评论面、不算 needsReview、不 review、不评论、不改 label。
+**解冻只有一个信号:`updatedAt` 变新了**——它涵盖新 commit、人类新评论、bot 评论、label 变动,
+一次 list 就能看出来,不需要读内容。解冻后照常走完整 Step 1.5。
+
+> **冻结 ≠ 从视野里消失。** 冻结的 PR 仍然参与 **Step 2 的成簇计算**——那一步只吃 Step 1 已有的
+> `headRefName` / `body`,不额外花钱。**一个冻结的 PR 可以作为 twin 被去重关闭**(它确实和某个
+> 活跃 PR 修同一个 issue 且被取代了,这是新事实,不是「反复确认」);它**不能作为 keeper**——
+> keeper 要承担后续 review 与合并,而冻结意味着这一轮不为它做任何核验。`agent:hold` 的既有规则
+> 优先级更高(带 hold 的既不当 twin 也不当 keeper)。
+
+**这不是给「等人」加时限,是给「反复确认等人」加时限。** PR 的状态一点没变:标还在、结论还在、
+人随时可以回来批。变的只是 agent 不再每两小时把它重新读一遍。
+
+**★ 早退:actionable 集为空就整轮结束,别往下走。** 上面这一步之后如果没有任何 PR 需要动作
+(全部冻结 / 全部 `epic-managed` / 全部无新输入),**立刻写 run report 收尾**,不做 checkout 之后
+的任何 per-PR 工作:
+
+```bash
+cat > "$AGENTLOOP_RUN_REPORT" <<'JSON'
+{"noop":true,"summary":"12 open PRs: 8 frozen (awaiting-* idle >14d), 2 epic-managed, 2 fresh verdicts — nothing actionable"}
+JSON
+```
+
+**冻结数必须写进 summary,不许只写「nothing actionable」。** 静默截断会让「今天真的没事」和
+「有 8 个 PR 卡了一个月没人看」在报表上长得一模一样——而后者是需要人知道的事实。
+
+**长期冻结要升级成一次性的人可见信号,而不是 PR 上的噪声。** 一个 PR 冻结超过
+`pr_sweep_stale_escalation_days`(缺省 **30 天**)时:**不在 PR 上发评论**(它已经在等人了,再催
+一遍只是刷屏),而是在 run report 的 `summary` 里点名 PR 号。fleet report / 团队看板消费这个字段,
+人在**一个地方**看到「这些 PR 挂了一个月」,而不是在 N 个 PR 的 timeline 里各看到一条催办。
+
+**repo 级信号:连续多轮全冻结 = 这个 repo 的 cadence 配错了,不是 sweep 的问题。** run report
+里如实报出来(`"summary":"all 10 open PRs frozen; nothing has been actionable for N rounds"`),
+让人去调 `repos.json` 的 `cadenceMinutes`——**skill 不自己改调度**。
 
 **幂等收尾(每个 full-review 完的 PR):** 据结论**刷新** disposition label(终结=合/关、去 label;held=打对应 label),verdict comment 按 [pr-review Step 6](../pr-review/SKILL.md) 的 canonical upsert **原地更新**而非新发(marker `<!-- pr-review-verdict -->` 定位 + PATCH,跨 runner 也能刷同一条;`--edit-last` 只覆盖「上一条恰是自己发的」情形)。**绝不在「无新输入」时重发同一结论。** 缺这些 label 就建,只用这套受控词(`pr-sweep:needs-fix` / `pr-sweep:awaiting-glance` / `pr-sweep:awaiting-direction` / `pr-sweep:awaiting-judgment` / `pr-sweep:awaiting-caution` / `pr-sweep:blocked-deps`),别再造变体、**不再新打已弃用的 `pr-sweep:awaiting-human`**。
 
@@ -488,6 +557,12 @@ sweep 每轮可顺手核对:新出现的重复簇若仍来自非确定性分支�
 4. **合并分风险档,且档位在每次合并尝试前重算——所有路径无豁免。** 🟢🟡 自动(含**非 breaking 的 feature**——"是 feature"不是升级理由,判风险看改动内容:security/breaking/方向未定才 🔴)、🔴 升级(任何路径都不自动合,含 needs-fix 跑绿后);出过事故的 pattern 按「尺度演进 ratchet」逐条追加进 🔴,不整类回退;UI 面 PR 必须有对当前 HEAD 的截图证据(push 即作废);**人类的修改要求 ≠ 合并批准**——响应之后贴证据置 `awaiting-glance` 等明确批准语;绝不 force-merge 越过冲突;关闭可逆但只关坐实的冗余。
    **升级给人(🔴/security/`awaiting-direction|caution`)的 comment 必带 pr-review「需人确认块」**:要你判什么 + agent 已核验什么(免重做)+ 怎么验(可还原成命令就给可照跑步骤+path:line+预期,security 逐条列安全属性;判断题给选项+判据+推荐,绝不造假命令)+ 各分支解锁动作。**不许停在"请人工确认"**。
 5. **产物落 PR + git history,不落会话。** 一轮 sweep = 若干 PR 进入终态 + 可追溯的 verdict/close/merge 记录。
+6. **一轮的成本要和它能推动的事成正比(冻结集 + 早退,Step 1.5)。** 「跳过」这个判断本身也要花钱——
+   每个 PR 三次评论面 API。所以:`awaiting-*` 且 `updatedAt` 超过 `pr_sweep_freeze_ttl_days`(缺省 14 天)
+   的 PR **连判都不判**,只吃 Step 1 那一次 list;`needs-fix` / `blocked-deps` / `ui-verify:pending`
+   永不冻结(那三档是 agent 还有活干)。actionable 集为空就**立刻早退**,不做任何 per-PR 工作。
+   **但 run report 的 summary 必须报出冻结数和超 30 天的 PR 号**——沉默截断会让「今天真的没事」
+   和「8 个 PR 卡了一个月」在报表上同色。实测反例:did 一周 85 轮、23.9 小时、0 终态动作。
 6. **治本在源头。** 去重是治标;确定性分支 + 认领检查(issue-sweep)才根除重复。
 7. **轮次感知:无新输入不重做(定时 routine 必守)。** 已 review 且无新 commit、无人类新评论的 PR
    默认跳过;只对真正变了的 PR 起 agent,只对外部阻塞已解除的 PR 廉价重查并合。`pr-sweep:awaiting-*`(四档)

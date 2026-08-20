@@ -19,6 +19,7 @@ import {
   expandHome,
   findStaleWorktrees,
   freeDiskKb,
+  harnessWorktreeRoots,
   loadEnvFile,
   logPaths,
   newRunId,
@@ -26,6 +27,8 @@ import {
   permissionFlags,
   pidsWithCwdUnder,
   planRuns,
+  pruneWorktreeRecords,
+  reapDeclaredTmpdir,
   type RepoEntry,
   type ResolvedEngine,
   RUN_REPORT_ENV,
@@ -815,6 +818,7 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     lsofCwds?: Record<number, string>;
     exists?: (p: string) => boolean;
     isWorktree?: (p: string) => boolean;
+    isClean?: (p: string) => boolean;
   }) => ({
     sh: ((cmd: string) => {
       if (cmd.includes("lsof")) {
@@ -829,6 +833,7 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     listDir: () => opts.entries ?? [],
     mtimeMs: (p: string) => opts.mtimes?.[p] ?? NOW - MIN_AGE - 1,
     isWorktree: opts.isWorktree ?? (() => true), // default: every fixture entry IS one of ours
+    isClean: opts.isClean ?? (() => true), // default: nothing uncommitted to lose
     now: NOW,
   });
 
@@ -937,6 +942,149 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
       return { code: 1, out: "permission denied" };
     }) as Sh;
     expect(reapStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual([]);
+  });
+
+  // requireClean — only for the HARNESS roots, which agentloop does not own outright.
+  // Both sides asserted: a checked "leave dirty trees alone" gate that left EVERYTHING alone
+  // would satisfy the skip test on its own, so the accept test is what proves it still reaps.
+  it("requireClean: still reaps a clean stale tree (accept path)", () => {
+    const deps = depsFor({ entries: ["agent-clean"], isClean: () => true });
+    expect(findStaleWorktrees("/repo/.claude/worktrees", deps, MIN_AGE, { requireClean: true }))
+      .toEqual(["/repo/.claude/worktrees/agent-clean"]);
+  });
+
+  it("requireClean: leaves a tree with uncommitted work alone (the 1-in-16 that held real work)", () => {
+    const deps = depsFor({ entries: ["agent-dirty"], isClean: () => false });
+    expect(
+      findStaleWorktrees("/repo/.claude/worktrees", deps, MIN_AGE, { requireClean: true }),
+    ).toEqual([]);
+  });
+
+  it("without requireClean the dirty check is not consulted at all (worktreeBase is disposable by declaration)", () => {
+    let asked = false;
+    const deps = depsFor({
+      entries: ["arc-issue-9.xyz"],
+      isClean: () => {
+        asked = true;
+        return false;
+      },
+    });
+    expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-9.xyz"]);
+    expect(asked).toBe(false);
+  });
+});
+
+describe("harnessWorktreeRoots (the roots no prompt controls — arc 2026-08-20, 16 trees + exit 128)", () => {
+  const plan = [
+    { slug: "ArcBlock/arc", checkoutPath: "/co/ArcBlock__arc__issue-sweep" },
+    { slug: "ArcBlock/arc", checkoutPath: "/co/ArcBlock__arc__pr-sweep" },
+    { slug: "ArcBlock/did", checkoutPath: "/co/ArcBlock__did__issue-sweep" },
+  ];
+
+  it("covers every checkout's own .claude/worktrees", () => {
+    const roots = harnessWorktreeRoots({ mode: "clone" }, plan);
+    expect(roots).toEqual([
+      "/co/ArcBlock__arc__issue-sweep/.claude/worktrees",
+      "/co/ArcBlock__arc__pr-sweep/.claude/worktrees",
+      "/co/ArcBlock__did__issue-sweep/.claude/worktrees",
+    ]);
+  });
+
+  it("in worktree mode also covers each BASE CLONE — where the 16 actually accumulated", () => {
+    const roots = harnessWorktreeRoots({ mode: "worktree", baseDir: "/base/" }, plan);
+    expect(roots).toContain("/base/arc/.claude/worktrees");
+    expect(roots).toContain("/base/did/.claude/worktrees");
+    // one entry per repo, not per (repo × skill)
+    expect(roots.filter((r) => r.startsWith("/base/"))).toHaveLength(2);
+  });
+
+  it("expands a ~ baseDir (a literal ~ path would silently match nothing)", () => {
+    const roots = harnessWorktreeRoots({ mode: "worktree", baseDir: "~/clones" }, plan);
+    expect(roots.some((r) => r.startsWith(`${homedir()}/clones/arc/`))).toBe(true);
+    expect(roots.every((r) => !r.includes("~"))).toBe(true);
+  });
+});
+
+describe("pruneWorktreeRecords (a dead record holds the branch just like a live tree)", () => {
+  const shFor = (out: string, code = 0): Sh => (() => ({ code, out })) as Sh;
+
+  it("counts the records git actually pruned (accept path)", () => {
+    const sh = shFor(
+      "Removing worktrees/pr4063: gitdir file points to non-existent location\n" +
+        "Removing worktrees/wt-4241: gitdir file points to non-existent location\n",
+    );
+    expect(pruneWorktreeRecords(["/base/arc"], { sh, exists: () => true })).toEqual([
+      { repo: "/base/arc", pruned: 2 },
+    ]);
+  });
+
+  it("reports nothing for a repo with nothing to prune — silence, not a zero row", () => {
+    expect(pruneWorktreeRecords(["/base/arc"], { sh: shFor(""), exists: () => true })).toEqual([]);
+  });
+
+  it("skips a repo dir that does not exist, and a git invocation that fails", () => {
+    expect(pruneWorktreeRecords(["/gone"], { sh: shFor("x"), exists: () => false })).toEqual([]);
+    expect(
+      pruneWorktreeRecords(["/base/arc"], { sh: shFor("fatal: not a git repo", 128), exists: () => true }),
+    ).toEqual([]);
+  });
+});
+
+describe("reapDeclaredTmpdir (a custom TMPDIR gets no OS cleanup — 142k entries / 16G measured)", () => {
+  const NOW = 1_000_000_000_000;
+  const DAY = 24 * 60 * 60_000;
+  const depsFor = (entries: string[], mtimes: Record<string, number>, rmOk = true) => {
+    const removed: string[] = [];
+    return {
+      removed,
+      deps: {
+        sh: ((cmd: string) => {
+          if (cmd.startsWith("rm -rf")) {
+            removed.push(cmd);
+            return { code: rmOk ? 0 : 1, out: "" };
+          }
+          return { code: 0, out: "" };
+        }) as Sh,
+        exists: () => true,
+        listDir: () => entries,
+        mtimeMs: (p: string) => mtimes[p] ?? NOW - 10 * DAY,
+        now: NOW,
+      },
+    };
+  };
+
+  it("removes entries older than the age floor (accept path)", () => {
+    const { deps, removed } = depsFor(["old-a", "old-b"], {});
+    expect(reapDeclaredTmpdir({ env: { TMPDIR: "/fleet/tmp" } }, deps)).toEqual({
+      dir: "/fleet/tmp",
+      removed: 2,
+    });
+    expect(removed).toHaveLength(2);
+  });
+
+  it("never touches an entry younger than the floor — a live round's scratch", () => {
+    const { deps, removed } = depsFor(["fresh"], { "/fleet/tmp/fresh": NOW - 60_000 });
+    expect(reapDeclaredTmpdir({ env: { TMPDIR: "/fleet/tmp" } }, deps)).toEqual({
+      dir: "/fleet/tmp",
+      removed: 0,
+    });
+    expect(removed).toEqual([]);
+  });
+
+  // THE safety predicate: ambient /tmp belongs to the whole machine, not to this fleet.
+  it("does nothing at all when the deployment declares no TMPDIR (ambient /tmp is not ours)", () => {
+    const { deps, removed } = depsFor(["old-a"], {});
+    expect(reapDeclaredTmpdir({ env: {} }, deps)).toBeUndefined();
+    expect(reapDeclaredTmpdir({}, deps)).toBeUndefined();
+    expect(removed).toEqual([]);
+  });
+
+  it("does not count an entry whose rm failed", () => {
+    const { deps } = depsFor(["stuck"], {}, false);
+    expect(reapDeclaredTmpdir({ env: { TMPDIR: "/fleet/tmp" } }, deps)).toEqual({
+      dir: "/fleet/tmp",
+      removed: 0,
+    });
   });
 });
 

@@ -55,6 +55,8 @@ reference implementation to copy patterns from.
 | \`merge_gate_entry\` | \`bun .claude/verify/merge-gate.ts\` (optional; only if you use the SHA-match merge gate) |
 | \`additional_merge_gates\` | \`[]\` — extra gates on backend diffs; empty for most repos |
 | \`docs_na_flag\` | \`--na "docs-only change"\` |
+| \`pr_sweep_freeze_ttl_days\` | \`14\` — an \`awaiting-*\` PR untouched this long stops costing a round anything (pr-sweep 冻结集); \`updatedAt\` moving unfreezes it |
+| \`pr_sweep_stale_escalation_days\` | \`30\` — past this the frozen PR is named in the run report summary, never re-nagged on the PR |
 
 **\`gate_mode\` contract:** \`scripts\` = local verification scripts are the only gate (\`gh pr checks\`
 ignored). \`ci\` = CI is the gate. \`both\` = require \`gh pr checks\` green AND local scripts green.

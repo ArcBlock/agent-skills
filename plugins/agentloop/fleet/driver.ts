@@ -652,6 +652,12 @@ export interface StaleWorktreeDeps {
   listDir: (p: string) => string[];
   mtimeMs: (p: string) => number;
   /**
+   * True when the working tree at `p` has NO uncommitted change (`git status --porcelain`
+   * empty). Only consulted for NON-exclusive roots — see findStaleWorktrees' `requireClean`.
+   * A path that is not a git tree at all answers `true`: "nothing uncommitted to lose".
+   */
+  isClean: (p: string) => boolean;
+  /**
    * True for an actual LINKED git worktree — its `.git` is a FILE (containing `gitdir: ...`),
    * unlike a full clone's `.git` DIRECTORY. Informational only now, NOT a removal gate (see
    * findStaleWorktrees) — `base` is `worktreeBase()`, exclusive to agentloop, so anything found
@@ -675,6 +681,12 @@ const realStaleDeps = (now: number = Date.now()): StaleWorktreeDeps => ({
       return false;
     }
   },
+  isClean: (p) => {
+    const q = `'${p.replace(/'/g, `'\\''`)}'`;
+    const r = realSh(`git -C ${q} status --porcelain 2>/dev/null`);
+    // Non-zero = not a git tree (nothing uncommitted to lose). Empty output = clean.
+    return r.code !== 0 ? true : r.out.trim() === "";
+  },
   now,
 });
 
@@ -696,6 +708,7 @@ export function findStaleWorktrees(
   base: string,
   deps: StaleWorktreeDeps = realStaleDeps(),
   minAgeMs = 15 * 60_000,
+  opts: { requireClean?: boolean } = {},
 ): string[] {
   if (!deps.exists(base)) return [];
   const stale: string[] = [];
@@ -710,9 +723,50 @@ export function findStaleWorktrees(
     }
     if (age < minAgeMs) continue;
     if (pidsWithCwdUnder(path, deps.sh).length) continue; // still in use — never touch
+    // Only for roots agentloop does NOT own outright (see harnessWorktreeRoots): the harness
+    // creates those, so one CAN hold work a human still wants. MEASURED (arc, 2026-08-20): of
+    // 16 abandoned `.claude/worktrees/agent-*` trees, 15 were fully merged and 1 held 4
+    // uncommitted files plus 2 test files that existed nowhere else. Deleting on age alone
+    // would have destroyed that one silently — the reap must degrade to "leave it and say so",
+    // not "guess". Never applied to worktreeBase, which is disposable BY DECLARATION.
+    if (opts.requireClean && !deps.isClean(path)) continue;
     stale.push(path);
   }
   return stale;
+}
+
+/**
+ * Every directory where an agent's scratch worktrees can actually appear — which is NOT just
+ * `worktreeBase`.
+ *
+ * `worktreeBase` is where the SKILLS are told to put them (`$AGENTLOOP_WORKTREE_BASE`), and the
+ * reaper watched only that. But the coding harness has its OWN worktree convention —
+ * `<repo>/.claude/worktrees/agent-<hash>` — which no prompt controls, because the harness tool
+ * creates it, not the skill. Nothing ever reaped those. MEASURED on this fleet (2026-08-20):
+ * 16 of them accumulated in one base clone over 15 days, and the failure was not merely disk:
+ * each holds its `claude/issue-<N>` branch CHECKED OUT, so issue-sweep's deterministic claim
+ * (`git checkout -B claude/issue-<N>`) hard-fails `exit 128` — "already used by worktree at …"
+ * — permanently locking that issue number out of the loop. Reproduced in isolation before this
+ * fix landed.
+ *
+ * So enumerate the harness roots too, per base clone AND per checkout (a harness worktree can be
+ * created from either). Deliberately NOT a config field: the path is a harness constant, not a
+ * deployment choice, and a field would just be one more thing to get wrong per machine.
+ */
+export function harnessWorktreeRoots(
+  policy: CheckoutPolicy,
+  plan: Pick<PlannedRun, "slug" | "checkoutPath">[],
+): string[] {
+  const roots = new Set<string>();
+  for (const p of plan) roots.add(`${p.checkoutPath.replace(/\/+$/, "")}/.claude/worktrees`);
+  if (policy.mode === "worktree") {
+    const base = expandHome(policy.baseDir).replace(/\/+$/, "");
+    for (const p of plan) {
+      const repo = p.slug.split("/").pop() ?? p.slug;
+      roots.add(`${base}/${repo}/.claude/worktrees`);
+    }
+  }
+  return [...roots];
 }
 
 /**
@@ -730,9 +784,10 @@ export function reapStaleWorktrees(
   base: string,
   deps: StaleWorktreeDeps = realStaleDeps(),
   minAgeMs = 15 * 60_000,
+  opts: { requireClean?: boolean } = {},
 ): string[] {
   const removed: string[] = [];
-  for (const path of findStaleWorktrees(base, deps, minAgeMs)) {
+  for (const path of findStaleWorktrees(base, deps, minAgeMs, opts)) {
     const q = `'${path.replace(/'/g, `'\\''`)}'`;
     if (deps.isWorktree(path)) {
       const wt = deps.sh(`git -C ${q} worktree remove --force ${q}`);
@@ -744,6 +799,81 @@ export function reapStaleWorktrees(
     if (!deps.exists(path) || deps.sh(`rm -rf ${q}`).code === 0) removed.push(path);
   }
   return removed;
+}
+
+/**
+ * Drop the `.git/worktrees/<leaf>` admin records left behind by worktrees whose directory is
+ * already gone.
+ *
+ * Removing a worktree directory out-of-band (a `rm -rf /tmp/...`, a reboot clearing `/tmp`,
+ * `reapStaleWorktrees`' own `rm -rf` fallback) leaves git's bookkeeping entry behind, and that
+ * entry KEEPS HOLDING THE BRANCH — the same `exit 128` lockout as a live worktree, with no
+ * directory left to explain it. MEASURED: 10 such records in one base clone, all pointing at
+ * `/private/tmp` paths that no longer existed. `git worktree prune` is the whole fix; it only
+ * ever removes records whose gitdir is missing, so it can never touch a live tree.
+ */
+export function pruneWorktreeRecords(
+  repoDirs: string[],
+  deps: Pick<StaleWorktreeDeps, "sh" | "exists"> = realStaleDeps(),
+): { repo: string; pruned: number }[] {
+  const out: { repo: string; pruned: number }[] = [];
+  for (const repo of repoDirs) {
+    if (!deps.exists(repo)) continue;
+    const q = `'${repo.replace(/'/g, `'\\''`)}'`;
+    const r = deps.sh(`git -C ${q} worktree prune -v 2>&1`);
+    if (r.code !== 0) continue;
+    const pruned = r.out.split("\n").filter((l) => l.trim().startsWith("Removing")).length;
+    if (pruned) out.push({ repo, pruned });
+  }
+  return out;
+}
+
+/**
+ * Age out a TMPDIR the DEPLOYMENT itself declared — and only that one.
+ *
+ * A deployment that points `env.TMPDIR` at its own directory (to keep multi-GB build scratch off
+ * the boot disk) silently opts out of the OS's temp cleanup: macOS periodically clears `/tmp`,
+ * and nothing at all clears a custom path. MEASURED here: 142,122 entries / 16 GB accumulated,
+ * and the directory inode alone had grown to 4.5 MB — every `mkdtemp` in it pays for that.
+ *
+ * The gate is `cfg.env.TMPDIR`, NOT the ambient `$TMPDIR`, and that distinction is the entire
+ * safety argument: a declared TMPDIR is a directory this deployment chose for the fleet; the
+ * ambient one is the machine's shared `/tmp`, full of other tools' files (this driver already
+ * learned that the hard way — see worktreeBase's comment on the ~2700 foreign entries). Age is
+ * the only other guard needed, and it must comfortably exceed the longest round (P90 ≈ 1.6h,
+ * max observed 3.7h) so a live round's scratch is never yanked out from under it.
+ */
+export const TMPDIR_MAX_AGE_MS = 2 * 24 * 60 * 60_000; // 2 days
+
+export function reapDeclaredTmpdir(
+  cfg: Pick<DeploymentConfig, "env">,
+  deps: Pick<StaleWorktreeDeps, "sh" | "exists" | "listDir" | "mtimeMs" | "now"> = realStaleDeps(),
+  maxAgeMs: number = TMPDIR_MAX_AGE_MS,
+): { dir: string; removed: number } | undefined {
+  const declared = cfg.env?.TMPDIR;
+  if (!declared) return undefined; // ambient /tmp is not ours to clear — see doc comment
+  const dir = expandHome(declared).replace(/\/+$/, "");
+  if (!deps.exists(dir)) return undefined;
+  let removed = 0;
+  let leaves: string[];
+  try {
+    leaves = deps.listDir(dir);
+  } catch {
+    return undefined;
+  }
+  for (const leaf of leaves) {
+    const path = `${dir}/${leaf}`;
+    let age: number;
+    try {
+      age = deps.now - deps.mtimeMs(path);
+    } catch {
+      continue; // vanished mid-sweep
+    }
+    if (age < maxAgeMs) continue;
+    const q = `'${path.replace(/'/g, `'\\''`)}'`;
+    if (deps.sh(`rm -rf ${q}`).code === 0) removed += 1;
+  }
+  return { dir, removed };
 }
 
 /**
@@ -1605,6 +1735,53 @@ if (import.meta.main) {
       );
   } catch (e) {
     console.log(`# worktree hygiene sweep failed (non-fatal): ${(e as Error).message}`);
+  }
+  // Same two passes over the HARNESS's own worktree roots (`<repo>/.claude/worktrees`), which
+  // no prompt controls and nothing used to reap — see harnessWorktreeRoots for the measured
+  // failure (16 trees, and the `exit 128` branch lockout they cause). `requireClean` here and
+  // NOT above: these are not disposable by declaration, so one holding uncommitted work is
+  // left alone and reported rather than silently deleted.
+  // Each PlannedRun carries the resolved (home-expanded) policy; planRuns' local is not in
+  // scope here, and re-deriving it would be a second place to keep in sync.
+  const resolvedPolicy: CheckoutPolicy = plan[0]?.policy ?? { mode: "clone" };
+  for (const root of harnessWorktreeRoots(resolvedPolicy, plan)) {
+    try {
+      const orphans = reapOrphans(root);
+      if (orphans.killed.length)
+        console.log(
+          `# reaped ${orphans.killed.length} zombie process(es) under ${root}: ${orphans.killed.join(", ")}`,
+        );
+      const removed = reapStaleWorktrees(root, realStaleDeps(), 15 * 60_000, {
+        requireClean: true,
+      });
+      if (removed.length)
+        console.log(
+          `# reaped ${removed.length} harness worktree(s) under ${root}: ${removed.join(", ")}`,
+        );
+    } catch (e) {
+      console.log(`# harness worktree sweep failed for ${root} (non-fatal): ${(e as Error).message}`);
+    }
+  }
+  // Then drop the admin records of worktrees whose directory is already gone — they keep
+  // holding their branch just like a live tree does (see pruneWorktreeRecords).
+  try {
+    const repoDirs = new Set(plan.map((p) => p.checkoutPath));
+    if (resolvedPolicy.mode === "worktree") {
+      const base = expandHome(resolvedPolicy.baseDir).replace(/\/+$/, "");
+      for (const p of plan) repoDirs.add(`${base}/${p.slug.split("/").pop() ?? p.slug}`);
+    }
+    for (const { repo, pruned } of pruneWorktreeRecords([...repoDirs]))
+      console.log(`# pruned ${pruned} dead worktree record(s) in ${repo}`);
+  } catch (e) {
+    console.log(`# worktree-record prune failed (non-fatal): ${(e as Error).message}`);
+  }
+  // Finally the deployment's OWN declared TMPDIR (never the ambient one) — see
+  // reapDeclaredTmpdir for why a custom TMPDIR gets no OS cleanup at all.
+  try {
+    const tmp = reapDeclaredTmpdir(cfg);
+    if (tmp?.removed) console.log(`# reaped ${tmp.removed} stale temp entr(ies) under ${tmp.dir}`);
+  } catch (e) {
+    console.log(`# tmpdir hygiene sweep failed (non-fatal): ${(e as Error).message}`);
   }
 
   // Record one finished run. The summary append + cadence stamp touch SHARED files, so with

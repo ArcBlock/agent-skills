@@ -11,6 +11,7 @@
  * The repo-specific wiring (which gates are required, when, how the PR/HEAD are
  * resolved) lives in the consuming repo (arc: `.claude/verify/merge-gate.ts`).
  */
+import { decodeHtmlEntities, HTML_DECODE_JQ, shQuote } from "./comment.ts";
 import { run } from "./report.ts";
 
 type Runner = (cmd: string) => { code: number; out: string; ms: number };
@@ -33,6 +34,12 @@ export interface GateFail {
  *
  * `startswith` (not substring) — the gate scripts prepend the marker to line 1, so
  * an exact-prefix match avoids matching a narrative comment that merely quotes it.
+ *
+ * Matches against the HTML-entity-decoded body (`decodeHtmlEntities` / `HTML_DECODE_JQ`
+ * from `./comment.ts`) so a marker delivered via the `mcp__github__add_issue_comment`
+ * fallback — which escapes `<`/`>`/`&`/quotes — is recognized the same as one delivered
+ * via `gh` (unescaped). Before this, an MCP-posted gate comment read as "no comment
+ * found" here even though it existed (#4283).
  */
 export function requireStickyGate(
   pr: string,
@@ -42,9 +49,13 @@ export function requireStickyGate(
   rerunHint: string,
   runner: Runner = run,
 ): GatePass | GateFail {
+  // Decode HTML entities before the startswith test — a sticky comment posted via the
+  // MCP fallback (blocked `gh`, #4283) arrives with its marker escaped to `&lt;!-- ...`,
+  // which never literally starts with `prefix`, so an unconditional decode-then-match is
+  // safe (a `gh`-posted, unescaped body decodes to itself — no entities to touch).
   let commentsResult = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
-      `--jq '[.[] | select(.body|startswith("${prefix}"))][-1] // empty' 2>/dev/null`,
+      `--jq ${shQuote(`[.[] | select((.body // "" | ${HTML_DECODE_JQ})|startswith("${prefix}"))][-1] // empty`)} 2>/dev/null`,
   );
   if (commentsResult.code !== 0 || !commentsResult.out.trim()) {
     // Fall back to `gh pr view --json comments` (GraphQL) — observed in
@@ -54,7 +65,7 @@ export function requireStickyGate(
     // genuine "no comment" result from the fallback.
     const fallback = runner(
       `gh pr view ${pr} --json comments ` +
-        `--jq '[.comments[] | select(.body|startswith("${prefix}"))] | last // empty' 2>/dev/null`,
+        `--jq ${shQuote(`[.comments[] | select((.body // "" | ${HTML_DECODE_JQ})|startswith("${prefix}"))] | last // empty`)} 2>/dev/null`,
     );
     if (fallback.code === 0) commentsResult = fallback;
   }
@@ -81,7 +92,9 @@ export function requireStickyGate(
     };
   }
 
-  const markerLine = comment.body.split("\n")[0] ?? "";
+  // The jq filter only *selected* on the decoded body — the returned JSON still carries
+  // the raw (possibly MCP-escaped) text, so decode again before parsing sha=/result=.
+  const markerLine = decodeHtmlEntities(comment.body).split("\n")[0] ?? "";
   const shaMatch = markerLine.match(/sha=([0-9a-f]+)/);
   const resultMatch = markerLine.match(/result=([A-Z]+)/);
   if (!shaMatch)

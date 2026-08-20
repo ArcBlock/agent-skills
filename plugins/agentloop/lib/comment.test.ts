@@ -6,7 +6,9 @@
 import { describe, expect, it } from "bun:test";
 import {
   type CommentArgs,
+  decodeHtmlEntities,
   deliverComment,
+  HTML_DECODE_JQ,
   MARKER_PREFIX,
   parseCommentArgs,
   postComment,
@@ -62,6 +64,23 @@ describe("parseCommentArgs", () => {
     expect(parseCommentArgs(["--dry-run", "9"])).toEqual({ post: true, pr: "9", dryRun: true });
     expect(parseCommentArgs(["--dry-run"])).toEqual({ post: true, pr: undefined, dryRun: true });
     expect(parseCommentArgs(["--dry-run=742"])).toEqual({ post: true, pr: "742", dryRun: true });
+  });
+});
+
+describe("decodeHtmlEntities", () => {
+  it("decodes the 5 basic HTML entities MCP escapes", () => {
+    expect(decodeHtmlEntities("&lt;!-- marker --&gt;")).toBe("<!-- marker -->");
+    expect(decodeHtmlEntities("a &amp; b")).toBe("a & b");
+    expect(decodeHtmlEntities("&quot;q&quot; &#39;s&#39;")).toBe(`"q" 's'`);
+  });
+
+  it("is a no-op on already-unescaped text (the `gh`-posted case)", () => {
+    const body = stickyBody("## Report\nok", SHA, RESULT);
+    expect(decodeHtmlEntities(body)).toBe(body);
+  });
+
+  it("decodes &amp; last so a hypothetical double-escaped &amp;lt; isn't mangled", () => {
+    expect(decodeHtmlEntities("&amp;lt;")).toBe("&lt;");
   });
 });
 
@@ -156,7 +175,7 @@ describe("postComment", () => {
     // shape assertion: it proves the match/no-match behavior the issue asked for.
     const runJqLookup = (bodies: string[]): string => {
       const firstLineTest =
-        `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "")) | ` +
+        `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
         `test("^${MARKER}")`;
       const filter = `[.[] | select(${firstLineTest})][-1].id // empty`;
       const comments = bodies.map((body, i) => ({ id: i + 1, body }));
@@ -191,6 +210,15 @@ describe("postComment", () => {
       const newer = stickyBody("newer report", "sha2", "PASS");
       const unrelated = "just a normal human comment, no marker at all";
       expect(runJqLookup([older, unrelated, newer])).toBe("3");
+    });
+
+    it("accept: matches an MCP-escaped marker (#4283 — `<` posted as `&lt;` when `gh` is 403'd)", () => {
+      const body = stickyBody("## Verification Report\nPASS", SHA, RESULT)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      expect(body.startsWith(MARKER)).toBe(false); // sanity: this really is escaped
+      expect(runJqLookup([body])).toBe("1");
     });
   });
 
