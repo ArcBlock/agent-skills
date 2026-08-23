@@ -7,7 +7,8 @@ description: >-
   clean-context reviewer per PR, routes review and bot findings to a fixer,
   then gates and merges each PR and unlocks the next wave. Bot review (Codex +
   Cursor Bugbot) is short-wait (≤10m): findings or 👍 or silence-then-advance —
-  never multi-hour stall. P1/High are fixed or REJECT-replied in-thread; every
+  never multi-hour stall. Every actionable inline review has an in-thread resolution;
+  P1/High are fixed or REJECT-replied before merge; every
   fix re-stamps SHA-matched gates before merge. Human stays for high-level
   forks only (safe-default ratchet). Distinct
   from issue-sweep and pr-sweep (unattended batch over existing items) and
@@ -212,7 +213,7 @@ If the verdict is BLOCK/COMMENT with real findings (or a bot left legit P1/High)
 - The fixer: commit on the existing branch; **reply in-thread** on every cited comment id (`gh api …/pulls/{n}/comments/{id}/replies` — never a new top-level PR comment); re-run verification `--comment` to the **new** HEAD; re-run e2e-gate / ui-verify when those stickies apply (any push makes the old SHA stale); do not merge.
 Re-review if the fix was substantial or security-relevant (a security fix deserves a second independent agent that runs the original exploit against the patched code).
 
-### 6. Bot code-review — short-wait, address in-thread, then advance
+### 6. Inline code-review — short-wait, address in-thread, then advance
 
 This is the **single home** of the pre-merge bot protocol. [`pr-sweep`](../pr-sweep/SKILL.md) Step 5 and [`pr-review`](../pr-review/SKILL.md) Step 0.4 point here. Do not fork a second wait policy.
 
@@ -221,7 +222,7 @@ This is the **single home** of the pre-merge bot protocol. [`pr-sweep`](../pr-sw
 - `cursor[bot]` (Bugbot) — High / Medium / Low
 - any future connector that posts **inline** findings after open / ready / push
 
-**Blocks merge:** Codex **P1** and Cursor **High**. P2 / Medium: fix if cheap and in-scope, else follow-up issue — do not stall the wave.
+**Severity and communication are separate:** Codex **P1** and Cursor **High** block merge until resolved. Every actionable inline comment—human or bot, P0/P1/P2, High/Medium/Low—still needs a same-thread resolution before merge. P2 / Medium / Low may be fixed, REJECTed, or deferred to a follow-up issue; they do not require a long re-review wait, but they must never be silently fixed or dropped.
 
 **Short-wait:** default **≤10 minutes** after `gh pr create` **and after every fix push** (one mid-window re-check is fine; no long poll). Look at activity **created after that push**. GitHub often **reassociates old comments onto the new `commit_id`** — `commit_id == HEAD` is not "new." Use `created_at >= last_push` (or: no in-thread reply after the finding).
 
@@ -236,7 +237,7 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 
 1. After create or a fix push, short-wait, then:
    - **👍 / review shell with no new inline findings** → clean. Proceed to step 4 / step 7. Do **not** wait longer "just in case."
-   - **New inline P1/High** → handle **now** (item 3). Do not open the next wave with any OPEN P1/High.
+   - **New actionable inline finding** → handle **now** (item 3). Do not open the next wave with any OPEN P1/High, and do not merge until every smaller finding has a same-thread resolution.
    - **Silence past the short wait** → **proceed**. Do not park the epic. Pre-merge re-check still re-fetches (item 5).
 2. **Hard ban:** multi-hour `sleep`/poll; "waiting for re-review" as a status past the short wait; blocking wave *N+1* because wave *N*'s bot has not 👍'd; asking the human to wait for a bot.
 3. **On findings:**
@@ -248,8 +249,8 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
      gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment_id>/replies \
        -f body="$(cat reply.md)"
      ```
-4. **Addressed** (merge-relevant) = every bot **P1/High** whose `created_at` is after the last addressing commit is either **fixed in a later commit + in-thread reply** or **REJECT-replied on that thread**.
-5. **Pre-merge re-check (once, cheap):** re-fetch all vendor comments. New unaddressed P1/High since the last fix reply → fixer; else merge. **Bot reviews are not human `CHANGES_REQUESTED`** — pr-sweep's human Review 闸 does not apply; you own bots via this section.
+4. **Addressed** = every actionable inline comment whose `created_at` is after the last addressing commit has a same-thread conclusion: **fixed** in a later commit + reply with full SHA, change, and verification; **REJECT** with reasoning; or **defer** with a follow-up issue / owner / re-entry condition. A top-level verdict, verification sticky, or "already pushed" is not a reply. P1/High without that conclusion block; smaller findings still need the conclusion before merge.
+5. **Pre-merge re-check (once, cheap):** re-fetch all inline comments. Any new actionable thread without its conclusion → fixer/conductor posts the required same-thread resolution; an OPEN P1/High blocks until fixed or REJECTed. Do not wait hours for a second bot pass after a valid resolution. **Bot reviews are not human `CHANGES_REQUESTED`** — pr-sweep's human Review 闸 does not apply; you own bots via this section.
 6. **Late findings after merge** → do **not** reopen the wave; [`codex-review-backlog`](../codex-review-backlog/SKILL.md) (and the same backlog for Cursor High if it lands late). Closeout may note OPEN_HARD.
 
 **Anti-patterns:**
@@ -262,9 +263,9 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 ### 7. Gate + merge (the conductor's act)
 Merge a PR only when ALL hold, **in this order** (do not skip to squash):
 
-1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes. `MERGE (held)` is the expected form while `agent:hold` is on.
+1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
 2. Repo **merge gate** exits 0 on the SHA you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Every applicable sticky comment's `sha=` **must equal HEAD** — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. Re-invoke the gate entrypoint before this step; the broker may reuse only the exact current identity.
-3. **No unaddressed bot P1/High** per §6 (fixed **or** REJECT-replied — not "still waiting for bot").
+3. **Every actionable inline review thread is addressed** per §6 (fixed with SHA/change/verification, REJECTed with reasoning, or deferred with tracking/owner/re-entry condition). Any unaddressed bot P1/High is a hard blocker; lower severity is not a risk blocker but is still never mergeable without its in-thread conclusion.
 4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
 
 For a **security-face** PR, post a short **risk-summary** comment before merging (what it opens, why it's safe, residual risk, revert path). Then: remove `agent:hold`, squash-merge (Conventional-Commit title if branch commits drifted), delete the branch, drop the issue from the lock list. Unblock dependents and dispatch the next wave.
