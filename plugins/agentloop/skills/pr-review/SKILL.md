@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Independent clean-context review of ONE open GitHub pull request — read PR diff + linked issue + verify every claim against live code/tests + run the verification gate (pre-merge) and diagnose its root-cause + detect conflicts with sibling PRs, then emit an evidence-backed merge-readiness verdict (MERGE / COMMENT / SUPERSEDE / BLOCK / CLOSE). Runs verification every time (read-only safe); --post writes one verdict comment. Never auto-merges (that gated step belongs to pr-sweep). Use /agentloop:pr-review <pr#> for a single PR; pr-sweep batches this engine across all open PRs.
+description: Independent clean-context review of ONE open GitHub pull request — read PR diff + linked issue + verify every claim against live code/tests + obtain a current verification fact through the pre-merge entrypoint and diagnose its root-cause + detect conflicts with sibling PRs, then emit an evidence-backed merge-readiness verdict (MERGE / COMMENT / SUPERSEDE / BLOCK / CLOSE). Every review invokes the entrypoint; a shared broker may single-flight and reuse only an exact current fact. --post writes one verdict comment. Never auto-merges (that gated step belongs to pr-sweep). Use /agentloop:pr-review <pr#> for a single PR; pr-sweep batches this engine across all open PRs.
 ---
 
 # PR Review — AI Agent Review for one pull request
@@ -83,8 +83,8 @@ push 前 `git ls-remote origin refs/heads/claude/issue-<N>` 做认领检查—�
 │ 1. 读 diff + 受影响文件在「当前 main」里的真实样子            │
 │ 2. ★ 逐条核验声明 vs 已落地代码/测试(path:line 或 NOT FOUND)│
 │ 2.5 ★ 横切:反向引用/parity/端到端/性能/测试/清理           │
-│ 3. ★ 运行 verification (pre-merge) —— PR 上已无 CI,这是唯一 │
-│    门控信号;每次必跑(read-only 安全),--comment 落 PR      │
+│ 3. ★ 获取 current verification fact (pre-merge) —— PR 上无 CI │
+│    是唯一门控信号;每次调用入口,精确事实才可单飞复用      │
 │    简单失败可自修;复杂失败 → BLOCK + 完整日志 context       │
 │ 4. ★ 检测与兄弟 PR 的冲突/重复/矛盾(同 issue + 同文件)       │
 │ 5. 出判定:5 类之一 + 证据;MERGE = Step3 过 + 无 OPEN bot P1 │
@@ -248,10 +248,9 @@ Step 2 核验"这个 PR **声称**改的";这一步核验它对**系统其他部
 
 > **同名重定义 ≠ 反向引用漏**:符号因新/ported 模块重新定义而被 grep 命中(rename/rewrite 常见)是噪音,只有仍指向已删/改定义的悬空引用才算(判据见 [`impact-check`](../impact-check/SKILL.md))。
 
-### Step 3 — ★ 运行 verification 门控(pre-merge)并判读根因
+### Step 3 — ★ 获取 verification 门控事实(pre-merge)并判读根因
 
-**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前**每次必跑 `<pre_merge_entry>`**(profile 字段;只读、不写远端,与默认 read-only 不冲突;
-`--comment` 会把报告贴到 PR):
+**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前每个 reviewer 都必须**调用 `<pre_merge_entry>`**(profile 字段;只读、不写远端,与默认 read-only 不冲突;`--comment` 会把报告贴到 PR)。调用不等于重复执行:支持 shared evidence broker 的 repo 由入口按 **`{HEAD SHA, scenario=pre-merge, resolved base}`** 取得同一事实——首个 caller 实跑,并发 follower 等待或复用 PASS；HEAD、场景或 resolved base 任一变化就必须重新跑。没有该能力的 repo 仍按普通入口实际执行，绝不由 reviewer 手工猜 cache 是否可用:
 
 ```bash
 # <pre_merge_entry> from repo-profile.md
@@ -259,7 +258,7 @@ Step 2 核验"这个 PR **声称**改的";这一步核验它对**系统其他部
 <pre_merge_entry> --comment <n>         # --post 模式:一步跑 + 贴到 PR
 ```
 
-`pre-merge` 用最新 `origin/<default_branch>` 作 affected base(兄弟 PR 合并后环境已前进,能抓 pre-pr 看不到的破坏)。
+`pre-merge` 用最新 `origin/<default_branch>` 作 affected base(兄弟 PR 合并后环境已前进,能抓 pre-pr 看不到的破坏)。因此 resolved base 是验证事实的组成部分，不能只凭同一 HEAD 或报告时间复用。
 `renderReport` 已生成 markdown(状态/耗时表 + `rawTail` + 折叠 `rawFull`),直接引用,不手写数字。
 
 **verification 报告只能通过 `--comment` 投递,禁止手写。** 不要把 verification 结果手抄进
@@ -286,7 +285,7 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 
 > **这一步在 pr-review 是 advisory(判定输入),不是不可跳过的合并门控。** 真正不可跳过的硬门控——"`<merge_gate_entry> <pr#>` exit 0(SHA 匹配 + result=PASS/NA;profile 字段,arc = `<merge_gate_entry>`)"——在 [`pr-sweep` 合并闸](../pr-sweep/SKILL.md)(机制点:SHA 比对由该脚本执行、不靠自觉)。pr-review 只判不合,门控在那边执行。
 >
-> 例外:已有一份对同一 HEAD、时间在最后一次 diff 之后的验证报告 → 复用,不重跑。
+> 例外只限入口已经证明存在同一 `{HEAD SHA, scenario=pre-merge, resolved base}` 的 PASS 事实；不能用“同一 HEAD + 时间较新”的人工启发式，也不能手读/手贴旧报告来绕过入口。只验证并投递已存在事实的 `--deliver-cached` 类命令，必须同样校验这个完整身份。
 
 **运行时 / CF-parity PR(改该仓库的多运行时 parity 面 `<Backend Face Paths>`,或 blocklet render/mount/serve 语义):`/agentloop:verification` 的静态门控看不到「跑起来对不对」——补跑 `/e2e-verify`(该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)。** 它本地 boot **两个** runtime 做匿名 + 认证 roundtrip 核验:Node = `<dev_server_node>`,**CF = `<dev_server_edge>` 本地 miniflare(自带 D1 + migration,不需要 CF 账号、不碰 staging)**。所以 CF 那侧**本地就能验**——绝不判成「需要云端 CF/wrangler 环境」而 defer;别把「别猛测线上 staging」当成「CF 本地验不了」。`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`(arc `cli_binary` = `arc`)。
 

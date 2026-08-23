@@ -94,6 +94,8 @@ run_healthy_scenario() {
   cat > "$fakebin/gh" <<'GHEOF'
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
+echo "FORCE_COLOR=${FORCE_COLOR-unset}" >> "$GH_LOG"
+echo "GH_NO_COLOR=${GH_NO_COLOR-unset}" >> "$GH_LOG"
 if [[ "$1 $2" == "auth status" ]]; then
   echo "github.com"
   echo "  - Logged in to github.com account someone (keyring)"
@@ -115,7 +117,7 @@ GHEOF
   media_file="$tmproot/shot.png"
   printf '\x89PNG\r\n\x1a\nfake-png-bytes' > "$media_file"
 
-  out=$(PATH="$fakebin:$PATH" ASSETS_REPO="ArcBlock/loop-agent-assets" SOURCE_REPO="ArcBlock/arc" \
+  out=$(PATH="$fakebin:$PATH" FORCE_COLOR=1 ASSETS_REPO="ArcBlock/loop-agent-assets" SOURCE_REPO="ArcBlock/arc" \
     ASSET_CONTEXT="issue-2802" ALLOW_STALE_UPLOADER=1 \
     bash "$SCRIPT_UNDER_TEST" "$media_file" "test-shot.png" 2>"$tmproot/stderr")
   code=$?
@@ -128,6 +130,12 @@ GHEOF
   fi
   if ! grep -qE "^gh api -X PUT" "$gh_log"; then
     echo "FAIL [healthy-gh]: channel A was never attempted — a working gh session should still use it"; return 1
+  fi
+  if grep -qE "^FORCE_COLOR=[^u]" "$gh_log"; then
+    echo "FAIL [healthy-gh]: FORCE_COLOR leaked into gh (#4637)"; return 1
+  fi
+  if ! grep -qE "^GH_NO_COLOR=1" "$gh_log"; then
+    echo "FAIL [healthy-gh]: gh ran without GH_NO_COLOR=1 (#4637)"; return 1
   fi
   echo "PASS [healthy-gh]: healthy gh session still uses channel A (no needless fallback)"
   rm -rf "$tmproot"

@@ -1,6 +1,6 @@
 ---
 name: pr-sweep
-description: Batch-review every open GitHub PR and drive it to a terminal state autonomously — fan out a clean-context pr-review per PR (verify claims against live code, run the verification gate), cluster PRs by shared issue + shared files, DEDUP-CLOSE same-issue duplicates (keep the best one, comment + close the twin), and GATED auto-merge every verified non-breaking PR (docs/tests/fixes AND features) while escalating only security / breaking changes / architecture-direction decisions to a human. Designed to run on a schedule on an independent machine so PRs get reviewed + merged without a human in the loop. Run /agentloop:pr-sweep (review+comment+dedup-close only), /agentloop:pr-sweep --merge (also auto-merge gated PRs), or /agentloop:pr-sweep --dry-run (report only).
+description: Batch-review every open GitHub PR and drive it to a terminal state autonomously — fan out a clean-context pr-review per PR (verify claims against live code, obtain a current verification fact through the gate entrypoint), cluster PRs by shared issue + shared files, DEDUP-CLOSE same-issue duplicates (keep the best one, comment + close the twin), and GATED auto-merge every verified non-breaking PR (docs/tests/fixes AND features) while escalating only security / breaking changes / architecture-direction decisions to a human. Independent reviews remain separate; a shared broker prevents duplicate gate executions only for an exact evidence identity. Designed to run on a schedule on an independent machine so PRs get reviewed + merged without a human in the loop. Run /agentloop:pr-sweep (review+comment+dedup-close only), /agentloop:pr-sweep --merge (also auto-merge gated PRs), or /agentloop:pr-sweep --dry-run (report only).
 ---
 
 # PR Sweep — batch-review + dedup-close + gated auto-merge
@@ -314,7 +314,7 @@ JSON
 
 ## Step 3 — 扇出 pr-review(clean context,每 PR 一个)
 
-每个开放 PR 交给 [`pr-review`](../pr-review/SKILL.md) 引擎,**干净上下文、独立判断**,带上它的 peer 簇信息。返回**结构化 verdict**(5 类 + verification 结果 + 冲突结论 + 证据 + 问题件的 comment 草稿)。pr-review 每次都会跑 `pre-merge` verification 并把结果纳入 verdict(PR 上已无 CI)。
+每个开放 PR 交给 [`pr-review`](../pr-review/SKILL.md) 引擎,**干净上下文、独立判断**,带上它的 peer 簇信息。返回**结构化 verdict**(5 类 + verification 结果 + 冲突结论 + 证据 + 问题件的 comment 草稿)。每个 pr-review 都调用 `pre-merge` 入口并把结果纳入 verdict(PR 上已无 CI)，但 shared broker 只会为同一 **`{HEAD SHA, scenario=pre-merge, resolved base}`** 实跑一次；并发 reviewer 等待/复用同一完整事实。独立代码审查、diff 核验和 verdict 绝不因 gate 复用而跳过；任一身份字段变化立即失效重测。
 
 > **UI 改动的 PR:** pr-review 的 Step 3.5 会在 diff 命中 profile **UI Face Paths**时条件触发 `ui-verify`(该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)(截图 + 录屏贴回 PR)——**前提是本 routine 环境有跑着的 daemon**。无 daemon 的纯静态 sweep 环境会打 `ui-verify:pending` label + 注明,由带 daemon 的 routine 用下面的 pending 扫描步骤补跑(#1205)——不再只留一行注记就算数,label 让补跑成为确定性闭环而不是靠人翻 verdict 文本发现遗漏。
 
@@ -334,7 +334,7 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
 > `result` 值,表示"跑了、截图存在,但没能发布成公开可读的 URL"。两者都不放行合并,但语义不同——
 > **pending 的 PR 永远不能被描述成"UI 已验证"或"截图待处理即可合并"**,补跑成功前它就是缺证据。
 
-- **Model:** per-PR review 是**有界任务**(读 1 个 diff + 关联 issue + 核验 + 跑 1 次 `pre-merge` + 可能 1 个测试)→ **Sonnet**。**跨 PR 综合(定簇胜负、判矛盾真伪、合并闸决策)用强模型(Opus)** 在主控做,别下放。成本差 ~5×。
+- **Model:** per-PR review 是**有界任务**(读 1 个 diff + 关联 issue + 核验 + 调用一次 `pre-merge` 入口以取得当前事实 + 可能 1 个测试)→ **Sonnet**。**跨 PR 综合(定簇胜负、判矛盾真伪、合并闸决策)用强模型(Opus)** 在主控做,别下放。成本差 ~5×。
 - **并发/编排——按运行环境分两路(这条决定 routine 能不能无人值守):**
   - **无人值守(cron routine)→ 串行 inline review,绝不调 Workflow。** `Workflow` 工具需要**交互式 opt-in 确认**,且通常不在 routine 的 `allowed_tools` 里 → 它弹一个确认框,routine 里没人点 → **永久挂死**(实测:pr-sweep routine 整夜卡在"请允许 Workflow"上)。所以 routine 里**只用 allowed_tools 内、不弹确认的工具**(`Bash`/`Read`/`Write`/`Edit`/`Glob`/`Grep`/`Skill`),per-PR review 由本 session **逐个 inline 做**(读 diff + 核验 + 判 verdict)。**Step 1.5 轮次感知**已把每轮 PR 压到"真正变了的几个",串行完全够、还更省。
   - **交互式(人在场 / 显式 opt-in)→ 可用 Workflow 扇出**加速:`parallel(PRS.map(pr => () => agent(prReviewPrompt(pr), {model:'sonnet', schema: VERDICT_SCHEMA})))`,主控 Opus 综合,可 resume。
@@ -367,15 +367,19 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
 **门控 = profile `gate_mode`(arc = `scripts`:PR 上无 CI,`pre-merge` 脚本即门控;`ci`/`both` 叠加 `gh pr checks` 绿),也不无脑合。** 每个 `MERGE`/`COMMENT`-可合 verdict 过这道闸:
 
 **通用前置(全档都要):**
-- **★ Verification 闸(强约束,真正的 merge 门控,不可跳过)**:merge 前运行 `<merge_gate_entry>`
-  确认 PR comment 的 sha 与当前 PR HEAD 匹配且
+- **★ Verification 闸(强约束,真正的 merge 门控,不可跳过)**:每一次 merge 尝试都先运行
+  `<pre_merge_entry> --comment <pr#>`，再立即运行 `<merge_gate_entry>`。前者必须在本次
+  尝试中取得当前 `{HEAD SHA, scenario=pre-merge, resolved base}` 事实；shared broker 只会
+  对完全相同的身份复用，main/base 前进即强制重测。**不得**因已有 report、同一 HEAD、报告时间新
+  或手写 SHA marker 而跳过此调用。随后 merge gate 才确认 PR comment 的 sha 与当前 PR HEAD 匹配且
   result=PASS 或 result=NA:
   ```bash
+  <pre_merge_entry> --comment <pr#>
   <merge_gate_entry> <pr#>
   ```
-  exit 0 → 可合;exit 1 → 打印原因,止步:没有 comment / SHA 过期(push 后未重验)/ result=FAIL。
-  没有时先跑 `<pre_merge_entry> --comment <pr#>`贴报告;
-  简单错误自己修后重跑;复杂错误把失败诊断 + 完整日志贴 comment 升级给人。
+  两者都 exit 0 → 可合;任一 exit 1 → 打印原因并止步:没有 comment / SHA 过期(push 后未重验)/
+  result=FAIL / resolved base 已推进。简单错误自己修后从 `<pre_merge_entry>` 重走;复杂错误把失败
+  诊断 + 完整日志贴 comment 升级给人。
   **这是取代 CI 的合并门控**——pr-review 只判定不 merge,故门控落在这里。
   **`<merge_gate_entry>` 还会要求 profile `additional_merge_gates` 列出的每道门都通过**(arc: `e2e-gate`)——当
   diff 命中**可起的后端面**时还要求 `e2e-gate` sticky

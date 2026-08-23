@@ -328,6 +328,26 @@ describe("deriveResult (#3170 — a watchdog timeout with 0 real failures must r
   });
 });
 
+describe("run() color env (#4591 — FORCE_COLOR must not leak into gh JSON.parse)", () => {
+  test("unsets FORCE_COLOR even when the caller passed it in env", () => {
+    const r = run('printf %s "${FORCE_COLOR-unset}"', { FORCE_COLOR: "1" });
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("unset");
+  });
+
+  test("sets GH_NO_COLOR=1 so gh does not color --jq JSON", () => {
+    const r = run('printf %s "${GH_NO_COLOR-}"');
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("1");
+  });
+
+  test("strips ANSI CSI from captured stdout so JSON.parse can consume gh --jq output", () => {
+    const r = run("printf '\\033[1;38m{\"ok\":true}\\033[m'");
+    expect(r.out).toBe('{"ok":true}');
+    expect(JSON.parse(r.out)).toEqual({ ok: true });
+  });
+});
+
 describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts forever)", () => {
   test("kills a hung command at timeoutMs and reports code 124 + timedOut:true", () => {
     const start = Date.now();

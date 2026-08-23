@@ -12,7 +12,7 @@
  * resolved) lives in the consuming repo (arc: `.claude/verify/merge-gate.ts`).
  */
 import { decodeHtmlEntities, HTML_DECODE_JQ, shQuote } from "./comment.ts";
-import { run } from "./report.ts";
+import { run, stripAnsi } from "./report.ts";
 
 type Runner = (cmd: string) => { code: number; out: string; ms: number };
 
@@ -76,7 +76,10 @@ export function requireStickyGate(
       detail: commentsResult.out.trim(),
     };
   }
-  const raw = commentsResult.out.trim();
+  // Strip CSI before parse — injectable test runners (and a `gh` that still
+  // colored despite GH_NO_COLOR) can return `\x1b[1;38m{…`. Colored JSON is
+  // what produced `could not parse … comment JSON` under FORCE_COLOR (#4591).
+  const raw = stripAnsi(commentsResult.out).trim();
   if (!raw || raw === "null") {
     return { ok: false, reason: `no ${label} comment found on PR`, detail: `Run: ${rerunHint}` };
   }

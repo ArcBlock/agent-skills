@@ -23,6 +23,14 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Edit, Write, Task, AskUserQuestion
 
 You are the **conductor**: a single resident session that turns one epic into a series of merged PRs by orchestrating a fleet of short-lived agents. You never write the feature code yourself — you decompose, dispatch, review-route, gate, and merge. You stay alive across the entire epic.
 
+Hired factory/worker children still `status=running` (pid alive) make it **forbidden** to `end_turn` / close the session. Allowed: true closeout after each hire has GitHub evidence (PR URL or skip-comment) **or** the child was explicitly `stop`ped. Watch pid + `runs/*.json` + cwd, not `lastTurn` alone. Before treating yourself as done:
+```bash
+bun .claude/plugins/agentloop/skills/epic-conductor/scripts/assert-no-live-children.ts \
+  --runs-dir "${ARC_HOME:-$HOME}/.afs/code-agents/runs" \
+  --ids <hired-id>,<hired-id>
+```
+Exit 0 only when none of those ids are live. Ghost `status=running` with a dead pid does not block (recover-territory). Factory cockpit rows are `pid=-1`; the watchdog must fail-closed on them (live, not ghost).
+
 ## When this skill applies (and when it doesn't)
 
 USE IT when: a human hands you an epic (or a decomposable body of multi-issue work) and wants it implemented end-to-end, and **they remain reachable** for high-level decisions ("safe default + object-if-wrong"), not per-step approval.
@@ -54,6 +62,7 @@ Corollary you enforce on every worker and reviewer: **the accept-path iron law**
 ## Orchestration invariants (how you run)
 
 - **Resident + serial-inline.** You stay in one session and orchestrate by launching agents and reacting to their completion notifications. Do NOT nest a Workflow inside the conductor; drive it inline. (Unattended-ops norm: no plan mode for the epic; decisions live in issue/PR comments.)
+- **No `end_turn` with live hired children.** `status=running` and pid still alive → stay. Assert with [`assert-no-live-children.ts`](./scripts/assert-no-live-children.ts) before you treat yourself as done. True closeout after PR URL / skip-comment evidence or explicit `stop` is allowed; a ghost dead pid is not a live child.
 - **Concurrency ~3.** Local machines build under contention; 3 in-flight agents is a sane default. Cloud/remote can go higher.
 - **Model by task weight.** Runtime / gates / security / data-model → opus. Docs / mechanical / small blocklet → sonnet. State it per dispatch.
 - **Isolated worktree per worker** (`isolation: "worktree"` on the Agent call) so parallel workers never collide on files.
@@ -100,8 +109,83 @@ Launch an Agent (isolated worktree, model by weight) with a precise brief. Every
 - **Report back**: PR#/URL, decisions made, gate results, bot P1/High status (fixed sha / REJECT thread / OPEN), deviations/concerns — raw facts, no marketing.
 When a worker returns, the conductor **re-asserts** `agent:hold` + `epic-managed` + `epic:<n>` (idempotent) — that is a safety net, **not** the first time those labels appear.
 
+### 3.5 Pre-PR adversarial review (left-shift, before `gh pr create`)
+
+Right before the worker would run `gh pr create`, dispatch a **separate clean-context agent**
+(never the worker itself — same-session self-review does not count, mirrors §4's rule) to review
+`merge-base..HEAD` on the worker's own branch/worktree. This is finding-shaped, not the merge
+contract:
+
+- **In scope**: correctness bugs, security holes, missing tests, regressions in the diff.
+- **Out of scope — this is not a second `pr-review`.** Do not run `pre-merge`, do not emit a
+  MERGE/COMMENT/BLOCK verdict, do not post a `<!-- pr-review-verdict -->` comment, do not check
+  cross-PR conflicts or bot status. §4's independent `agentloop:pr-review` after the PR opens is
+  still mandatory — this step never substitutes for it.
+- **Findings** → filter through [`compact-findings.ts`](./scripts/compact-findings.ts) (same
+  tool as §5), then the **original worker**, same worktree, fixes and re-runs verification —
+  only then `gh pr create`.
+- **Zero findings** → `gh pr create` proceeds immediately; do not wait longer "just in case".
+- **Worker report must state one of**: the reviewer agent id + what it fixed, or explicitly
+  "pre-PR review: zero findings". Missing this line means step 3 is not done.
+- No roborev-style daemon, no post-commit hook, no polling GitHub for this — one in-session
+  agent round-trip on a branch range, not a running service.
+
 ### 4. Independent review per PR
-Spawn a **separate, clean-context** reviewer agent (never the worker) that runs `agentloop:pr-review <PR#> --post`. In its brief, point it at the exact things to scrutinize hardest for THIS PR (the security boundary, the forge channel, the accept-path coverage, the reuse claims), and for security-relevant PRs tell it to **reproduce the exploit against the code**, not just read it. It emits a verdict (MERGE / COMMENT / BLOCK / …) and posts one verdict comment.
+
+Two paths, chosen by what the PR touches. Do not open a panel for every PR just for
+symmetry — the cost only buys something on the face where a single reviewer's
+single-lens read is the known failure mode (§0's load-bearing idea: an *accept/reject-same-color*
+defect a green suite also can't see).
+
+**Determine the PR's class first** — diff hits repo-profile's **Backend Face Paths**
+(`.claude/repo-profile.md`), or touches auth/authz, an exec-gate, secrets/vault,
+a sandbox boundary, or payment/billing:
+
+- **No** → **A. Normal PR.** Spawn one **separate, clean-context** reviewer agent (never the
+  worker) that runs `agentloop:pr-review <PR#> --post`. In its brief, point it at the exact
+  things to scrutinize hardest for THIS PR (the security boundary, the forge channel, the
+  accept-path coverage, the reuse claims), and for security-relevant PRs tell it to
+  **reproduce the exploit against the code**, not just read it. It emits a verdict (MERGE /
+  COMMENT / BLOCK / …) and posts one verdict comment. **This is the common path — docs,
+  test-only, mechanical, and anything that doesn't hit the face above stays single-reviewer.**
+
+- **Yes** → **B. Security / data-plane PR.** Fan out **at least two** independent
+  clean-context reviewers, each a distinct named role, then synthesize:
+
+  | Role | Reads | Does not need to |
+  |---|---|---|
+  | `correctness` | Behavior, regressions, missing tests, cross-cutting effects | Re-run the full merge-gate read (§7 still does that) |
+  | `security` | Authz, injection, path traversal, forged channels; **reproduce any claimed security property against the code (accept-path + exploit attempt), not just read it** | Write the MERGE/COMMENT/BLOCK vocabulary — its output is an input to synthesis, not a second verdict |
+
+  A member never posts `<!-- pr-review-verdict -->` itself — only the synthesis step does.
+
+  **Synthesis** (one agent; the rules below apply in order):
+  1. **Neither role has a blocking finding** → synthesize `MERGE` (or `COMMENT` with
+     non-blocking notes). This does not replace §7's gate — the repo's `pre-merge`
+     verification, e2e-gate, and ui-verify still run exactly as for a normal PR. Every role
+     invokes the verification entrypoint when it needs the fact; a shared broker may make one
+     actual run only for the same `{HEAD SHA, scenario, resolved base}`. That efficiency never
+     substitutes for the independent code-review roles.
+  2. **Only one role produced findings** → pass them through directly as the verdict basis;
+     do not spend an agent on synthesis just for symmetry.
+  3. **Both roles have findings** → read-only merge: dedupe, order by severity, keep every
+     `path:line`. Run the pile through
+     [`compact-findings.ts`](./scripts/compact-findings.ts) (same tool §5 uses) before
+     handing it to a fixer.
+  4. **Synthesis never edits files and never pushes** — it is read-only, exactly like the
+     members it merges.
+  5. **Any round that errors, or a reviewer that fails to return, is uncertain — uncertain
+     stays a finding, never a pass.** A crashed/timed-out reviewer never synthesizes to
+     `MERGE` — see the anti-pattern in §0 (a reviewer that silently accepts everything is
+     indistinguishable, on green output, from one that works).
+  6. Panel roles and the security-face trigger above are defined here (and in
+     repo-profile's Backend Face Paths) — **not** configurable from the PR's own branch;
+     a feature diff must not be able to change who reviews it.
+
+  The synthesized result still posts as **one** canonical `<!-- pr-review-verdict -->`
+  comment, upserted exactly as a single-reviewer verdict would be (§4A's convention,
+  [`pr-review`](../pr-review/SKILL.md)'s marker) — members' output is working material, never
+  a second canonical verdict.
 
 ### 5. Route findings to a fixer
 **Compact first — mandatory, no exceptions.** Before a fixer is dispatched, run the raw pile
@@ -179,7 +263,7 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 Merge a PR only when ALL hold, **in this order** (do not skip to squash):
 
 1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes. `MERGE (held)` is the expected form while `agent:hold` is on.
-2. Repo **merge gate** exits 0 on the SHA you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Every applicable sticky comment's `sha=` **must equal HEAD** — a fixer commit stale-dates all of them; re-stamp before this step.
+2. Repo **merge gate** exits 0 on the SHA you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Every applicable sticky comment's `sha=` **must equal HEAD** — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. Re-invoke the gate entrypoint before this step; the broker may reuse only the exact current identity.
 3. **No unaddressed bot P1/High** per §6 (fixed **or** REJECT-replied — not "still waiting for bot").
 4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
 

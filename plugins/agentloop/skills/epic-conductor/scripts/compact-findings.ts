@@ -63,6 +63,30 @@ function dedupeKey(f: RawFinding): string {
   return f.threadId ? `thread:${f.threadId}` : `loc:${f.path}:${f.line}`;
 }
 
+function locKey(path: string, line: number): string {
+  return `${path}:${line}`;
+}
+
+/** Keep the longest defined HEAD window at a location. A same-`path:line`
+ * one-line duplicate must not shrink the window the canonical finding is
+ * judged against (ArcBlock/arc#4618 / Codex P1 3834577604). */
+function rememberLongestSnippet(
+  into: Map<string, string | undefined>,
+  path: string,
+  line: number,
+  snippet: string | undefined,
+): void {
+  const key = locKey(path, line);
+  if (!into.has(key)) {
+    into.set(key, snippet);
+    return;
+  }
+  const existing = into.get(key);
+  if (snippet !== undefined && (existing === undefined || snippet.length > existing.length)) {
+    into.set(key, snippet);
+  }
+}
+
 /**
  * Judge one non-duplicate finding as still-valid or stale against the current code.
  * Uncertain in EITHER direction (no expected snippet to compare, or the current file/line
@@ -76,14 +100,18 @@ function judgeStaleness(finding: RawFinding, current: string | undefined): Compa
 
 /**
  * Pure compaction: dedupe by (threadId ?? path:line), keeping the first-seen finding as
- * canonical; judge every surviving finding's staleness against `currentSnippets`. No I/O —
- * the CLI wrapper (`main()` below) is the only impure boundary.
+ * canonical; judge every surviving finding's staleness against `currentSnippets` (longest
+ * defined window at a shared path:line). No I/O — the CLI wrapper (`main()` below) is the
+ * only impure boundary.
  */
 export function compactFindings(
   findings: RawFinding[],
   currentSnippets: CurrentSnippet[],
 ): CompactedFinding[] {
-  const snippetByLoc = new Map(currentSnippets.map((s) => [`${s.path}:${s.line}`, s.snippet]));
+  const snippetByLoc = new Map<string, string | undefined>();
+  for (const s of currentSnippets) {
+    rememberLongestSnippet(snippetByLoc, s.path, s.line, s.snippet);
+  }
   const canonicalIdByKey = new Map<string, string>();
   const out: CompactedFinding[] = [];
 
@@ -95,7 +123,7 @@ export function compactFindings(
       continue;
     }
     canonicalIdByKey.set(key, f.id);
-    const current = snippetByLoc.get(`${f.path}:${f.line}`);
+    const current = snippetByLoc.get(locKey(f.path, f.line));
     out.push({ ...f, status: judgeStaleness(f, current) });
   }
   return out;
@@ -131,16 +159,42 @@ export function validateCompactOutput(value: unknown): value is CompactedFinding
   );
 }
 
+/** Floor when `--context` is omitted. Not the window size — the window grows
+ * with `expectedSnippet` so a still-present multi-line Codex hunk cannot be
+ * truncated into stale (ArcBlock/arc#4616). */
+export const DEFAULT_MIN_CONTEXT_LINES = 2;
+
+/** Extra lines on each side beyond the snippet span, so `line` at either end
+ * of the hunk still sits inside the window. */
+const SNIPPET_SIDE_PAD = 1;
+
+/** Context on each side of `line` so the HEAD window can contain the whole
+ * `expectedSnippet`. `--context N` is a floor, never a shrink. */
+export function contextLinesForSnippet(
+  expectedSnippet: string | undefined,
+  minContext: number = DEFAULT_MIN_CONTEXT_LINES,
+): number {
+  const floor =
+    Number.isFinite(minContext) && minContext >= 0 ? minContext : DEFAULT_MIN_CONTEXT_LINES;
+  if (!expectedSnippet) return floor;
+  const trimmed = expectedSnippet.replace(/\n+$/, "");
+  if (trimmed.length === 0) return floor;
+  const snippetLines = trimmed.split("\n").length;
+  return Math.max(floor, snippetLines - 1 + SNIPPET_SIDE_PAD);
+}
+
 async function readCurrentSnippet(
   path: string,
   line: number,
-  contextLines: number,
+  expectedSnippet: string | undefined,
+  minContext: number,
 ): Promise<string | undefined> {
   const proc = Bun.spawn(["git", "show", `HEAD:${path}`], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   if (code !== 0) return undefined; // file doesn't exist at HEAD (deleted/renamed)
   const lines = out.split("\n");
+  const contextLines = contextLinesForSnippet(expectedSnippet, minContext);
   const start = Math.max(0, line - 1 - contextLines);
   const end = Math.min(lines.length, line + contextLines);
   if (line - 1 >= lines.length || line < 1) return undefined; // line no longer in range
@@ -154,7 +208,8 @@ async function main() {
     process.exit(1);
   }
   const contextIdx = process.argv.indexOf("--context");
-  const contextLines = contextIdx !== -1 ? Number(process.argv[contextIdx + 1]) : 2;
+  const minContext =
+    contextIdx !== -1 ? Number(process.argv[contextIdx + 1]) : DEFAULT_MIN_CONTEXT_LINES;
 
   const raw: RawFinding[] = JSON.parse(await Bun.file(inputPath).text());
   const currentSnippets: CurrentSnippet[] = [];
@@ -162,7 +217,7 @@ async function main() {
     currentSnippets.push({
       path: f.path,
       line: f.line,
-      snippet: await readCurrentSnippet(f.path, f.line, contextLines),
+      snippet: await readCurrentSnippet(f.path, f.line, f.expectedSnippet, minContext),
     });
   }
 

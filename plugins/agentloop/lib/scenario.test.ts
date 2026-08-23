@@ -7,8 +7,8 @@
  * real (tiny) repo is the honest fixture.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -115,10 +115,136 @@ describe("runScenario — .verify cache", () => {
     expect(again.code).toBe(1);
   });
 
+  test("a linked worktree reuses SHA evidence through git-common-dir", () => {
+    const dir = repo();
+    const first = runScenarioIn(dir, true);
+    expect(first.code).toBe(0);
+
+    const peer = join(tmpdir(), `agentloop-scenario-peer-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    const added = spawnSync("git", ["worktree", "add", "-b", "peer", peer, "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(added.status).toBe(0);
+
+    const reused = runScenarioIn(peer, true);
+    expect(reused.code).toBe(0);
+    expect(readFileSync(join(peer, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
+  });
+
+  test("does not reuse pre-merge evidence after its resolved base advances", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "moving-base.ts");
+    const runs = join(scriptDir, "runs.log");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       import { run } from ${JSON.stringify(join(LIB, "report.ts"))};
+       runScenario({ scenario: "pre-merge", resolveBase: () => process.env.TEST_BASE ?? "base-a", checks: [{ id: "only", run: () => {
+         const result = run("echo run >> ${runs}");
+         return { check: "only", title: "Only", pass: result.code === 0, blocking: true, durationMs: result.ms };
+       }}] }, process.argv);`,
+    );
+    const first = spawnSync("bun", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "origin-main-a" },
+    });
+    const staleDelivery = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "origin-main-b" },
+    });
+    const second = spawnSync("bun", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "origin-main-b" },
+    });
+    expect(first.status).toBe(0);
+    expect(staleDelivery.status).toBe(1);
+    expect(`${staleDelivery.stdout}${staleDelivery.stderr}`).toContain(
+      "no current pre-merge cache",
+    );
+    expect(second.status).toBe(0);
+    expect(`${second.stdout}${second.stderr}`).not.toContain("reused shared pre-merge evidence");
+    expect(readFileSync(runs, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
   test("#3170: a watchdog timeout with 0 observed failures caches TIMEOUT, not FAIL — but still exits non-zero (unverified)", () => {
     const dir = repo();
     const { sha, code } = runScenarioIn(dir, false, "", { timedOut: "true" });
     expect(code).toBe(1);
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("TIMEOUT");
+  });
+
+  test("waits for a concurrent shared gate and reuses its one result", async () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "slow-scenario.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       import { run } from ${JSON.stringify(join(LIB, "report.ts"))};
+       runScenario({ scenario: "single-flight", resolveBase: () => "HEAD", checks: [{ id: "slow", run: () => {
+         const result = run("sleep 1; echo run >> ${join(scriptDir, "runs.log")}");
+         return { check: "slow", title: "Slow", pass: result.code === 0, blocking: true, durationMs: result.ms };
+       }}] }, ["bun", "slow-scenario.ts"]);`,
+    );
+    const first = spawn("bun", [script], { cwd: dir, stdio: "ignore" });
+    const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const lease = join(
+      dir,
+      ".git",
+      "agentloop",
+      "verification",
+      sha,
+      "single-flight",
+      "HEAD",
+      "lease.lock",
+      "owner.json",
+    );
+    const deadline = Date.now() + 5000;
+    while (!existsSync(lease) && Date.now() < deadline) await Bun.sleep(20);
+    expect(existsSync(lease)).toBe(true);
+
+    const second = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    expect(second.status).toBe(0);
+    expect(`${second.stdout}${second.stderr}`).toContain("reused shared single-flight evidence");
+    await new Promise<void>((resolve) => first.once("exit", () => resolve()));
+    expect(existsSync(lease)).toBe(false);
+    expect(readFileSync(join(scriptDir, "runs.log"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("fails closed for an incomplete lease instead of deleting a concurrent owner's lock", () => {
+    const dir = repo();
+    const lease = join(dir, ".verify", ".leases", "unit.lock");
+    mkdirSync(lease, { recursive: true });
+    writeFileSync(join(lease, "owner.json"), "not json\n", { encoding: "utf8", flag: "w" });
+
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(3);
+    expect(readFileSync(join(lease, "owner.json"), "utf8")).toBe("not json\n");
+  });
+
+  test("fails closed for incomplete shared evidence instead of overwriting it", () => {
+    const dir = repo();
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    const evidence = join(dir, ".git", "agentloop", "verification", sha, "unit", "HEAD");
+    mkdirSync(evidence, { recursive: true });
+    writeFileSync(join(evidence, "report.md"), "partial report\n");
+
+    const result = runScenarioIn(dir, true);
+    expect(result.code).toBe(3);
+    expect(readFileSync(join(evidence, "report.md"), "utf8")).toBe("partial report\n");
+    expect(existsSync(join(evidence, "lease.lock"))).toBe(false);
   });
 });
