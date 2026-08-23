@@ -224,7 +224,7 @@ This is the **single home** of the pre-merge bot protocol. [`pr-sweep`](../pr-sw
 
 **Severity and communication are separate:** Codex **P1** and Cursor **High** block merge until resolved. Every actionable inline comment—human or bot, P0/P1/P2, High/Medium/Low—still needs a same-thread resolution before merge. P2 / Medium / Low may be fixed, REJECTed, or deferred to a follow-up issue; they do not require a long re-review wait, but they must never be silently fixed or dropped.
 
-**Short-wait:** default **≤10 minutes** after `gh pr create` **and after every fix push** (one mid-window re-check is fine; no long poll). Look at activity **created after that push**. GitHub often **reassociates old comments onto the new `commit_id`** — `commit_id == HEAD` is not "new." Use `created_at >= last_push` (or: no in-thread reply after the finding).
+**Short-wait:** default **≤10 minutes** after `gh pr create` **and after every fix push** (one mid-window re-check is fine; no long poll). Use `created_at >= last_push` only to notice **new arrivals**; GitHub often reassociates old comments onto the new `commit_id`, so `commit_id == HEAD` is not "new." The final resolution inventory is all actionable threads, not a timestamp-filtered subset.
 
 **Fetch (must succeed or you have no evidence):**
 ```bash
@@ -249,8 +249,8 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
      gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment_id>/replies \
        -f body="$(cat reply.md)"
      ```
-4. **Addressed** = every actionable inline comment whose `created_at` is after the last addressing commit has a same-thread conclusion: **fixed** in a later commit + reply with full SHA, change, and verification; **REJECT** with reasoning; or **defer** with a follow-up issue / owner / re-entry condition. A top-level verdict, verification sticky, or "already pushed" is not a reply. P1/High without that conclusion block; smaller findings still need the conclusion before merge.
-5. **Pre-merge re-check (once, cheap):** re-fetch all inline comments. Any new actionable thread without its conclusion → fixer/conductor posts the required same-thread resolution; an OPEN P1/High blocks until fixed or REJECTed. Do not wait hours for a second bot pass after a valid resolution. **Bot reviews are not human `CHANGES_REQUESTED`** — pr-sweep's human Review 闸 does not apply; you own bots via this section.
+4. **Addressed** = every actionable inline comment in the current complete inventory has a same-thread conclusion: **fixed** in a later commit + reply with full SHA, change, and verification; **REJECT** with reasoning; or **defer** with a follow-up issue / owner / re-entry condition. A top-level verdict, verification sticky, or "already pushed" is not a reply. Timestamps may optimize detection of new arrivals but never remove an older unresolved thread: replying to A or pushing a later unrelated commit cannot close B. P1/High without that conclusion block; smaller findings still need the conclusion before merge.
+5. **Pre-merge re-check (once, cheap):** re-fetch and enumerate all inline comments. Any actionable thread without its conclusion → fixer/conductor posts the required same-thread resolution; an OPEN P1/High blocks until fixed or REJECTed. Do not wait hours for a second bot pass after a valid resolution. **Bot reviews are not human `CHANGES_REQUESTED`** — pr-sweep's human Review 闸 does not apply; you own bots via this section.
 6. **Late findings after merge** → do **not** reopen the wave; [`codex-review-backlog`](../codex-review-backlog/SKILL.md) (and the same backlog for Cursor High if it lands late). Closeout may note OPEN_HARD.
 
 **Anti-patterns:**

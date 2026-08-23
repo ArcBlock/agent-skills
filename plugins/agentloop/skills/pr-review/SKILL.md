@@ -126,7 +126,7 @@ PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲�
 
 从 Step 0 的 ② inline comments + ③ reviews 里筛这些 login。REST `pulls/<n>/comments` 若 404,改 GraphQL `reviewThreads` 或 `gh pr view --comments`——**取失败 ≠ 没有 finding**。
 
-GitHub 会把旧 inline comment 的 `commit_id` 改挂到新 HEAD。**不要**用 `commit_id == HEAD` 当「这条是针对本 SHA 的新意见」。用 `created_at >= 上次 addressing commit` 的、且该线程上还没有 fix/REJECT 回复的,才算 OPEN。
+GitHub 会把旧 inline comment 的 `commit_id` 改挂到新 HEAD。**不要**用 `commit_id == HEAD` 当「这条是针对本 SHA 的新意见」。`created_at` 只可用于识别本轮新增输入或减少重复抓取，**绝不可**拿「晚于上次 addressing commit」当 OPEN 判据：每条仍无同-thread 结论的 actionable inline comment 都持续 OPEN，直到该 thread 获得 fixed / REJECT / defer 回执；回复 A 或之后的 unrelated commit 不能让更早的 B 自动消失。
 
 **全量 thread 回执(严重级别不替代沟通):** 每条要求改动、澄清或取舍的 actionable inline review comment——人或 bot、P0/P1/P2、High/Medium/Low——在 verdict 或 merge 前都必须在**同一 GitHub thread** 留下结论。已修复的回复必须写当前完整 SHA、改动路径/要点、验证命令和结果；拒绝/不纳入本 PR 的回复必须写理由，或给出 tracking issue / owner 与何时再处理的条件。顶层 verdict、verification sticky、"已 push" 或另发一条 PR comment 都**不算**原 thread 回执。
 
