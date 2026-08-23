@@ -41,7 +41,7 @@ description: Independent clean-context review of ONE open GitHub pull request �
 
 | recommendation | 含义 | 下一步 |
 |---|---|---|
-| `MERGE` | 声明已核实、verification 无真实阻断、无未解冲突、无 OPEN 的 bot P1/High | 可合(由 pr-sweep / epic-conductor 按风险闸自动合,或人合) |
+| `MERGE` | 声明已核实、verification 无真实阻断、无未解冲突、每条 actionable review thread 都已有原线程结论、无 OPEN 的 bot P1/High | 可合(由 pr-sweep / epic-conductor 按风险闸自动合,或人合) |
 | `COMMENT` | 原则可合但有值得提的关注点(部分修复、缺测试、小问题),**或**是重复对中的**保留方**(注明要关掉的 peer) | 发 comment,通常仍可合 |
 | `SUPERSEDE` | 是重复/矛盾对中**冗余/较差的一方** | 发 comment 说明 + 指向保留方 → **关闭本 PR**(关闭是 pr-sweep 的动作) |
 | `BLOCK` | 有真实缺陷 / verification 失败是本 PR 的错 / 未解冲突 | 发 comment 指出,**不可合** |
@@ -78,7 +78,7 @@ push 前 `git ls-remote origin refs/heads/claude/issue-<N>` 做认领检查—�
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ 0. 读 PR 全貌 + 关联 issue + 已有 review/comments            │
-│ 0.4 ★ bot P1/High 清单(Codex+Cursor);OPEN 则不得 MERGE     │
+│ 0.4 ★ review-thread 回执 + bot P1/High 清单;OPEN 则不得 MERGE │
 │ 0.6 ★ 复审去重(sha 机器键):fresh→跳过;stale→增量,不从零   │
 │ 1. 读 diff + 受影响文件在「当前 main」里的真实样子            │
 │ 2. ★ 逐条核验声明 vs 已落地代码/测试(path:line 或 NOT FOUND)│
@@ -87,7 +87,7 @@ push 前 `git ls-remote origin refs/heads/claude/issue-<N>` 做认领检查—�
 │    是唯一门控信号;每次调用入口,精确事实才可单飞复用      │
 │    简单失败可自修;复杂失败 → BLOCK + 完整日志 context       │
 │ 4. ★ 检测与兄弟 PR 的冲突/重复/矛盾(同 issue + 同文件)       │
-│ 5. 出判定:5 类之一 + 证据;MERGE = Step3 过 + 无 OPEN bot P1 │
+│ 5. 出判定:5 类之一 + 证据;MERGE = Step3 过 + thread 均有回执 │
 │ 6. (--post)落 verdict comment;never merge、never close    │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -118,9 +118,9 @@ gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate \
 
 PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲突检测的主键)。读关联 issue(`gh issue view <N>`)拿"这个 PR 到底要解决什么"。
 
-### Step 0.4 — ★ bot findings 清单(Codex + Cursor + 同类 connector)
+### Step 0.4 — ★ review-thread 回执 + bot findings 清单(Codex + Cursor + 同类 connector)
 
-独立 review 必须**清点** bot 意见,不等待它们、也不代替 conductor 合。等待/回线程/推进的协议只有一处:[`epic-conductor` §6](../epic-conductor/SKILL.md)(pr-sweep Step 5 同契约)。本步只回答「当前 HEAD 上还有没有未处理的 P1/High」。
+独立 review 必须**清点** review 意见并核验每条 actionable inline thread 都有原线程结论；bot P1/High 还决定是否可合。不等待 bot、也不代替 conductor 合。等待/回线程/推进的协议只有一处:[`epic-conductor` §6](../epic-conductor/SKILL.md)(pr-sweep Step 5 同契约)。
 
 **Vendors:** `chatgpt-codex-connector[bot]`(P1/P2 或 👍)、`cursor[bot]`(Bugbot High/Medium/Low)、以及任何在 open/push 后发 **inline** finding 的 connector。
 
@@ -128,15 +128,24 @@ PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲�
 
 GitHub 会把旧 inline comment 的 `commit_id` 改挂到新 HEAD。**不要**用 `commit_id == HEAD` 当「这条是针对本 SHA 的新意见」。用 `created_at >= 上次 addressing commit` 的、且该线程上还没有 fix/REJECT 回复的,才算 OPEN。
 
-对每条 **P1 / High**(P2/Medium 顺手记,不挡 MERGE):
+**全量 thread 回执(严重级别不替代沟通):** 每条要求改动、澄清或取舍的 actionable inline review comment——人或 bot、P0/P1/P2、High/Medium/Low——在 verdict 或 merge 前都必须在**同一 GitHub thread** 留下结论。已修复的回复必须写当前完整 SHA、改动路径/要点、验证命令和结果；拒绝/不纳入本 PR 的回复必须写理由，或给出 tracking issue / owner 与何时再处理的条件。顶层 verdict、verification sticky、"已 push" 或另发一条 PR comment 都**不算**原 thread 回执。
+
+```bash
+# inline thread 的确定性回复；不要把同样文字改发到顶层 comment
+gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment-id>/replies \
+  -f body='Fixed in <full-sha>: <path + what changed>. Verified: <command> (<result>).'
+```
+
+对每条 **P1 / High**：
 
 | 状态 | 判据 |
 |---|---|
-| **fixed** | 其后有 commit,且该线程有 in-thread 回复写了 sha + 改了什么 |
-| **REJECT** | 该线程有不同意的理由(设计层 / 错层 / 假阳性) |
+| **fixed** | 其后有 commit,且该线程有 in-thread 回复写了完整 sha + 改了什么 + 验证结果 |
+| **REJECT** | 该线程有不同意的理由(设计层 / 错层 / 假阳性),或明确的 tracking / owner / 重新处理条件 |
 | **OPEN** | 以上都没有 |
 
 - 任一 P1/High **OPEN** → 不得 `MERGE`。安全/正确性 → `BLOCK`;已有明确修法、该 conductor/fixer 去干 → `COMMENT`(写清 comment id + 修法)。
+- P2/Medium/Low 不必因严重级别本身阻断，但**绝不可静默修完或丢弃**：缺原 thread 回执时 verdict 至少为 `COMMENT`，`pr-sweep` 不得合入，直到该 thread 有上述结论。
 - 最新 commit 若只是为了消一条 bot finding:核验**原来的 accept-path 还在不在**(修 A 搞出 B、来回翻,是假 addressed)。
 - 👍 / 无 inline finding → 记「bot clean」,不是「还在想」。
 

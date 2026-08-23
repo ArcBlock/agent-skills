@@ -407,6 +407,10 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
   - **有 P1 / High inline finding 且 agent 尚未 fix 或 in-thread REJECT-reply** → 当可执行活:打/保持
     `pr-sweep:needs-fix`,在 PR 分支修或 **in-thread** 回绝,再重跑 `pre-merge` 与适用 sticky;
     **不要**因"等 bot 再评一次"挂数小时。新 top-level comment 不算 addressed。
+  - **全量 actionable thread 回执:** 每条要求改动、澄清或取舍的 inline review（人或 bot，任意 severity）
+    都须在**同一 thread** 留下结论，才可 merge：fix 回复当前完整 SHA、改动和验证；REJECT/defer 回复理由，或
+    tracking issue / owner / 重新处理条件。P2/Medium/Low 可以不作为风险阻断，但缺回执仍须保持
+    `pr-sweep:needs-fix`，不得把顶层 verdict、verification sticky 或「已 push」当作已回应。
   - **push 修完后**最多 **short-wait ≤10min** 看 re-review/👍;超时无新 P1 → 按其余闸合。
   - **合入后才到的 late Codex** → 不回滚本轮 merge 决策;交给
     [`codex-review-backlog`](../codex-review-backlog/SKILL.md)。
