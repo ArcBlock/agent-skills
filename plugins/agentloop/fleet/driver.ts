@@ -1759,7 +1759,9 @@ if (import.meta.main) {
           `# reaped ${removed.length} harness worktree(s) under ${root}: ${removed.join(", ")}`,
         );
     } catch (e) {
-      console.log(`# harness worktree sweep failed for ${root} (non-fatal): ${(e as Error).message}`);
+      console.log(
+        `# harness worktree sweep failed for ${root} (non-fatal): ${(e as Error).message}`,
+      );
     }
   }
   // Then drop the admin records of worktrees whose directory is already gone — they keep

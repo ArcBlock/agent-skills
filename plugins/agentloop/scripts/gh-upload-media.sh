@@ -57,6 +57,12 @@
 
 set -euo pipefail
 
+# Factory grok sessions export FORCE_COLOR; Node then ignores NO_COLOR and `gh
+# api` JSON becomes ANSI. Same contract as report.ts `run()` (#4591 / #4637).
+unset FORCE_COLOR
+export NO_COLOR=1
+export GH_NO_COLOR=1
+
 MEDIA="${1:?Usage: $0 <media-file> [output-filename]}"
 CUSTOM_NAME="${2:-}"
 ASSETS_REPO="${ASSETS_REPO:-ArcBlock/loop-agent-assets}"

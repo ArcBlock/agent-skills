@@ -28,11 +28,11 @@ import {
   pidsWithCwdUnder,
   planRuns,
   pruneWorktreeRecords,
-  reapDeclaredTmpdir,
   type RepoEntry,
   type ResolvedEngine,
   RUN_REPORT_ENV,
   readRunProduct,
+  reapDeclaredTmpdir,
   reapGroup,
   reapOrphans,
   reapStaleWorktrees,
@@ -949,8 +949,9 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
   // would satisfy the skip test on its own, so the accept test is what proves it still reaps.
   it("requireClean: still reaps a clean stale tree (accept path)", () => {
     const deps = depsFor({ entries: ["agent-clean"], isClean: () => true });
-    expect(findStaleWorktrees("/repo/.claude/worktrees", deps, MIN_AGE, { requireClean: true }))
-      .toEqual(["/repo/.claude/worktrees/agent-clean"]);
+    expect(
+      findStaleWorktrees("/repo/.claude/worktrees", deps, MIN_AGE, { requireClean: true }),
+    ).toEqual(["/repo/.claude/worktrees/agent-clean"]);
   });
 
   it("requireClean: leaves a tree with uncommitted work alone (the 1-in-16 that held real work)", () => {
@@ -1025,7 +1026,10 @@ describe("pruneWorktreeRecords (a dead record holds the branch just like a live 
   it("skips a repo dir that does not exist, and a git invocation that fails", () => {
     expect(pruneWorktreeRecords(["/gone"], { sh: shFor("x"), exists: () => false })).toEqual([]);
     expect(
-      pruneWorktreeRecords(["/base/arc"], { sh: shFor("fatal: not a git repo", 128), exists: () => true }),
+      pruneWorktreeRecords(["/base/arc"], {
+        sh: shFor("fatal: not a git repo", 128),
+        exists: () => true,
+      }),
     ).toEqual([]);
   });
 });

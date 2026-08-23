@@ -118,6 +118,36 @@ function reapGroup(pgidFile: string, timedOut: boolean): void {
 }
 
 /**
+ * Strip ANSI/CSI SGR sequences from captured command output.
+ *
+ * `gh api --jq` wraps JSON in color codes (`\x1b[1;38m{…\x1b[m`) when the
+ * parent session has `FORCE_COLOR` — Node then ignores `NO_COLOR`, and
+ * `JSON.parse` of that stdout fails as `could not parse … comment JSON`
+ * even though a valid sticky exists (arc#4591). Idempotent on plain text.
+ */
+export function stripAnsi(s: string): string {
+  // ESC assembled at runtime — a regex literal `\u001B` trips biome's
+  // noControlCharactersInRegex, and this is the byte `gh` actually emits.
+  return s.replace(new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[ -/]*[@-~]`, "g"), "");
+}
+
+/**
+ * Env handed to every `run()` child. `FORCE_COLOR` wins over `NO_COLOR` in
+ * Node and is enough for `gh` to color `--jq` JSON; unset it and force
+ * `GH_NO_COLOR=1` so parsed stdout is machine-readable (arc#4591). Callers
+ * can still override `GH_NO_COLOR` via the `env` argument.
+ */
+export function childEnv(env: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const merged: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...env,
+    GH_NO_COLOR: env.GH_NO_COLOR ?? "1",
+  };
+  delete merged.FORCE_COLOR;
+  return merged;
+}
+
+/**
  * Run a shell command, capture combined stdout+stderr, measure wall time.
  *
  * `timeoutMs`, when given, uses spawnSync's native `timeout`/`killSignal`
@@ -144,13 +174,13 @@ export function run(
   const pgidFile = timeoutMs === undefined ? undefined : newPgidFile();
   const r = spawnSync("bash", ["-c", pgidFile ? wrapInOwnGroup(cmd, pgidFile) : cmd], {
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: childEnv(env),
     maxBuffer: 128 * 1024 * 1024,
     ...(input === undefined ? {} : { input }),
     ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" as const }),
   });
   const ms = Date.now() - start;
-  const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+  const out = stripAnsi(`${r.stdout ?? ""}${r.stderr ?? ""}`);
   const timedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
   if (pgidFile) reapGroup(pgidFile, timedOut);
   return {

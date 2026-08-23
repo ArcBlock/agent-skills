@@ -92,6 +92,75 @@ describe("requireStickyGate", () => {
     if (!r.ok) expect(r.reason).toContain("no verification comment");
   });
 
+  describe("FORCE_COLOR / ANSI-colored gh JSON (#4591)", () => {
+    // Repro: grok-build factory sessions export FORCE_COLOR; `gh api --jq` then
+    // wraps JSON in CSI (`\x1b[1;38m{…`), and JSON.parse in requireStickyGate
+    // fails as `could not parse verification comment JSON` even though a
+    // sha-matched PASS sticky exists. A runner that colorizes when FORCE_COLOR
+    // is set is the fixture — injecting a clean JSON body would stay green
+    // without proving the hole is closed (accept-path iron law).
+    const colorize = (s: string) => `\x1b[1;38m${s}\x1b[m`;
+    const passBody = sticky(MARKER_PREFIX, HEAD, "PASS");
+    const withForceColor = (fn: () => void) => {
+      const prev = process.env.FORCE_COLOR;
+      process.env.FORCE_COLOR = "1";
+      try {
+        fn();
+      } finally {
+        if (prev === undefined) delete process.env.FORCE_COLOR;
+        else process.env.FORCE_COLOR = prev;
+      }
+    };
+    const ghLike = (body: string) => () => {
+      const json = JSON.stringify({ body });
+      return {
+        code: 0,
+        out: process.env.FORCE_COLOR ? colorize(json) : json,
+        ms: 0,
+      };
+    };
+
+    it("does not report a colored PASS sticky as 'no verification comment found'", () => {
+      const r = requireStickyGate("4591", HEAD, MARKER_PREFIX, "verification", HINT, () => ({
+        code: 0,
+        out: colorize(JSON.stringify({ body: passBody })),
+        ms: 0,
+      }));
+      expect(r.ok).toBe(true);
+      if (!r.ok) {
+        expect(r.reason).not.toContain("no verification comment found");
+        expect(r.reason).not.toContain("could not parse");
+      }
+    });
+
+    it("FORCE_COLOR=1 + sha-matched PASS sticky → ok (accept-path)", () => {
+      withForceColor(() => {
+        const r = requireStickyGate(
+          "4591",
+          HEAD,
+          MARKER_PREFIX,
+          "verification",
+          HINT,
+          ghLike(passBody),
+        );
+        expect(r.ok).toBe(true);
+        if (!r.ok) expect(r.reason).not.toContain("could not parse");
+      });
+    });
+
+    it("FORCE_COLOR=1 + no sticky → still 'no verification comment found' (reject path)", () => {
+      withForceColor(() => {
+        const r = requireStickyGate("4591", HEAD, MARKER_PREFIX, "verification", HINT, () => ({
+          code: 0,
+          out: "",
+          ms: 0,
+        }));
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toContain("no verification comment found");
+      });
+    });
+  });
+
   it("blocks (surfacing the hint) when gh errors", () => {
     const r = requireStickyGate("1", HEAD, MARKER_PREFIX, "verification", HINT, () => ({
       code: 1,
