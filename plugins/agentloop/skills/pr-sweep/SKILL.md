@@ -408,8 +408,9 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
     `pr-sweep:needs-fix`,在 PR 分支修或 **in-thread** 回绝,再重跑 `pre-merge` 与适用 sticky;
     **不要**因"等 bot 再评一次"挂数小时。新 top-level comment 不算 addressed。
   - **全量 actionable thread 回执:** 每条要求改动、澄清或取舍的 inline review（人或 bot，任意 severity）
-    都须在**同一 thread** 留下结论，才可 merge：fix 回复当前完整 SHA、改动和验证；REJECT/defer 回复理由，或
-    tracking issue / owner / 重新处理条件。P2/Medium/Low 可以不作为风险阻断，但缺回执仍须保持
+    都须在**同一 thread** 留下结论，才可 merge：fix 回复当前完整 SHA、改动和验证；REJECT 回复理由；仅
+    P2/Medium/Low 可 defer 并给 tracking issue / owner / 重新处理条件。P1/High 只能 fixed 或 REJECT，不能
+    defer 后合入。P2/Medium/Low 可以不作为风险阻断，但缺回执仍须保持
     `pr-sweep:needs-fix`，不得把顶层 verdict、verification sticky 或「已 push」当作已回应。每次 merge
     前枚举当前所有 actionable thread；时间戳仅用于增量抓取，任何早于某次 fix/reply 但仍无结论的 thread
     依然未处理，不能被之后回复别的 thread 的 commit 掩盖。

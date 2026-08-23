@@ -128,7 +128,7 @@ PR body 通常带 `Fixes #N` / `Part of #N` → 记下**关联 issue 号**(冲�
 
 GitHub 会把旧 inline comment 的 `commit_id` 改挂到新 HEAD。**不要**用 `commit_id == HEAD` 当「这条是针对本 SHA 的新意见」。`created_at` 只可用于识别本轮新增输入或减少重复抓取，**绝不可**拿「晚于上次 addressing commit」当 OPEN 判据：每条仍无同-thread 结论的 actionable inline comment 都持续 OPEN，直到该 thread 获得 fixed / REJECT / defer 回执；回复 A 或之后的 unrelated commit 不能让更早的 B 自动消失。
 
-**全量 thread 回执(严重级别不替代沟通):** 每条要求改动、澄清或取舍的 actionable inline review comment——人或 bot、P0/P1/P2、High/Medium/Low——在 verdict 或 merge 前都必须在**同一 GitHub thread** 留下结论。已修复的回复必须写当前完整 SHA、改动路径/要点、验证命令和结果；拒绝/不纳入本 PR 的回复必须写理由，或给出 tracking issue / owner 与何时再处理的条件。顶层 verdict、verification sticky、"已 push" 或另发一条 PR comment 都**不算**原 thread 回执。
+**全量 thread 回执(严重级别不替代沟通):** 每条要求改动、澄清或取舍的 actionable inline review comment——人或 bot、P0/P1/P2、High/Medium/Low——在 verdict 或 merge 前都必须在**同一 GitHub thread** 留下结论。已修复的回复必须写当前完整 SHA、改动路径/要点、验证命令和结果；拒绝必须写理由。只有 P2/Medium/Low 可以 defer，并必须给出 tracking issue / owner 与何时再处理的条件；P1/High 只能 fixed 或带理由 REJECT，不能用 follow-up issue 换取 merge。顶层 verdict、verification sticky、"已 push" 或另发一条 PR comment 都**不算**原 thread 回执。
 
 ```bash
 # inline thread 的确定性回复；不要把同样文字改发到顶层 comment
@@ -141,11 +141,11 @@ gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment-id>/replies \
 | 状态 | 判据 |
 |---|---|
 | **fixed** | 其后有 commit,且该线程有 in-thread 回复写了完整 sha + 改了什么 + 验证结果 |
-| **REJECT** | 该线程有不同意的理由(设计层 / 错层 / 假阳性),或明确的 tracking / owner / 重新处理条件 |
+| **REJECT** | 该线程有不同意的理由(设计层 / 错层 / 假阳性)；P1/High 不得以 tracking/defer 代替 |
 | **OPEN** | 以上都没有 |
 
 - 任一 P1/High **OPEN** → 不得 `MERGE`。安全/正确性 → `BLOCK`;已有明确修法、该 conductor/fixer 去干 → `COMMENT`(写清 comment id + 修法)。
-- P2/Medium/Low 不必因严重级别本身阻断，但**绝不可静默修完或丢弃**：缺原 thread 回执时 verdict 至少为 `COMMENT`，`pr-sweep` 不得合入，直到该 thread 有上述结论。
+- P2/Medium/Low 不必因严重级别本身阻断，但**绝不可静默修完或丢弃**：缺原 thread 回执时 verdict 至少为 `COMMENT`，`pr-sweep` 不得合入，直到该 thread 有上述结论；它们才可以附 tracking/owner/重新处理条件后 defer。
 - 最新 commit 若只是为了消一条 bot finding:核验**原来的 accept-path 还在不在**(修 A 搞出 B、来回翻,是假 addressed)。
 - 👍 / 无 inline finding → 记「bot clean」,不是「还在想」。
 
