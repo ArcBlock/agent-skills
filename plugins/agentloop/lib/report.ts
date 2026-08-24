@@ -53,9 +53,16 @@ export interface CheckResult {
 /** Monotonic within one process — enough to keep concurrent `run()`s apart. */
 let pgidFileSeq = 0;
 
+const NO_OUTPUT_TIMEOUT_MARKER = "[agentloop: no-output watchdog]";
+
 function newPgidFile(): string {
   pgidFileSeq += 1;
   return join(tmpdir(), `agentloop-pgid-${process.pid}-${pgidFileSeq}`);
+}
+
+function newOutputFile(): string {
+  pgidFileSeq += 1;
+  return join(tmpdir(), `agentloop-output-${process.pid}-${pgidFileSeq}.log`);
 }
 
 /**
@@ -79,16 +86,66 @@ function newPgidFile(): string {
  * and does not move): while it is on, bash writes `[1]+ Done  { … }` job-status
  * lines into the captured output, and every check here parses that output.
  */
-function wrapInOwnGroup(cmd: string, pgidFile: string): string {
+function wrapInOwnGroup(
+  cmd: string,
+  pgidFile: string,
+  noOutputTimeoutMs?: number,
+  outputFile?: string,
+): string {
+  if (noOutputTimeoutMs === undefined || outputFile === undefined) {
+    return [
+      "set -m",
+      "{",
+      cmd,
+      "} &",
+      "__agentloop_job=$!",
+      "set +m",
+      `printf %s "$__agentloop_job" > ${JSON.stringify(pgidFile)}`,
+      'wait "$__agentloop_job"',
+    ].join("\n");
+  }
+
+  // bash on stock macOS has no millisecond clock or portable timeout(1). This
+  // is deliberately a coarse, conservative watchdog: it observes only a
+  // command's own stdout/stderr growth and lets an active package keep its
+  // normal overall timeout. The command still owns one process group, so the
+  // watchdog never reaps an unrelated worker.
+  const noOutputTimeoutSeconds = Math.max(1, Math.ceil(noOutputTimeoutMs / 1000));
   return [
     "set -m",
+    `__agentloop_log=${JSON.stringify(outputFile)}`,
     "{",
     cmd,
-    "} &",
+    '} > "$__agentloop_log" 2>&1 &',
     "__agentloop_job=$!",
     "set +m",
     `printf %s "$__agentloop_job" > ${JSON.stringify(pgidFile)}`,
+    "__agentloop_last_size=-1",
+    "__agentloop_last_change=$(date +%s)",
+    "__agentloop_stalled=0",
+    'while kill -0 "$__agentloop_job" 2>/dev/null; do',
+    '  __agentloop_size=$(wc -c < "$__agentloop_log" | tr -d " ")',
+    '  if [ "$__agentloop_size" != "$__agentloop_last_size" ]; then',
+    "    __agentloop_last_size=$__agentloop_size",
+    "    __agentloop_last_change=$(date +%s)",
+    "  fi",
+    "  __agentloop_now=$(date +%s)",
+    `  if [ $((__agentloop_now - __agentloop_last_change)) -ge ${noOutputTimeoutSeconds} ]; then`,
+    '    kill -KILL -- "-$__agentloop_job" 2>/dev/null || true',
+    "    __agentloop_stalled=1",
+    "    break",
+    "  fi",
+    "  sleep 1",
+    "done",
     'wait "$__agentloop_job"',
+    "__agentloop_status=$?",
+    'if [ "$__agentloop_stalled" -eq 1 ]; then',
+    `  printf '\\n${NO_OUTPUT_TIMEOUT_MARKER}\\n' >> "$__agentloop_log"`,
+    "fi",
+    'cat "$__agentloop_log"',
+    'rm -f "$__agentloop_log"',
+    'if [ "$__agentloop_stalled" -eq 1 ]; then exit 124; fi',
+    'exit "$__agentloop_status"',
   ].join("\n");
 }
 
@@ -169,25 +226,51 @@ export function run(
   env: Record<string, string> = {},
   input?: string,
   timeoutMs?: number,
-): { code: number; out: string; ms: number; timedOut?: boolean } {
+  opts: { noOutputTimeoutMs?: number } = {},
+): { code: number; out: string; ms: number; timedOut?: boolean; noOutputTimedOut?: boolean } {
   const start = Date.now();
   const pgidFile = timeoutMs === undefined ? undefined : newPgidFile();
-  const r = spawnSync("bash", ["-c", pgidFile ? wrapInOwnGroup(cmd, pgidFile) : cmd], {
-    encoding: "utf8",
-    env: childEnv(env),
-    maxBuffer: 128 * 1024 * 1024,
-    ...(input === undefined ? {} : { input }),
-    ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" as const }),
-  });
+  const outputFile = pgidFile && opts.noOutputTimeoutMs !== undefined ? newOutputFile() : undefined;
+  const r = spawnSync(
+    "bash",
+    ["-c", pgidFile ? wrapInOwnGroup(cmd, pgidFile, opts.noOutputTimeoutMs, outputFile) : cmd],
+    {
+      encoding: "utf8",
+      env: childEnv(env),
+      maxBuffer: 128 * 1024 * 1024,
+      ...(input === undefined ? {} : { input }),
+      ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" as const }),
+    },
+  );
   const ms = Date.now() - start;
-  const out = stripAnsi(`${r.stdout ?? ""}${r.stderr ?? ""}`);
-  const timedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
-  if (pgidFile) reapGroup(pgidFile, timedOut);
+  let out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+  // A native spawn timeout kills the shell before it can replay its redirected
+  // output. Preserve that partial evidence before deleting the private temp
+  // file so a timeout is still diagnosable rather than an empty red row.
+  if (outputFile) {
+    try {
+      const captured = readFileSync(outputFile, "utf8");
+      if (captured) out = `${captured}${out}`;
+    } catch {
+      // The normal wrapper path already replayed and removed the file.
+    }
+    rmSync(outputFile, { force: true });
+  }
+  out = stripAnsi(out);
+  const nativeTimedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
+  const noOutputTimedOut = out.includes(NO_OUTPUT_TIMEOUT_MARKER);
+  const timedOut = nativeTimedOut || noOutputTimedOut;
+  // The no-output wrapper already killed AND waited for its job group while it
+  // still owned that exact PGID. Reaping it again here could hit a recycled
+  // group. Only a native spawn timeout kills this outer shell before its
+  // wrapper can perform that owned cleanup.
+  if (pgidFile) reapGroup(pgidFile, nativeTimedOut);
   return {
     code: timedOut ? 124 : typeof r.status === "number" ? r.status : 1,
     out,
     ms,
     ...(timedOut ? { timedOut: true } : {}),
+    ...(noOutputTimedOut ? { noOutputTimedOut: true } : {}),
   };
 }
 

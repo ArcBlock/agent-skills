@@ -36,7 +36,11 @@ fi
 # not whichever worktree happened to invoke this script — apply's
 # "return to default branch" step collides with the default branch already
 # being checked out in the primary worktree when run from a linked one.
-ROOT="$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
+# Do not `exit` from awk after the first row: under `set -o pipefail` that
+# closes the pipe while Git is still writing its remaining worktree rows, so
+# Git exits on SIGPIPE (141) and inventory aborts before classifying anything.
+# Keep consuming the porcelain stream while emitting only the first root.
+ROOT="$(git worktree list --porcelain | awk '/^worktree / && !seen {print substr($0, 10); seen=1}')"
 if [ -z "$ROOT" ]; then
   ROOT="$(git rev-parse --show-toplevel)"
 fi

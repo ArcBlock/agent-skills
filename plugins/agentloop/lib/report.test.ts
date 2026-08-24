@@ -372,6 +372,20 @@ describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts 
     expect(r.timedOut).toBeUndefined();
   });
 
+  test("the no-output watchdog reaps only its own silent group and preserves its output", () => {
+    const start = Date.now();
+    const r = run("printf started; sleep 60", {}, undefined, 5000, { noOutputTimeoutMs: 250 });
+    const elapsed = Date.now() - start;
+    expect(r.code).toBe(124);
+    expect(r.timedOut).toBe(true);
+    expect(r.noOutputTimedOut).toBe(true);
+    expect(r.out).toContain("started");
+    expect(r.out).toContain("[agentloop: no-output watchdog]");
+    // The implementation uses a deliberately coarse one-second polling clock,
+    // but it must still stop far before the normal five-second total timeout.
+    expect(elapsed).toBeLessThan(3000);
+  });
+
   test("the timeout kills GRANDCHILDREN too — no orphaned process tree survives", () => {
     // The regression: spawnSync's kill only reaches the `bash -c` it started, so a
     // timed-out `turbo run test` left the whole test tree (and any daemon it had
