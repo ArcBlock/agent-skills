@@ -472,6 +472,16 @@ function cleanForEvidence(): boolean {
  * calls: `runScenario(config, process.argv)`.
  */
 export function runScenario(config: ScenarioConfig, argv: string[]): never {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(
+      [
+        `Usage: ${config.scenario} [--json] [--comment [<pr#>]] [--comment-dry-run]`,
+        "       [--na <reason>] [--deliver-cached] [--only a,b] [--skip x,y]",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+
   const commentArgs: CommentArgs = parseCommentArgs(argv);
   const identity = config.identity?.("Verification") ?? "";
   const only = parseSelect(argv, "--only");
@@ -562,10 +572,15 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // create a new verification identity even while the PR head stays unchanged.
   const baseForBroker = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
   const cleanAtAdmission = cleanForEvidence();
-  const root = fullScenario && cleanAtAdmission ? sharedRoot() : undefined;
-  if (root) {
+  const brokerRoot = fullScenario ? sharedRoot() : undefined;
+  // Full gates coordinate through one repository-global broker before deciding
+  // whether this checkout may execute.  In particular, a dirty worktree must
+  // never fall back to its local lease: an existence check on the shared lock
+  // has a TOCTOU window, and two dirty linked worktrees would otherwise each
+  // acquire their own local lock and duplicate the expensive gate.
+  if (brokerRoot) {
     const admission = acquireSharedScenarioLease(
-      root,
+      brokerRoot,
       shaForBroker,
       config.scenario,
       baseForBroker,
@@ -584,6 +599,15 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       );
     }
     lease = admission;
+    // Dirty worktrees cannot publish evidence for their HEAD.  They still hold
+    // the shared coordination lease while validating their own changes, which
+    // preserves the established dirty-worktree workflow without reopening the
+    // TOCTOU path to a private, concurrent local lease.
+    if (!cleanAtAdmission) {
+      console.error(
+        `ℹ ${config.scenario}@${shaForBroker.slice(0, 9)} is dirty; running under the shared coordination lease without publishing reusable evidence.`,
+      );
+    }
   } else {
     lease = acquireLocalScenarioLease(config.scenario);
     if (!lease) process.exit(3);
@@ -646,14 +670,14 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // The runner's own lease/report artifacts live under `.verify/`; they must
   // not make an otherwise clean commit ineligible for a same-SHA PASS cache.
   const cleanAtCompletion = cleanForEvidence();
-  if (ok ? cleanAtCompletion : true) {
+  if (ok ? cleanAtAdmission && cleanAtCompletion : true) {
     mkdirSync(".verify", { recursive: true });
     writeLocalCache(sha, config.scenario, base, { report, result });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
   // partial `--only` run can never satisfy the full merge gate, and a dirty
   // tree can never prove the commit named by its HEAD.
-  if (fullScenario && cleanAtCompletion) {
+  if (fullScenario && cleanAtAdmission && cleanAtCompletion) {
     publishSharedEvidence(lease, { report, result });
   }
 
