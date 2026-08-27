@@ -221,6 +221,26 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
     expect(trimFullLogsSection(md)).toContain("`.verify/<sha>.md`");
   });
 
+  test("a logPath is a pointer, not an inlined body (#5223)", () => {
+    const withPath: CheckResult[] = [
+      {
+        check: "build",
+        title: "Build",
+        pass: true,
+        blocking: true,
+        durationMs: 1000,
+        stats: {},
+        rawFull: "a".repeat(10_000),
+        logPath: ".verify/deadbeef.build.log",
+      },
+    ];
+    const md = renderReport(withPath, { scenario: "pre-pr", sha: "deadbeef123" });
+    expect(md).toContain("### Full Logs");
+    expect(md).toContain("`.verify/deadbeef.build.log`");
+    expect(md).not.toContain("<details>");
+    expect(md).not.toContain("a".repeat(100));
+  });
+
   test("is a no-op when the report has no Full Logs section", () => {
     const results: CheckResult[] = [
       { check: "build", title: "Build", pass: true, blocking: true, durationMs: 1000, stats: {} },

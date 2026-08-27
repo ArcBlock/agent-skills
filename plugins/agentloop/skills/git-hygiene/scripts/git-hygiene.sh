@@ -160,7 +160,12 @@ while IFS="$(printf '\t')" read -r path br locked; do
   if [ -d "$path" ]; then
     d="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   fi
-  [ "$path" = "$ROOT" ] && continue
+  # Under `set -e`, a normal non-primary row must not leave a false-status
+  # test as the loop body's last command.  Otherwise inventory stops at the
+  # first linked worktree and never reaches SAFE/KEEP classification.
+  if [ "$path" = "$ROOT" ]; then
+    continue
+  fi
 
   if [ "$d" != "0" ] || [ "$locked" = "1" ]; then
     echo "$path|$br|dirty=$d locked=$locked" >>"$KEEP_WT_FILE"

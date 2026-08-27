@@ -78,6 +78,119 @@ function runScenarioIn(
   return { sha, code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
 }
 
+/**
+ * A three-check scenario, so `--only` can select a real subset. Returns HEAD sha,
+ * exit code, and combined output.
+ */
+function runMultiIn(dir: string, extraArgv = ""): { sha: string; code: number; out: string } {
+  const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-multi-"));
+  dirs.push(scriptDir);
+  const script = join(scriptDir, "multi-run.ts");
+  const check = (id: string) =>
+    `{ id: ${JSON.stringify(id)}, run: () => ({ check: ${JSON.stringify(id)}, title: ${JSON.stringify(id)}, pass: true, blocking: true, durationMs: 1, rawFull: "log-${id}" }) }`;
+  writeFileSync(
+    script,
+    `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+     runScenario(
+       { scenario: "unit", resolveBase: () => "HEAD",
+         checks: [${["a", "b", "c"].map(check).join(", ")}] },
+       ["bun", "multi-run.ts"${extraArgv}],
+     );`,
+  );
+  const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], { encoding: "utf8" });
+  const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
+    encoding: "utf8",
+  }).stdout.trim();
+  return { sha, code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+}
+
+const meta = (dir: string, sha: string) =>
+  JSON.parse(readFileSync(join(dir, ".verify", `${sha}.metadata.json`), "utf8"));
+
+/**
+ * #5067: a partial verification wrote a PASS cache that satisfied the push gate.
+ *
+ * Arms 1 and 3 are load-bearing: "refuse every cache" satisfies every reject
+ * assertion here and would break every normal push, which is worse than the bug.
+ */
+describe("runScenario — partial verification is not a gate token (#5067)", () => {
+  test("arm 1 (accept): a full scenario PASS is still a gate token — --deliver-cached exits 0", () => {
+    const dir = repo();
+    const { sha, code } = runMultiIn(dir);
+    expect(code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+    expect(meta(dir, sha).fullScenario).toBe(true);
+    expect(meta(dir, sha).checks).toEqual(["a", "b", "c"]);
+    // This is exactly what tools/pre-push.sh runs to decide whether to allow the push.
+    expect(runMultiIn(dir, `, "--deliver-cached"`).code).toBe(0);
+  });
+
+  test("arm 2 (reject): a passing --only run is refused as a gate, and the refusal names it partial", () => {
+    const dir = repo();
+    const { sha, code, out } = runMultiIn(dir, `, "--only", "a,b"`);
+    // The run itself still succeeds — `--only` is the sanctioned way to debug one
+    // check, and breaking that exit code would push people right back to it.
+    expect(code).toBe(0);
+    // …but the token it leaves behind is not green.
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PARTIAL");
+    expect(meta(dir, sha).fullScenario).toBe(false);
+    expect(meta(dir, sha).checks).toEqual(["a", "b"]);
+    expect(out).toContain("PARTIAL VERIFICATION");
+    // pre-push's oracle refuses, and says why.
+    const delivery = runMultiIn(dir, `, "--only", "a,b", "--deliver-cached"`);
+    expect(delivery.code).toBe(1);
+    expect(delivery.out).toContain("PARTIAL");
+    expect(delivery.out).toContain("a, b");
+    // A partial run must never reach the shared broker either.
+    expect(
+      existsSync(join(dir, ".git", "agentloop", "verification", sha, "unit", "HEAD", "result")),
+    ).toBe(false);
+  });
+
+  test("arm 3 (no regression, PR #3062): the partial run's report is still written and readable", () => {
+    const dir = repo();
+    const { sha } = runMultiIn(dir, `, "--only", "a,b"`);
+    const report = readFileSync(join(dir, ".verify", `${sha}.md`), "utf8");
+    expect(report).toContain(`.verify/${sha}.a.log`);
+    expect(report).toContain(`.verify/${sha}.b.log`);
+    expect(readFileSync(join(dir, ".verify", `${sha}.a.log`), "utf8")).toContain("log-a");
+    expect(readFileSync(join(dir, ".verify", `${sha}.b.log`), "utf8")).toContain("log-b");
+    expect(report).toContain("PARTIAL VERIFICATION");
+  });
+
+  test("--skip is partial too (the other half of `!only && !skip`)", () => {
+    const dir = repo();
+    const { sha } = runMultiIn(dir, `, "--skip", "c"`);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PARTIAL");
+    expect(meta(dir, sha).checks).toEqual(["a", "b"]);
+  });
+
+  test("a red partial stays FAIL — only a green is demoted (FAIL carries the #3062 diagnostic)", () => {
+    const dir = repo();
+    const { sha } = runScenarioIn(dir, false, `, "--only", "only"`);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
+    expect(meta(dir, sha).fullScenario).toBe(false);
+  });
+
+  test("arm 1 survives a partial run afterwards: the broker rehydrates the full PASS", () => {
+    const dir = repo();
+    const { sha } = runMultiIn(dir);
+    // The natural sequence: full gate green, then `--only` to poke at one check.
+    runMultiIn(dir, `, "--only", "a"`);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PARTIAL");
+    // The push gate must still pass — the full evidence is in the shared broker.
+    expect(runMultiIn(dir, `, "--deliver-cached"`).code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+  });
+
+  test("an NA exemption is full coverage over an empty check set", () => {
+    const dir = repo();
+    const { sha } = runMultiIn(dir, `, "--na", "docs-only change"`);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("NA");
+    expect(meta(dir, sha)).toMatchObject({ fullScenario: true, checks: [] });
+  });
+});
+
 describe("runScenario — .verify cache", () => {
   test("--help exits before identity, lease, checks, or cache mutation (#4800)", () => {
     const dir = repo();
@@ -155,6 +268,9 @@ describe("runScenario — .verify cache", () => {
     expect(code).toBe(1);
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
     expect(readFileSync(join(dir, ".verify", `${sha}.md`), "utf8")).toContain(
+      `.verify/${sha}.only.log`,
+    );
+    expect(readFileSync(join(dir, ".verify", `${sha}.only.log`), "utf8")).toContain(
       "log-line-that-must-survive",
     );
   });
@@ -165,6 +281,45 @@ describe("runScenario — .verify cache", () => {
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
     const again = runScenarioIn(dir, false, `, "--deliver-cached"`);
     expect(again.code).toBe(1);
+  });
+
+  test("--retry-failed archives a terminal failure and runs one new full gate", () => {
+    const dir = repo();
+    const first = runScenarioIn(dir, false);
+    expect(first.code).toBe(1);
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.code).toBe(0);
+    expect(`${retried.out}`).toContain("retrying cached FAIL evidence");
+    expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
+    const retryRoot = join(
+      dir,
+      ".git",
+      "agentloop",
+      "verification",
+      first.sha,
+      "unit",
+      "HEAD",
+      "retries",
+    );
+    expect(existsSync(retryRoot)).toBe(true);
+    const archived = spawnSync("bash", ["-c", `find ${retryRoot} -name result -print -quit`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(readFileSync(archived, "utf8")).toBe("FAIL\n");
+  });
+
+  test("--retry-failed rejects partial scenario selection", () => {
+    const dir = repo();
+    const retried = runScenarioIn(dir, true, `, "--retry-failed", "--only", "only"`);
+    expect(retried.code).toBe(2);
+    expect(retried.out).toContain("requires a full scenario");
+  });
+
+  test("--retry-failed rejects modes that would not run a retry", () => {
+    const dir = repo();
+    const retried = runScenarioIn(dir, true, `, "--retry-failed", "--deliver-cached"`);
+    expect(retried.code).toBe(2);
+    expect(retried.out).toContain("cannot be combined");
   });
 
   test("a linked worktree reuses SHA evidence through git-common-dir", () => {
@@ -268,6 +423,8 @@ describe("runScenario — .verify cache", () => {
     const second = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
     expect(second.status).toBe(0);
     expect(`${second.stdout}${second.stderr}`).toContain("reused shared single-flight evidence");
+    expect(`${second.stdout}${second.stderr}`).toContain("Reused evidence");
+    expect(`${second.stdout}${second.stderr}`).toContain(".verify/<sha>.*");
     await new Promise<void>((resolve) => first.once("exit", () => resolve()));
     expect(existsSync(lease)).toBe(false);
     expect(readFileSync(join(scriptDir, "runs.log"), "utf8").trim().split("\n")).toHaveLength(1);
@@ -386,5 +543,85 @@ describe("runScenario — .verify cache", () => {
     expect(result.code).toBe(3);
     expect(readFileSync(join(evidence, "report.md"), "utf8")).toBe("partial report\n");
     expect(existsSync(join(evidence, "lease.lock"))).toBe(false);
+  });
+});
+
+describe("runScenario — fail-fast skip (#5223)", () => {
+  test("a blocking fail skips the expensive remainder and still runs the cheap tail", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-failfast-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "failfast.ts");
+    const ran = join(scriptDir, "ran.log");
+    writeFileSync(ran, "");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const mark = (id) => appendFileSync(${JSON.stringify(ran)}, id + "\\n");
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         failFastSkip: ["expensive"],
+         checks: [
+           { id: "cheapFail", title: "Cheap fail", run: () => { mark("cheapFail"); return { check: "cheapFail", title: "Cheap fail", pass: false, blocking: true, durationMs: 1, rawTail: "lint red" }; } },
+           { id: "expensive", title: "Expensive", run: () => { mark("expensive"); return { check: "expensive", title: "Expensive", pass: true, blocking: true, durationMs: 1 }; } },
+           { id: "tail", title: "Tail", run: () => { mark("tail"); return { check: "tail", title: "Tail", pass: true, blocking: false, durationMs: 1 }; } },
+         ],
+       }, ["bun", "failfast.ts"]);`,
+    );
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(r.status).toBe(1);
+    expect(`${r.stdout}${r.stderr}`).toContain("fail-fast: skipping expensive");
+    expect(readFileSync(ran, "utf8").trim().split("\n")).toEqual(["cheapFail", "tail"]);
+    const report = readFileSync(join(dir, ".verify", `${sha}.md`), "utf8");
+    expect(report).toContain("fail-fast: skipped after a blocking failure");
+    expect(report).toContain("| Tail |");
+    expect(readFileSync(join(dir, ".verify", `${sha}.expensive.log`), "utf8")).toContain(
+      "did not run",
+    );
+  });
+
+  test("warn-only failure does not trigger fail-fast", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-failfast-warn-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "warn.ts");
+    const ran = join(scriptDir, "ran.log");
+    writeFileSync(ran, "");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         failFastSkip: ["expensive"],
+         checks: [
+           { id: "warn", run: () => { appendFileSync(${JSON.stringify(ran)}, "warn\\n"); return { check: "warn", title: "Warn", pass: false, blocking: false, durationMs: 1 }; } },
+           { id: "expensive", run: () => { appendFileSync(${JSON.stringify(ran)}, "expensive\\n"); return { check: "expensive", title: "Expensive", pass: true, blocking: true, durationMs: 1 }; } },
+         ],
+       }, ["bun", "warn.ts"]);`,
+    );
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(readFileSync(ran, "utf8").trim().split("\n")).toEqual(["warn", "expensive"]);
+  });
+});
+
+describe("runScenario — same-checkout reuse is disclosed (#5223)", () => {
+  test("a second full run of the same SHA names the reuse on stderr", () => {
+    const dir = repo();
+    const first = runScenarioIn(dir, true);
+    expect(first.code).toBe(0);
+    expect(first.out).not.toContain("Reused evidence");
+    const second = runScenarioIn(dir, true);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("Reused evidence");
+    expect(second.out).toContain(".git/agentloop/verification/<sha>");
   });
 });

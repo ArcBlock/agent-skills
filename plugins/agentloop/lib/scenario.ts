@@ -17,8 +17,15 @@
  *                          comment is the only outward write — see README contract)
  *   --na "<reason>"        write an N/A exemption (docs/native PRs)
  *   --deliver-cached       post the cached report without re-running
+ *   --retry-failed         explicitly retry a cached FAIL/TIMEOUT full gate
  *   --only a,b,c           run only these check ids (unknown id → hard error)
  *   --skip x,y             run all but these check ids
+ *
+ * Coverage is part of the record, not just identity (#5067): every cached and
+ * published record carries `fullScenario` + the executed check ids, and a GREEN
+ * scoped run is stamped `PARTIAL` rather than `PASS` so no consumer can read it
+ * as a gate token. The report itself is still written — it is the diagnostic
+ * artifact (PR #3062) — it just stops being currency.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -34,6 +41,7 @@ import {
   deriveResult,
   exitCode,
   head,
+  isSkipped,
   mergeBase,
   renderReport,
   run,
@@ -81,6 +89,13 @@ export interface ScenarioConfig {
    * opened (issue #655).
    */
   resolveBase?: () => string;
+  /**
+   * After the first blocking failure, remaining checks whose id is in this
+   * list are recorded as SKIP instead of running (#5223). Cheap tail checks
+   * omitted from the list still run so the report stays useful. Daily/release
+   * scenarios leave this empty — they are the thorough catch net.
+   */
+  failFastSkip?: readonly string[];
 }
 
 /**
@@ -147,7 +162,9 @@ function writeNa(
   // prepended into the report body so it lands after the sticky marker line,
   // keeping the marker on line 1 for merge-gate.ts's startswith lookup.
   const report = identity ? `${identity}\n\n${naBody}` : naBody;
-  writeLocalCache(sha, scenario, base, { report, result: "NA" });
+  // An exemption is a statement about the WHOLE scenario ("no TS to run here"), not a
+  // scoped subset — so it is full coverage over an empty executed set (#5067).
+  writeLocalCache(sha, scenario, base, { report, result: "NA", coverage: FULL_COVERAGE([]) });
   return report;
 }
 
@@ -157,8 +174,29 @@ interface ScenarioLease {
   shared?: { dir: string; sha: string; scenario: string; base: string };
 }
 
-interface SharedEvidence {
-  schemaVersion: 1;
+/**
+ * Bumped 1 → 2 for #5067's coverage fields. Every reader already rejects a record whose
+ * `schemaVersion` is not the one it expects, so the bump makes pre-#5067 records — which
+ * cannot say what they covered — expire instead of being read as full gates by default.
+ */
+const EVIDENCE_SCHEMA_VERSION = 2;
+
+/**
+ * What a verification record actually covered (#5067).
+ *
+ * The old metadata was `{schemaVersion, sha, scenario, base}` — pure IDENTITY, no
+ * coverage — so a two-check `--only` PASS and a full-gate PASS were byte-indistinguishable
+ * to `pre-push` and `--deliver-cached`.
+ */
+interface EvidenceCoverage {
+  /** true only for an unscoped run: no `--only`, no `--skip` */
+  fullScenario: boolean;
+  /** the check ids that actually executed, in run order */
+  checks: string[];
+}
+
+interface SharedEvidence extends EvidenceCoverage {
+  schemaVersion: number;
   scenario: string;
   sha: string;
   /** Resolved affected-detection base; pre-merge's origin/main tip is dynamic. */
@@ -173,6 +211,16 @@ interface SharedEvidence {
 interface CachedEvidence {
   report: string;
   result: VerifyResult;
+  coverage: EvidenceCoverage;
+  /** worktree that produced it, when known (shared broker records carry it). */
+  sourceWorktree?: string;
+}
+
+/** An unscoped run of every check the config declares. */
+const FULL_COVERAGE = (checks: string[]): EvidenceCoverage => ({ fullScenario: true, checks });
+
+function isCoverage(m: Partial<SharedEvidence>): boolean {
+  return typeof m.fullScenario === "boolean" && Array.isArray(m.checks);
 }
 
 function safeScenario(scenario: string): string {
@@ -298,18 +346,28 @@ function readSharedEvidence(
     const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Partial<SharedEvidence>;
     const result = readFileSync(resultPath, "utf8").trim() as VerifyResult;
     if (
-      metadata.schemaVersion !== 1 ||
+      metadata.schemaVersion !== EVIDENCE_SCHEMA_VERSION ||
       metadata.scenario !== scenario ||
       metadata.sha !== sha ||
       metadata.base !== base ||
       metadata.sourceHead !== sha ||
       metadata.sourceClean !== true ||
       metadata.result !== result ||
+      !isCoverage(metadata) ||
+      // Only a full run is ever published here; a record claiming otherwise is not
+      // shared evidence and must not be reused as one (#5067).
+      metadata.fullScenario !== true ||
       !["PASS", "NA", "FAIL", "TIMEOUT"].includes(result)
     ) {
       return undefined;
     }
-    return { report: readFileSync(reportPath, "utf8"), result };
+    return {
+      report: readFileSync(reportPath, "utf8"),
+      result,
+      coverage: FULL_COVERAGE(metadata.checks as string[]),
+      sourceWorktree:
+        typeof metadata.sourceWorktree === "string" ? metadata.sourceWorktree : undefined,
+    };
   } catch {
     return undefined;
   }
@@ -330,7 +388,16 @@ function writeLocalCache(
   writeFileSync(`.verify/${sha}.result`, cached.result, "utf8");
   writeAtomic(
     `.verify/${sha}.metadata.json`,
-    `${JSON.stringify({ schemaVersion: 1, sha, scenario, base })}\n`,
+    `${JSON.stringify({
+      schemaVersion: EVIDENCE_SCHEMA_VERSION,
+      sha,
+      scenario,
+      base,
+      // #5067: coverage, not just identity. Without these two fields a consumer cannot
+      // tell a full PASS from a `--only a,b` PASS, and `pre-push` accepted both.
+      fullScenario: cached.coverage.fullScenario,
+      checks: cached.coverage.checks,
+    })}\n`,
   );
 }
 
@@ -344,15 +411,23 @@ function readLocalCache(sha: string, scenario: string, base: string): CachedEvid
     const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Partial<SharedEvidence>;
     const result = readFileSync(resultFile, "utf8").trim() as VerifyResult;
     if (
-      metadata.schemaVersion !== 1 ||
+      metadata.schemaVersion !== EVIDENCE_SCHEMA_VERSION ||
       metadata.sha !== sha ||
       metadata.scenario !== scenario ||
       metadata.base !== base ||
-      !["PASS", "NA", "FAIL", "TIMEOUT"].includes(result)
+      !isCoverage(metadata) ||
+      !["PASS", "NA", "FAIL", "TIMEOUT", "PARTIAL"].includes(result)
     ) {
       return undefined;
     }
-    return { report: readFileSync(reportFile, "utf8"), result };
+    return {
+      report: readFileSync(reportFile, "utf8"),
+      result,
+      coverage: {
+        fullScenario: metadata.fullScenario as boolean,
+        checks: metadata.checks as string[],
+      },
+    };
   } catch {
     return undefined;
   }
@@ -434,13 +509,87 @@ function acquireSharedScenarioLease(
   }
 }
 
+/**
+ * Explicitly retry terminal failed shared evidence without weakening the
+ * single-flight rule. The old triplet is archived under the same SHA so the
+ * retry remains auditable; metadata moves first, making new readers wait on
+ * this lease instead of reusing the result being retried.
+ */
+function acquireFailedEvidenceRetryLease(
+  root: string,
+  sha: string,
+  scenario: string,
+  base: string,
+): ScenarioLease | CachedEvidence | undefined {
+  const dir = sharedDir(root, sha, scenario, base);
+  const lock = `${dir}/lease.lock`;
+  const deadline = Date.now() + sharedWaitMs();
+  mkdirSync(dir, { recursive: true });
+
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      writeFileSync(
+        `${lock}/owner.json`,
+        `${JSON.stringify({ pid: process.pid, scenario, sha, retryFailed: true, startedAt: new Date().toISOString() })}\n`,
+        "utf8",
+      );
+      const cached = readSharedEvidence(dir, sha, scenario, base);
+      if (!cached) {
+        if (hasPartialSharedEvidence(dir)) {
+          rmSync(lock, { recursive: true, force: true });
+          console.error(
+            `❌ ${scenario}@${sha.slice(0, 9)} has incomplete shared verification evidence; refusing retry overwrite.`,
+          );
+          return undefined;
+        }
+        return { path: lock, shared: { dir, sha, scenario, base } };
+      }
+      if (cached.result === "PASS" || cached.result === "NA") {
+        rmSync(lock, { recursive: true, force: true });
+        return cached;
+      }
+
+      const archive = `${dir}/retries/${Date.now()}-${process.pid}`;
+      mkdirSync(archive, { recursive: true });
+      for (const name of ["metadata.json", "report.md", "result"]) {
+        const source = `${dir}/${name}`;
+        if (existsSync(source)) renameSync(source, `${archive}/${name}`);
+      }
+      return { path: lock, shared: { dir, sha, scenario, base } };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const owner = readOwnerPid(lock);
+      if (owner === undefined) {
+        console.error(
+          `❌ ${scenario}@${sha.slice(0, 9)} has an unreadable shared verification lease; refusing retry admission.`,
+        );
+        return undefined;
+      }
+      if (!processIsAlive(owner)) {
+        rmSync(lock, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        console.error(
+          `❌ ${scenario}@${sha.slice(0, 9)} is still running (owner pid ${owner}); timed out waiting without starting a duplicate retry.`,
+        );
+        return undefined;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedEvidence): void {
   if (!lease?.shared) return;
   const { dir, sha, scenario, base } = lease.shared;
   writeAtomic(`${dir}/report.md`, cached.report);
   writeAtomic(`${dir}/result`, `${cached.result}\n`);
   const metadata: SharedEvidence = {
-    schemaVersion: 1,
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    fullScenario: cached.coverage.fullScenario,
+    checks: cached.coverage.checks,
     scenario,
     sha,
     base,
@@ -453,6 +602,38 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
   // Metadata is the commit point: consumers ignore partial report/result files
   // until this SHA-, scenario-, and clean-state-bound record appears.
   writeAtomic(`${dir}/metadata.json`, `${JSON.stringify(metadata)}\n`);
+}
+
+/**
+ * #5060, second half: the broker single-flights on (sha, scenario, base), so a delivered
+ * report may be ANOTHER checkout's run — the `reused shared evidence` line says so on
+ * stderr, where nobody reading the PR will ever see it. The merge gate is fail-closed on
+ * the sha either way; this is about what a human reads, so the report itself says whose
+ * run it is rather than implying it was produced by the run that delivered it.
+ *
+ * #5223: same-checkout reuse must also be a different color from "this invocation
+ * actually ran". Silent same-checkout reuse is how an agent burns three full
+ * wall-clock waits thinking it re-ran. Cross-checkout still names the other tree;
+ * same-checkout names both cache locations so deleting one is not enough.
+ */
+function provenanceNotice(cached: CachedEvidence): string {
+  const from = cached.sourceWorktree;
+  if (from && from !== process.cwd()) {
+    return `> ℹ **Reused evidence** — produced by another checkout (\`${from}\`) for this same commit, not by the run that delivered it.\n\n`;
+  }
+  return (
+    "> ℹ **Reused evidence** — produced by an earlier run for this same commit, not by this invocation. " +
+    "To force a real re-run, delete both `.verify/<sha>.*` and `.git/agentloop/verification/<sha>`.\n\n"
+  );
+}
+
+/** Write a check's full tool output next to the report so the markdown stays a table (#5223). */
+function persistCheckLog(sha: string, r: CheckResult): CheckResult {
+  if (!r.rawFull) return r;
+  mkdirSync(".verify", { recursive: true });
+  const logPath = `.verify/${sha}.${r.check}.log`;
+  writeFileSync(logPath, r.rawFull);
+  return { ...r, logPath };
 }
 
 function cleanForEvidence(): boolean {
@@ -476,7 +657,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     console.log(
       [
         `Usage: ${config.scenario} [--json] [--comment [<pr#>]] [--comment-dry-run]`,
-        "       [--na <reason>] [--deliver-cached] [--only a,b] [--skip x,y]",
+        "       [--na <reason>] [--deliver-cached] [--retry-failed] [--only a,b] [--skip x,y]",
       ].join("\n"),
     );
     process.exit(0);
@@ -486,6 +667,11 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const identity = config.identity?.("Verification") ?? "";
   const only = parseSelect(argv, "--only");
   const skip = parseSelect(argv, "--skip");
+  const retryFailed = argv.includes("--retry-failed");
+  if (retryFailed && (argv.includes("--deliver-cached") || argv.includes("--na"))) {
+    console.error("❌ --retry-failed cannot be combined with --deliver-cached or --na.");
+    process.exit(2);
+  }
   const known = new Set(config.checks.map((c) => c.id));
   // Validate before broker admission. A typo must not wait behind (or own) a
   // real gate only to discover it selected nothing.
@@ -535,6 +721,12 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const sha = head();
     const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
     let cached = readLocalCache(sha, config.scenario, base);
+    // #5067: `--deliver-cached` used to validate IDENTITY only (HEAD + scenario +
+    // resolved base), which is why it could not stop a `--only` PASS from satisfying
+    // the push gate. A partial record stays on disk and stays readable — it is just no
+    // longer a token. Set aside, not discarded, so the refusal can name what did run.
+    const partial = cached && !cached.coverage.fullScenario ? cached : undefined;
+    if (partial) cached = undefined;
     if (!cached) {
       const root = sharedRoot();
       const shared = root
@@ -551,12 +743,23 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       }
     }
     if (!cached) {
-      console.error(
-        `--deliver-cached: no current ${config.scenario} cache for ${sha.slice(0, 9)} at base ${base.slice(0, 9)}. Run the scenario first.`,
-      );
+      if (partial) {
+        console.error(
+          `--deliver-cached: the cached ${config.scenario} record for ${sha.slice(0, 9)} is a PARTIAL verification — it ran only: ${partial.coverage.checks.join(", ")}.`,
+        );
+        console.error(
+          `  It is a diagnostic artifact (still readable at .verify/${sha}.md), not a gate token. Run the full scenario: bun .claude/verify/${config.scenario}.ts`,
+        );
+      } else {
+        console.error(
+          `--deliver-cached: no current ${config.scenario} cache for ${sha.slice(0, 9)} at base ${base.slice(0, 9)}. Run the scenario first.`,
+        );
+      }
       process.exit(1);
     }
-    const delivery = deliverComment(commentArgs, cached.report, sha, cached.result);
+    const reused = provenanceNotice(cached);
+    if (reused) console.error(reused.trimEnd());
+    const delivery = deliverComment(commentArgs, `${reused}${cached.report}`, sha, cached.result);
     // Diagnostics are reusable, but only PASS/NA are gate tokens.
     finalExit(
       cached.result === "PASS" || cached.result === "NA" ? 0 : 1,
@@ -566,6 +769,12 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   }
 
   const fullScenario = !only && !skip;
+  if (retryFailed && !fullScenario) {
+    console.error(
+      "❌ --retry-failed requires a full scenario; do not combine it with --only or --skip.",
+    );
+    process.exit(2);
+  }
   const shaForBroker = head();
   // The base is verification input, not just report decoration. In particular
   // pre-merge resolves origin/main at execution time, so a sibling merge must
@@ -586,19 +795,59 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       baseForBroker,
     );
     if (!admission) process.exit(3);
-    if ("report" in admission) {
+    if ("report" in admission && !(retryFailed && ["FAIL", "TIMEOUT"].includes(admission.result))) {
       writeLocalCache(shaForBroker, config.scenario, baseForBroker, admission);
       console.error(
         `ℹ reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}; no duplicate gate started.`,
       );
-      const cached = deliverComment(commentArgs, admission.report, shaForBroker, admission.result);
+      const reused = provenanceNotice(admission);
+      if (reused) console.error(reused.trimEnd());
+      const cached = deliverComment(
+        commentArgs,
+        `${reused}${admission.report}`,
+        shaForBroker,
+        admission.result,
+      );
       finalExit(
         admission.result === "PASS" || admission.result === "NA" ? 0 : 1,
         commentArgs.post,
         cached.posted,
       );
     }
-    lease = admission;
+    if ("report" in admission) {
+      const retry = acquireFailedEvidenceRetryLease(
+        brokerRoot,
+        shaForBroker,
+        config.scenario,
+        baseForBroker,
+      );
+      if (!retry) process.exit(3);
+      if ("report" in retry) {
+        writeLocalCache(shaForBroker, config.scenario, baseForBroker, retry);
+        console.error(
+          `ℹ retry target completed while waiting; reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}.`,
+        );
+        const reused = provenanceNotice(retry);
+        if (reused) console.error(reused.trimEnd());
+        const cached = deliverComment(
+          commentArgs,
+          `${reused}${retry.report}`,
+          shaForBroker,
+          retry.result,
+        );
+        finalExit(
+          retry.result === "PASS" || retry.result === "NA" ? 0 : 1,
+          commentArgs.post,
+          cached.posted,
+        );
+      }
+      lease = retry;
+      console.error(
+        `ℹ retrying cached ${admission.result} evidence for ${config.scenario}@${shaForBroker.slice(0, 9)} under a new shared lease.`,
+      );
+    } else {
+      lease = admission;
+    }
     // Dirty worktrees cannot publish evidence for their HEAD.  They still hold
     // the shared coordination lease while validating their own changes, which
     // preserves the established dirty-worktree workflow without reopening the
@@ -642,11 +891,71 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     process.exit(2);
   }
 
-  const results: CheckResult[] = selected.map((c) => c.run(ctx));
+  const skipAfterFail = new Set(config.failFastSkip ?? []);
+  const results: CheckResult[] = [];
+  let blockingFailed = false;
+  for (const c of selected) {
+    if (blockingFailed && skipAfterFail.has(c.id)) {
+      mkdirSync(".verify", { recursive: true });
+      const logPath = `.verify/${sha}.${c.id}.log`;
+      writeFileSync(logPath, "skipped after a blocking failure; this check did not run.\n");
+      results.push({
+        check: c.id,
+        title: c.title ?? c.id,
+        pass: true,
+        blocking: c.blocking ?? true,
+        skipped: "fail-fast: skipped after a blocking failure (#5223)",
+        durationMs: 0,
+        logPath,
+      });
+      console.error(`ℹ fail-fast: skipping ${c.id}`);
+      continue;
+    }
+    const ran = persistCheckLog(sha, c.run(ctx));
+    results.push(ran);
+    if (!isSkipped(ran) && ran.blocking && !ran.pass) blockingFailed = true;
+  }
 
-  const result: VerifyResult = deriveResult(results);
-  const ok = result === "PASS";
-  const report = renderReport(results, { scenario: config.scenario, base, sha, identity });
+  const coverage: EvidenceCoverage = { fullScenario, checks: selected.map((c) => c.id) };
+  const derived = deriveResult(results);
+  const ok = derived === "PASS";
+  // #5067 — DECISION, and why.
+  //
+  // The issue offered two fixes: (a) record coverage in the metadata and teach every
+  // gate-token consumer to require it, or (b) stop writing PASS for a partial run. This
+  // does BOTH, because they answer different halves.
+  //
+  // (a) alone leaves `.verify/<sha>.result` reading `PASS` for a two-check run. Any
+  // consumer that reads only that file still launders it — `tools/pre-push.sh` literally
+  // does (`[ "$RESULT" != "PASS" ]`), and so would every consumer written next year by
+  // someone who never heard of the coverage field. A same-colored artifact with a
+  // correction stored elsewhere is the exact shape of the bug being fixed.
+  //
+  // (b) alone throws away WHICH checks ran, so a refusal cannot say what it refused and
+  // the diagnostic artifact (arm 3 / PR #3062) cannot describe itself.
+  //
+  // So: coverage lives in the metadata AND a green partial run is stamped `PARTIAL`.
+  // `PARTIAL` fails closed for free in every existing consumer — `requireStickyGate`
+  // accepts only {PASS, NA}, `--deliver-cached` exits non-zero on anything else,
+  // pre-push compares against PASS/NA — exactly the property `BLOCKED`/`TIMEOUT` already
+  // rely on. Only a GREEN partial is demoted: a red partial stays FAIL/TIMEOUT, which is
+  // already non-green and carries the diagnostic semantics #3062 depends on.
+  //
+  // The exit code is deliberately NOT touched: `--only` is the sanctioned way to debug
+  // one failing check, and making that exit non-zero would break the workflow that
+  // pushes people toward it. What changes is only that its PASS stops being a token.
+  const result: VerifyResult = fullScenario || derived !== "PASS" ? derived : "PARTIAL";
+  const notice = fullScenario
+    ? undefined
+    : `> ⚠️ **PARTIAL VERIFICATION — NOT A GATE.** ${selected.length} of ${config.checks.length} checks ran (\`${coverage.checks.join("`, `")}\`). ` +
+      "The rest were never executed, so this report cannot satisfy the pre-push or merge gate. It is a diagnostic artifact.";
+  const report = renderReport(results, {
+    scenario: config.scenario,
+    base,
+    sha,
+    identity,
+    notice,
+  });
 
   if (argv.includes("--json")) {
     console.log(JSON.stringify({ scenario: config.scenario, base, sha, results }, null, 2));
@@ -672,13 +981,16 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const cleanAtCompletion = cleanForEvidence();
   if (ok ? cleanAtAdmission && cleanAtCompletion : true) {
     mkdirSync(".verify", { recursive: true });
-    writeLocalCache(sha, config.scenario, base, { report, result });
+    // A partial run still lands here — deliberately. It is the diagnostic artifact, and
+    // deleting it to fix #5067 would re-run the real log loss of PR #3062. What stops it
+    // being a gate is its `result` (PARTIAL) and its coverage metadata, not its absence.
+    writeLocalCache(sha, config.scenario, base, { report, result, coverage });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
   // partial `--only` run can never satisfy the full merge gate, and a dirty
   // tree can never prove the commit named by its HEAD.
   if (fullScenario && cleanAtAdmission && cleanAtCompletion) {
-    publishSharedEvidence(lease, { report, result });
+    publishSharedEvidence(lease, { report, result, coverage });
   }
 
   finalExit(exitCode(results), commentArgs.post, delivery.posted);

@@ -27,7 +27,7 @@ You are the **conductor**: a single resident session that turns one epic into a 
 Hired factory/worker children still `status=running` (pid alive) make it **forbidden** to `end_turn` / close the session. Allowed: true closeout after each hire has GitHub evidence (PR URL or skip-comment) **or** the child was explicitly `stop`ped. Watch pid + `runs/*.json` + cwd, not `lastTurn` alone. Before treating yourself as done:
 ```bash
 bun .claude/plugins/agentloop/skills/epic-conductor/scripts/assert-no-live-children.ts \
-  --runs-dir "${ARC_HOME:-$HOME}/.afs/code-agents/runs" \
+  --runs-dir "$(arc service status --print home 2>/dev/null || printf '%s' "$HOME")/.afs/code-agents/runs" \
   --ids <hired-id>,<hired-id>
 ```
 Exit 0 only when none of those ids are live. Ghost `status=running` with a dead pid does not block (recover-territory). Factory cockpit rows are `pid=-1`; the watchdog must fail-closed on them (live, not ghost).

@@ -91,11 +91,11 @@ describe("buildDeployment", () => {
   });
   test("reconcile PRESERVES a hand-added skillEnv / extra env the input omits", () => {
     const existing: Partial<DeploymentConfig> = {
-      skillEnv: { "issue-sweep": { ARC_SERVICE_PORT: "4910" } },
+      skillEnv: { "issue-sweep": { FLEET_LABEL: "kept" } },
       env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ANDROID_HOME: "/sdk" },
     };
     const d = buildDeployment(baseInput({ model: "claude-sonnet-5" }), existing);
-    expect(d.skillEnv?.["issue-sweep"]?.ARC_SERVICE_PORT).toBe("4910");
+    expect(d.skillEnv?.["issue-sweep"]?.FLEET_LABEL).toBe("kept");
     expect(d.env?.ANDROID_HOME).toBe("/sdk");
     expect(d.model).toBe("claude-sonnet-5"); // explicit input still applied
   });
@@ -468,21 +468,14 @@ describe("scaffoldEnvFile", () => {
   });
 });
 
-describe("skillEnv defaults (daemon repos must not fight over ports)", () => {
-  test("a fresh config gets isolated ports per skill", () => {
+describe("skillEnv defaults (daemon isolation is named instances, not env)", () => {
+  test("a fresh config does not pin ports or instance-root env", () => {
     const d = buildDeployment(baseInput());
-    expect(d.skillEnv?.["issue-sweep"]?.ARC_SERVICE_PORT).toBe("4910");
-    expect(d.skillEnv?.["pr-sweep"]?.ARC_SERVICE_PORT).toBe("4920");
-    // Same port for two concurrently-sweeping skills = the second daemon dies on bind,
-    // which reads as a broken sweep rather than a config gap.
-    expect(d.skillEnv?.["issue-sweep"]?.ARC_SERVICE_PORT).not.toBe(
-      d.skillEnv?.["pr-sweep"]?.ARC_SERVICE_PORT,
-    );
-    expect(d.skillEnv?.["issue-sweep"]?.ARC_HOME).toContain("{{CHECKOUT}}");
+    expect(d.skillEnv).toEqual({});
   });
 
   test("never clobbers a hand-tuned skillEnv", () => {
-    const mine = { "issue-sweep": { ARC_SERVICE_PORT: "9999" } };
+    const mine = { "issue-sweep": { FLEET_LABEL: "custom" } };
     const d = buildDeployment(baseInput(), { skillEnv: mine } as never);
     expect(d.skillEnv).toEqual(mine);
   });

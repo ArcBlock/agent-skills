@@ -32,6 +32,7 @@ The repo exposes a scenario entry (`<verification_entry>`). Common flags:
 --json              machine-readable
 --na "<reason>"     write an N/A exemption (docs-only / native-only PRs)
 --only a,b / --skip x,y   scope the check set (unknown id → hard error, exit 2)
+                          → a scoped run is a DIAGNOSTIC, never a gate (see below)
 --deliver-cached    post the cached PASS report without re-running
 ```
 
@@ -50,3 +51,23 @@ substitute a single `tsc`/`build` command for the scenario script.
 - A verification failure means **do not merge/push** — fix, then re-run.
 - Empty check set or unknown `--only`/`--skip` id fails loud (exit 2), never
   passes silently — a gate that verified nothing must not look green.
+- **A scoped run (`--only` / `--skip`) can never be the gate** (#5067). Use it to
+  debug ONE failing check; its report is still written and readable, but a green
+  scoped run is recorded as `PARTIAL`, not `PASS`, so `--deliver-cached`, the
+  pre-push hook and the merge gate all refuse it. Coverage (`fullScenario` + the
+  executed check ids) lives in `.verify/<sha>.metadata.json` — before #5067 that
+  file carried identity only, so a two-check PASS and a full-gate PASS were
+  indistinguishable and the push gate accepted both.
+- **A report is only delivered to a PR the sha belongs to** (#5060). `--comment`
+  refuses a sha with no relationship to the PR's branch (naming both sides),
+  labels an older-but-on-branch sha **NOT THE PR HEAD**, and reads the posted
+  comment back to confirm the sha GitHub ends up holding is the one just sent.
+  That read-back is the manual ritual (`compare the sticky's sha= to
+  git rev-parse HEAD`) made structural — you no longer have to remember it.
+- **PR scenarios are light; daily/release is thorough** (#5223). A repo may
+  `when`-gate expensive standing checks on the PR doors and fail-fast after the
+  first blocking red. Reused broker evidence is named on the report itself
+  (same checkout too — silent reuse is how agents re-wait a cache). Full tool
+  logs land at `.verify/<sha>.<check>.log`; the comment keeps the table and
+  failure tails. Do not treat the 24h wall-clock of a polluted machine as a
+  savings baseline.

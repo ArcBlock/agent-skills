@@ -188,12 +188,12 @@ round silently skips. `~/.agentloop-fleet/deployment.json`:
 - `permissionMode: "skip"` (= `--dangerously-skip-permissions`) is what the proven setup uses;
   a fresh checkout is untrusted so its allowlist is ignored — see the permission section in
   [`fleet/README.md`](fleet/README.md) before choosing anything else.
-- **`skillEnv` is generated for you** (since 0.18.2) with isolated ports + `ARC_HOME` per
-  skill (`:4910/:8797`, `:4920/:8807`). Two skills sweeping one repo concurrently each boot
-  that repo's daemon, and sharing a port pair means the second dies on bind — a symptom that
-  reads as a broken sweep rather than a missing key, so it is a default rather than a
-  question. A hand-tuned value is preserved across re-runs. Every field is in the reference
-  table in [`fleet/README.md`](fleet/README.md#config-field-reference).
+- **Daemon isolation is a named instance.** Skills that boot `arc service` run
+  `arc service start fleet-issue-sweep` / `fleet-pr-sweep`; the port is kernel-allocated and
+  `arc service url NAME` reads the address back. `skillEnv` carries optional hand-tuned extras
+  and is **preserved across reconcile** — whatever you put there stays until you remove it by
+  hand, so keep it to values the skill actually reads. Every field is in the reference table in
+  [`fleet/README.md`](fleet/README.md#config-field-reference).
 
 **Each covered repo must have** its own `.claude/repo-profile.md` (the skills read toolchain /
 face-paths / labels / verification_entry from it) **and the coordination labels**
