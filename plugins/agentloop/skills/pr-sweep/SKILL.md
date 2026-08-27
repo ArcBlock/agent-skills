@@ -485,7 +485,9 @@ types/tests 绿就是证据):**
 > 具体是什么(而不是"是 feature 所以升级")。
 
 ```bash
-gh pr merge <n> --squash --delete-branch    # 低风险闸通过
+# 必须使用插件的 API 合并器；它以当前 head SHA 作原子前置条件，
+# 不会在 linked worktree 中隐式 checkout 默认分支（arc#4963）。
+bash "$AGENTLOOP_ROOT/scripts/merge-verified-pr.sh" <n> --method squash
 ```
 
 ### 举手之劳自己修,不写"行动建议"甩给人(pr-sweep 的核心纪律)
