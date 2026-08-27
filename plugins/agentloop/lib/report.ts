@@ -48,6 +48,11 @@ export interface CheckResult {
   rawTail?: string;
   /** complete tool output — always captured, collapsed in report for full log access */
   rawFull?: string;
+  /**
+   * Path to the on-disk full log (#5223). When set, the report's Full Logs
+   * section points here instead of inlining tens of kilobytes of tool output.
+   */
+  logPath?: string;
 }
 
 /** Monotonic within one process — enough to keep concurrent `run()`s apart. */
@@ -395,10 +400,19 @@ function statsStr(r: CheckResult): string {
 const dur = (ms: number | undefined): string =>
   `${(Number.isFinite(ms) ? (ms as number) / 1000 : 0).toFixed(1)}s`;
 
-/** Render a deterministic markdown report — suitable for a PR/issue comment. */
+/**
+ * Render a deterministic markdown report — suitable for a PR/issue comment.
+ *
+ * `opts.notice` is an optional block rendered immediately under the H2 heading,
+ * before the results table. It exists so a caller can state a fact ABOUT THE RUN
+ * that the results table structurally cannot show — currently a partial
+ * (`--only`/`--skip`) selection, whose green rows would otherwise read exactly
+ * like a full gate's (issue #5067). Omitting it leaves the report byte-identical
+ * to the pre-#5067 output.
+ */
 export function renderReport(
   results: CheckResult[],
-  opts: { scenario: string; base?: string; sha?: string; identity?: string },
+  opts: { scenario: string; base?: string; sha?: string; identity?: string; notice?: string },
 ): string {
   const ok = passed(results);
   const total = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
@@ -422,18 +436,22 @@ export function renderReport(
     ? `\n\n### Notes\n${notes.map((r) => `\n- **${r.title}**: ${r.rawTail}`).join("")}`
     : "";
 
-  // Full logs — collapsed, capped so the report stays under GitHub's 65536-char
-  // comment limit. Keep the TAIL of each log (where errors land); note truncation.
-  const withLogs = results.filter((r) => !isSkipped(r) && r.rawFull);
+  // Full logs. Prefer an on-disk path (#5223) so the PR comment stays a table
+  // plus failure tails, not 40+ KB of inlined turbo output. Fall back to a
+  // clipped <details> body only when a check has rawFull and no logPath —
+  // that's the renderer unit-test / pre-persist shape, not the live gate.
+  const withLogs = results.filter((r) => !isSkipped(r) && (r.logPath || r.rawFull));
   const LOG_BUDGET = 45000;
-  const per = withLogs.length ? Math.max(2000, Math.floor(LOG_BUDGET / withLogs.length)) : 0;
+  const inlined = withLogs.filter((r) => !r.logPath && r.rawFull);
+  const per = inlined.length ? Math.max(2000, Math.floor(LOG_BUDGET / inlined.length)) : 0;
   const clip = (s: string): string =>
     s.length > per ? `…(truncated — last ${per} of ${s.length} chars)…\n${s.slice(-per)}` : s;
   const logsBlock = withLogs.length
     ? `\n\n### Full Logs\n${withLogs
-        .map(
-          (r) =>
-            `\n<details><summary>${r.title} — output</summary>\n\n\`\`\`\n${clip(r.rawFull ?? "")}\n\`\`\`\n</details>`,
+        .map((r) =>
+          r.logPath
+            ? `\n- **${r.title}**: \`${r.logPath}\``
+            : `\n<details><summary>${r.title} — output</summary>\n\n\`\`\`\n${clip(r.rawFull ?? "")}\n\`\`\`\n</details>`,
         )
         .join("\n")}`
     : "";
@@ -443,10 +461,11 @@ export function renderReport(
   // engine stays repo-agnostic; still injected deterministically so an agent
   // cannot forget provenance.
   const identity = opts.identity?.trim();
+  const notice = opts.notice?.trim();
   return `${identity ? `${identity}\n\n` : ""}## Verification Report — \`${opts.scenario}\`${
     opts.base ? ` (affected base \`${opts.base.slice(0, 9)}\`)` : ""
   }${shaStr}
-
+${notice ? `\n${notice}\n` : ""}
 | Check | Result | Stats | Duration |
 |-------|--------|-------|----------|
 ${rows}

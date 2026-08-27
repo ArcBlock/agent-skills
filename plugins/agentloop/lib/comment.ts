@@ -11,7 +11,7 @@
  *
  * This is I/O (not pure render), so it lives OUTSIDE report.ts.
  */
-import { run, tail, trimFullLogsSection } from "./report.ts";
+import { run, stripAnsi, tail, trimFullLogsSection } from "./report.ts";
 
 /**
  * Resolve `owner/repo` from a git remote URL. Handles GitHub SSH/HTTPS and the
@@ -126,7 +126,18 @@ export const MARKER_PREFIX = "<!-- verification-report";
  * (report.ts), which requires every blocking failure to be a structurally-measured
  * timeout with zero observed failures; any real failure always dominates to `FAIL`.
  */
-export type VerifyResult = "PASS" | "FAIL" | "NA" | "BLOCKED" | "TIMEOUT";
+/**
+ * `PARTIAL` (issue #5067): distinct from `PASS` — every check that RAN passed, but the
+ * run was scoped by `--only`/`--skip`, so the gate's coverage was never established. It
+ * is emitted for a green partial run only (a red partial stays `FAIL`/`TIMEOUT`, because
+ * a red is already a red and `FAIL` carries the #3062 diagnostic semantics). Like
+ * `BLOCKED` and `TIMEOUT` above, it fails closed for free: `requireStickyGate` accepts
+ * only {PASS, NA}, `--deliver-cached` exits non-zero on anything else, and
+ * `tools/pre-push.sh` compares the `.result` file against PASS/NA. Never derive it by
+ * hand — the scenario runner derives it from a structural fact (were `--only`/`--skip`
+ * present?), never from judgement.
+ */
+export type VerifyResult = "PASS" | "FAIL" | "NA" | "BLOCKED" | "TIMEOUT" | "PARTIAL";
 
 /** Build a dynamic marker encoding sha + result (parsed by a merge-gate). */
 export function makeMarker(sha: string, result: VerifyResult, prefix = MARKER_PREFIX): string {
@@ -297,6 +308,158 @@ export function postComment(
 }
 
 /**
+ * How a report's sha relates to the PR it is about to be delivered to (issue #5060).
+ *
+ *   head     the sha IS the PR's head — the normal delivery
+ *   behind   an older commit on the PR's branch (ancestor of its head) — deliverable,
+ *            but the report is NOT a statement about the current head
+ *   ahead    a descendant of the PR's recorded head — the ordinary pre-push case, where
+ *            the hook delivers before the ref update makes the new head visible
+ *   branch   no ancestry either way, but this checkout sits on the PR's own head branch —
+ *            a local rebase / force-push in flight; still this PR's work
+ *   foreign  none of the above: the report is about work that is not this PR's
+ *   unknown  the PR's head could not be read, so attribution is impossible
+ */
+export type PrShaRelation = "head" | "behind" | "ahead" | "branch" | "foreign" | "unknown";
+
+export interface PrShaAttribution {
+  relation: PrShaRelation;
+  /** the PR head oid as GitHub currently records it (absent iff `unknown`) */
+  prHead?: string;
+  /** the PR's head branch name */
+  prBranch?: string;
+  /** best-effort local branch name(s) carrying `sha` */
+  shaBranch?: string;
+  /** one sentence naming BOTH sides — used verbatim in the refusal message */
+  detail: string;
+}
+
+const short = (sha: string): string => sha.slice(0, 9);
+
+/** Best-effort local branch name(s) containing `sha`, for naming the other side. */
+function branchesContaining(sha: string, runner: typeof run): string | undefined {
+  const r = runner(`git branch --contains ${sha} --format='%(refname:short)' 2>/dev/null`);
+  if (r.code !== 0) return undefined;
+  const names = stripAnsi(r.out)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("("));
+  return names.length ? names.join(", ") : undefined;
+}
+
+/**
+ * Decide whether `sha` belongs to PR `pr` (issue #5060).
+ *
+ * `--comment <PR#>` used to write the sticky comment wherever it was pointed: on
+ * 2026-08-25 PR #5049's sticky was overwritten with sha `4edf808af`, a commit on
+ * `factory/5018-independent-substrate`, and a human had to re-deliver the real one by
+ * hand. The merge gate is fail-closed on its own SHA match, so this is about the half a
+ * HUMAN reads — a foreign red reads as "this PR failed", and a foreign green is worse.
+ *
+ * Relatedness is deliberately generous in three directions, because the accept path is
+ * the one an over-tightening breaks: an ancestor (an older commit on the branch), a
+ * descendant (the pre-push hook delivers BEFORE the ref update, so GitHub still shows
+ * the old head), and same-branch-no-ancestry (a local rebase not yet force-pushed) are
+ * all this PR's work. Only "no relationship at all" is refused.
+ *
+ * `unknown` (the PR head could not be read) is refused too, and that costs nothing in
+ * practice: every path that reads the head is the same `gh` that would have to post the
+ * comment, so a lookup that cannot run belongs to a delivery that could not have landed.
+ */
+export function attributeShaToPr(pr: string, sha: string, runner = run): PrShaAttribution {
+  const view = runner(`gh pr view ${pr} --json headRefOid,headRefName 2>/dev/null`);
+  let prHead: string | undefined;
+  let prBranch: string | undefined;
+  if (view.code === 0) {
+    try {
+      const parsed = JSON.parse(stripAnsi(view.out).trim()) as {
+        headRefOid?: unknown;
+        headRefName?: unknown;
+      };
+      if (typeof parsed.headRefOid === "string" && /^[0-9a-f]{7,40}$/.test(parsed.headRefOid))
+        prHead = parsed.headRefOid;
+      if (typeof parsed.headRefName === "string" && parsed.headRefName.trim())
+        prBranch = parsed.headRefName.trim();
+    } catch {
+      // Unparseable payload → attribution impossible; handled as `unknown` below.
+    }
+  }
+  const shaBranch = branchesContaining(sha, runner);
+  if (!prHead) {
+    return {
+      relation: "unknown",
+      prBranch,
+      shaBranch,
+      detail:
+        `could not read PR #${pr}'s head commit from GitHub, so report sha ${short(sha)}` +
+        `${shaBranch ? ` (on ${shaBranch})` : ""} cannot be attributed to it`,
+    };
+  }
+  const both =
+    `report sha ${short(sha)}${shaBranch ? ` (on ${shaBranch})` : ""} vs ` +
+    `PR #${pr} head ${short(prHead)}${prBranch ? ` (on ${prBranch})` : ""}`;
+  const at = (relation: PrShaRelation): PrShaAttribution => ({
+    relation,
+    prHead,
+    prBranch,
+    shaBranch,
+    detail: both,
+  });
+  if (prHead === sha) return at("head");
+  // `--is-ancestor` is reflexive, so the equality case above must be settled first.
+  const isAncestor = (a: string, b: string): boolean =>
+    runner(`git merge-base --is-ancestor ${a} ${b} 2>/dev/null`).code === 0;
+  if (isAncestor(sha, prHead)) return at("behind");
+  if (isAncestor(prHead, sha)) return at("ahead");
+  const current = runner("git rev-parse --abbrev-ref HEAD 2>/dev/null");
+  const currentBranch = current.code === 0 ? stripAnsi(current.out).trim() : "";
+  if (prBranch && currentBranch && currentBranch === prBranch) return at("branch");
+  return at("foreign");
+}
+
+/**
+ * Banner for the third state: a real report for a real commit on this PR's branch that
+ * is NOT its head. Delivering it silently would let a green from an earlier commit read
+ * as a gate for the current one; refusing it outright would throw away a legitimate
+ * report. So it is delivered, labelled.
+ */
+export function notHeadNotice(pr: string, sha: string, prHead: string): string {
+  return (
+    `> ⚠️ **NOT THE PR HEAD** — this report is for \`${short(sha)}\`, but PR #${pr}'s head is ` +
+    `\`${short(prHead)}\`. It describes an earlier commit on this branch and does **not** ` +
+    `verify the current head.`
+  );
+}
+
+/**
+ * Read back the sha in the marker of the sticky comment GitHub actually holds.
+ * `undefined` = could not be read (no claim either way).
+ *
+ * This is the manual ritual #5060 exists to retire: every competent runner that night
+ * ended up pulling the posted comment back and diffing its `sha=` against
+ * `git rev-parse HEAD`. Doing it here means nobody has to remember.
+ */
+export function readDeliveredSha(
+  pr: string,
+  runner = run,
+  markerPrefix = MARKER_PREFIX,
+): string | undefined {
+  const firstLineTest =
+    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
+    `test("^${markerPrefix}")`;
+  const found = runner(
+    `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
+      `--jq ${shQuote(`[.[] | select(${firstLineTest})][-1].body // empty`)} 2>/dev/null`,
+    resolveGhRepoEnv(runner),
+  );
+  if (found.code !== 0) return undefined;
+  const first = decodeHtmlEntities(stripAnsi(found.out))
+    .split("\n")
+    .find((l) => l.trim().length > 0);
+  return first?.match(/sha=([0-9a-f]+)/)?.[1];
+}
+
+/**
  * The one call the scenario runner makes after rendering. Honors --comment /
  * --comment-dry-run; no-ops when neither is present. Prints a loud line on any
  * failure so a requested post that didn't land can't pass silently — but never
@@ -318,13 +481,39 @@ export function deliverComment(
     );
     return { posted: false, reason: "no-pr" };
   }
+
+  // #5060: the sticky is the only visible face of "last verification result", and it is
+  // upserted in place — a delivery aimed at the wrong PR does not add noise, it DESTROYS
+  // the record that was there. Attribute before writing; refuse rather than overwrite.
+  const attribution = attributeShaToPr(pr, sha, runner);
+  if (attribution.relation === "foreign" || attribution.relation === "unknown") {
+    console.error(
+      `❌ --comment: refusing to deliver to PR #${pr} — ${attribution.detail}. Report NOT posted.`,
+    );
+    console.error(
+      attribution.relation === "foreign"
+        ? "  This report is about work that does not belong to that PR; delivering it would overwrite that PR's sticky comment."
+        : "  Attribution could not be established, and an unattributable report must not overwrite a PR's sticky comment.",
+    );
+    return {
+      posted: false,
+      reason: attribution.relation === "foreign" ? "pr-sha-foreign" : "pr-sha-unverified",
+    };
+  }
+  // Third state: a genuine report for a genuine commit on this PR's branch that is not
+  // its head. Deliverable — but never silently, or its green reads as a head gate.
+  const body =
+    attribution.relation === "behind" && attribution.prHead
+      ? `${notHeadNotice(pr, sha, attribution.prHead)}\n\n${report}`
+      : report;
+
   if (args.dryRun) {
     console.error(
-      `\n[dry-run] would upsert to PR #${pr}:\n${stickyBody(report, sha, result, markerPrefix)}`,
+      `\n[dry-run] would upsert to PR #${pr}:\n${stickyBody(body, sha, result, markerPrefix)}`,
     );
     return { posted: true, reason: "dry-run" };
   }
-  const res = postComment(pr, report, sha, result, runner, markerPrefix);
+  const res = postComment(pr, body, sha, result, runner, markerPrefix);
   if (!res.ok) {
     console.error(`❌ --comment: failed to post the report to PR #${pr}. Report NOT posted.`);
     if (res.out.trim()) {
@@ -332,6 +521,24 @@ export function deliverComment(
     }
     return { posted: false, reason: "post-failed" };
   }
-  console.error(`✅ report posted to PR #${pr}`);
+
+  // Read back what GitHub actually holds (#5060). Asymmetric on purpose: POSITIVE
+  // evidence of a different sha means our report is not the one on the PR and the
+  // delivery failed; ABSENCE of evidence (the read-back call itself did not run) only
+  // warns, because a flaky read must not turn a landed report into a failed gate.
+  const delivered = readDeliveredSha(pr, runner, markerPrefix);
+  if (delivered === undefined) {
+    console.error(
+      `⚠️ --comment: posted to PR #${pr} but could not read the comment back to confirm its sha.`,
+    );
+  } else if (delivered !== sha) {
+    console.error(
+      `❌ --comment: PR #${pr}'s sticky comment holds sha ${short(delivered)}, not the ${short(sha)} just posted — another runner overwrote it. Report NOT delivered.`,
+    );
+    return { posted: false, reason: "readback-mismatch" };
+  }
+  console.error(
+    `✅ report posted to PR #${pr}${attribution.relation === "behind" ? " (marked NOT-HEAD)" : ""}`,
+  );
   return { posted: true };
 }

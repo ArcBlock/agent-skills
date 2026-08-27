@@ -267,8 +267,8 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
   it("layers process env < envFile < env < skillEnv, and expands {{CHECKOUT}}", () => {
     const cfg = base({
       envFile: file,
-      env: { ARC_HOME: "{{CHECKOUT}}/.arc-home", SHARED: "deployment" },
-      skillEnv: { "issue-sweep": { ARC_SERVICE_PORT: "4910", SHARED: "skill-wins" } },
+      env: { FLEET_CHECKOUT: "{{CHECKOUT}}/.marker", SHARED: "deployment" },
+      skillEnv: { "issue-sweep": { FLEET_LABEL: "issue", SHARED: "skill-wins" } },
     });
     const run = {
       skillLocal: "issue-sweep",
@@ -280,19 +280,19 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     const e = runEnv(run, cfg, { PRE_EXISTING: "kept", SHARED: "process" });
     expect(e.PRE_EXISTING).toBe("kept");
     expect(e.GH_TOKEN).toBe("gho_faketoken"); // envFile beats process env
-    expect(e.ARC_HOME).toBe("/co/x/.arc-home"); // {{CHECKOUT}} expanded
-    expect(e.ARC_SERVICE_PORT).toBe("4910");
+    expect(e.FLEET_CHECKOUT).toBe("/co/x/.marker"); // {{CHECKOUT}} expanded
+    expect(e.FLEET_LABEL).toBe("issue");
     expect(e.SHARED).toBe("skill-wins"); // per-skill has the last word
     // Driver-owned identity must not be overridable by config.
     expect(e.ARC_UNATTENDED).toBe("1");
     expect(e.ARC_AGENT_RUNNER).toBe("r1");
   });
 
-  it("gives each routine its own ports — the collision the hand-written cron block avoided", () => {
+  it("gives each routine its own skillEnv — the collision the hand-written cron block avoided", () => {
     const cfg = base({
       skillEnv: {
-        "issue-sweep": { ARC_SERVICE_PORT: "4910", ARC_WORKER_PORT: "8797" },
-        "pr-sweep": { ARC_SERVICE_PORT: "4920", ARC_WORKER_PORT: "8807" },
+        "issue-sweep": { FLEET_LABEL: "issue" },
+        "pr-sweep": { FLEET_LABEL: "pr" },
       },
     });
     const mk = (s: string) => ({
@@ -302,8 +302,8 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
       runner: "r",
       engine: { kind: "claude" as const, bin: "claude" },
     });
-    expect(runEnv(mk("issue-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4910");
-    expect(runEnv(mk("pr-sweep"), cfg, {}).ARC_SERVICE_PORT).toBe("4920");
+    expect(runEnv(mk("issue-sweep"), cfg, {}).FLEET_LABEL).toBe("issue");
+    expect(runEnv(mk("pr-sweep"), cfg, {}).FLEET_LABEL).toBe("pr");
   });
 
   // Disk-fill incident, TWICE: a bare "build a temp worktree" instruction let a skill improvise
@@ -422,7 +422,7 @@ describe("setupCommand", () => {
       cover: ["ArcBlock/arc"],
       checkoutPerSkill: true, // matches the shipped deployment shape (tree per repo × skill)
       env: { npm_config_store_dir: "/Volumes/Ext/store", SHARED: "from-deployment" },
-      skillEnv: { "issue-sweep": { ARC_SERVICE_PORT: "4910" } },
+      skillEnv: { "issue-sweep": { FLEET_LABEL: "issue" } },
     });
     const cat: RepoEntry[] = [
       { ...CATALOG[0], skills: ["issue-sweep"], setupCommand: "pnpm install --frozen-lockfile" },
@@ -436,7 +436,7 @@ describe("setupCommand", () => {
     expect(setup?.env).toBeDefined(); // ← the whole point: env must be PASSED, not inherited
     expect(setup?.env?.npm_config_store_dir).toBe("/Volumes/Ext/store");
     expect(setup?.env?.SHARED).toBe("from-deployment");
-    expect(setup?.env?.ARC_SERVICE_PORT).toBe("4910"); // per-skill env reaches setup too
+    expect(setup?.env?.FLEET_LABEL).toBe("issue"); // per-skill env reaches setup too
     expect(setup?.env?.ARC_UNATTENDED).toBe("1"); // driver-owned identity is there as well
 
     // The checkout is a step of the run too — a deployment's git config (proxy,

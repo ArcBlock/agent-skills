@@ -134,9 +134,11 @@ bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes c
   command. (The other route is a launchd **LaunchAgent**, which runs inside the GUI session and
   needs no token at all — at the cost of stopping when the user logs out, and the installer does
   not recognize it.)
-- **Repos running a daemon** (arc: `arc service`) need per-skill isolated ports so issue-sweep and
-  pr-sweep don't collide — add `skillEnv` to the generated deployment.json (issue-sweep
-  4910/8797, pr-sweep 4920/8807). The installer preserves it once set.
+- **Repos running a daemon** (arc: `arc service`) isolate concurrent skills with named
+  instances: `arc service start fleet-issue-sweep` / `fleet-pr-sweep` — the port is
+  kernel-allocated, and `arc service url NAME` reads the address back. Leave `skillEnv`
+  empty unless a skill genuinely reads a value from it; entries there survive every
+  later reconcile.
 
 ## Step 3 — CLOUD (if "Cloud" or "Both")
 

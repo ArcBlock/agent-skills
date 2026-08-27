@@ -90,4 +90,9 @@ fi
   expect(result.stdout).toContain("=== worktrees ===");
   expect(result.stdout).toContain(repo);
   expect(result.stdout).toContain(peer);
+  // The primary-worktree skip must not make `set -e` abort on the next
+  // linked-worktree row.  Reaching the terminal inventory marker proves the
+  // classifier consumed the whole real stream, rather than only listing it.
+  expect(result.stdout).toContain("=== SAFE worktrees (eligible for remove) ===");
+  expect(result.stdout).toContain("Done inventory.");
 });

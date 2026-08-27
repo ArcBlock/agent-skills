@@ -5,13 +5,16 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
+  attributeShaToPr,
   type CommentArgs,
   decodeHtmlEntities,
   deliverComment,
   HTML_DECODE_JQ,
   MARKER_PREFIX,
+  makeMarker,
   parseCommentArgs,
   postComment,
+  readDeliveredSha,
   resolvePr,
   stickyBody,
 } from "./comment.ts";
@@ -306,6 +309,116 @@ describe("postComment", () => {
   });
 });
 
+/** A commit on another branch entirely — the #5060 incident's shape. */
+const FOREIGN_SHA = "4edf808af4edf808af4edf808af4edf808af4edf";
+const PR_BRANCH = "fix/1234-thing";
+
+interface StubOpts {
+  prHead?: string;
+  prBranch?: string;
+  /** `gh pr view --json headRefOid` fails (no gh, no auth, no such PR) */
+  viewFails?: boolean;
+  /** ordered pairs for which `git merge-base --is-ancestor a b` succeeds */
+  ancestors?: Array<[string, string]>;
+  currentBranch?: string;
+  shaBranches?: string;
+  postOk?: boolean;
+  /** sha the read-back finds on the PR; `null` = the read-back call itself fails */
+  deliveredSha?: string | null;
+  cmds?: string[];
+}
+
+/**
+ * A `gh`/`git` stub covering every call `deliverComment` makes: the #5060 attribution
+ * query, the upsert lookup, the POST/PATCH, and the post-delivery read-back.
+ */
+function stub(o: StubOpts = {}) {
+  return (cmd: string) => {
+    o.cmds?.push(cmd);
+    if (cmd.includes("gh pr view") && cmd.includes("headRefOid"))
+      return o.viewFails
+        ? fail("could not resolve to a PullRequest")
+        : ok(
+            JSON.stringify({
+              headRefOid: o.prHead ?? SHA,
+              headRefName: o.prBranch ?? PR_BRANCH,
+            }),
+          );
+    if (cmd.startsWith("git branch --contains")) return ok(`${o.shaBranches ?? PR_BRANCH}\n`);
+    if (cmd.startsWith("git merge-base --is-ancestor")) {
+      const m = cmd.match(/--is-ancestor (\S+) (\S+)/);
+      const pair = (o.ancestors ?? []).some(([a, b]) => a === m?.[1] && b === m?.[2]);
+      return pair ? ok() : fail();
+    }
+    if (cmd.includes("git rev-parse --abbrev-ref HEAD"))
+      return ok(`${o.currentBranch ?? PR_BRANCH}\n`);
+    if (cmd.includes("git remote get-url")) return ok("git@github.com:ArcBlock/arc.git\n");
+    if (cmd.includes("--jq") && cmd.includes(".body"))
+      return o.deliveredSha === null
+        ? fail()
+        : ok(`${makeMarker(o.deliveredSha ?? SHA, RESULT)}\n`);
+    if (cmd.includes("--jq")) return ok(""); // upsert lookup: no existing sticky
+    if (cmd.includes("-X POST") || cmd.includes("-X PATCH"))
+      return (o.postOk ?? true) ? ok("created") : fail("boom");
+    return ok();
+  };
+}
+
+describe("attributeShaToPr (#5060)", () => {
+  it("classifies the PR's own head as head", () => {
+    expect(attributeShaToPr("742", SHA, stub()).relation).toBe("head");
+  });
+
+  it("classifies an ancestor of the PR head as behind", () => {
+    const older = "0000000000000000000000000000000000000001";
+    const a = attributeShaToPr("742", older, stub({ ancestors: [[older, SHA]] }));
+    expect(a.relation).toBe("behind");
+    expect(a.prHead).toBe(SHA);
+  });
+
+  it("classifies a descendant of the PR head as ahead (pre-push delivers before the ref update)", () => {
+    const newer = "0000000000000000000000000000000000000002";
+    expect(attributeShaToPr("742", newer, stub({ ancestors: [[SHA, newer]] })).relation).toBe(
+      "ahead",
+    );
+  });
+
+  it("classifies a rebased sha on the PR's own branch as branch, not foreign", () => {
+    expect(attributeShaToPr("742", FOREIGN_SHA, stub({ currentBranch: PR_BRANCH })).relation).toBe(
+      "branch",
+    );
+  });
+
+  it("classifies an unrelated branch's sha as foreign and names both sides", () => {
+    const a = attributeShaToPr(
+      "5049",
+      FOREIGN_SHA,
+      stub({
+        currentBranch: "factory/5018-independent-substrate",
+        shaBranches: "factory/5018-independent-substrate",
+        prBranch: "fix/5049-thing",
+      }),
+    );
+    expect(a.relation).toBe("foreign");
+    expect(a.detail).toContain("factory/5018-independent-substrate");
+    expect(a.detail).toContain("fix/5049-thing");
+  });
+
+  it("is unknown when the PR head cannot be read", () => {
+    expect(attributeShaToPr("742", SHA, stub({ viewFails: true })).relation).toBe("unknown");
+  });
+});
+
+describe("readDeliveredSha (#5060)", () => {
+  it("returns the sha in the marker GitHub actually holds", () => {
+    expect(readDeliveredSha("742", stub({ deliveredSha: FOREIGN_SHA }))).toBe(FOREIGN_SHA);
+  });
+
+  it("returns undefined when the comment cannot be read back", () => {
+    expect(readDeliveredSha("742", stub({ deliveredSha: null }))).toBeUndefined();
+  });
+});
+
 describe("deliverComment", () => {
   const report = "## Verification Report\nPASS";
 
@@ -332,10 +445,7 @@ describe("deliverComment", () => {
       report,
       SHA,
       RESULT,
-      (c) => {
-        cmds.push(c);
-        return ok();
-      },
+      stub({ cmds }),
     );
     expect(res).toEqual({ posted: true, reason: "dry-run" });
     expect(cmds.some((c) => c.includes("-X POST") || c.includes("-X PATCH"))).toBe(false);
@@ -353,25 +463,128 @@ describe("deliverComment", () => {
   });
 
   it("surfaces a post failure instead of passing silently", () => {
-    const runner = (cmd: string) => (cmd.includes("--jq") ? ok("") : fail("boom"));
     const res = deliverComment(
       { post: true, pr: "742", dryRun: false },
       report,
       SHA,
       RESULT,
-      runner,
+      stub({ postOk: false }),
     );
     expect(res).toEqual({ posted: false, reason: "post-failed" });
   });
 
-  it("posts successfully with an explicit PR", () => {
-    const runner = (cmd: string) => (cmd.includes("--jq") ? ok("") : ok("created"));
+  // ── #5060 acceptance ──────────────────────────────────────────────────────
+  // Arm 1 and arm 3 are the ones that stop an over-tightening: "refuse every
+  // delivery" satisfies every reject assertion and is worse than the bug.
+
+  it("arm 1 (accept): the correct sha is delivered to its own PR", () => {
+    const cmds: string[] = [];
     const res = deliverComment(
       { post: true, pr: "742", dryRun: false },
       report,
       SHA,
       RESULT,
+      stub({ cmds }),
+    );
+    expect(res).toEqual({ posted: true });
+    expect(cmds.some((c) => c.includes("-X POST") || c.includes("-X PATCH"))).toBe(true);
+  });
+
+  it("arm 1 (accept): a not-yet-pushed descendant still delivers — the pre-push hook runs before the ref update", () => {
+    const newer = "0000000000000000000000000000000000000002";
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      newer,
+      RESULT,
+      stub({ ancestors: [[SHA, newer]], deliveredSha: newer }),
+    );
+    expect(res).toEqual({ posted: true });
+  });
+
+  it("arm 2 (reject): a sha from another branch is refused, naming both sides", () => {
+    const cmds: string[] = [];
+    const errs: string[] = [];
+    const restore = console.error;
+    console.error = (...a: unknown[]) => {
+      errs.push(a.join(" "));
+    };
+    try {
+      const res = deliverComment(
+        { post: true, pr: "5049", dryRun: false },
+        report,
+        FOREIGN_SHA,
+        RESULT,
+        stub({
+          cmds,
+          currentBranch: "factory/5018-independent-substrate",
+          shaBranches: "factory/5018-independent-substrate",
+          prBranch: "fix/5049-thing",
+        }),
+      );
+      expect(res).toEqual({ posted: false, reason: "pr-sha-foreign" });
+    } finally {
+      console.error = restore;
+    }
+    // The sticky it would have destroyed was never touched.
+    expect(cmds.some((c) => c.includes("-X POST") || c.includes("-X PATCH"))).toBe(false);
+    const said = errs.join("\n");
+    expect(said).toContain("factory/5018-independent-substrate");
+    expect(said).toContain("fix/5049-thing");
+  });
+
+  it("arm 3 (third state): an older sha on the PR's own branch is delivered, marked NOT-HEAD", () => {
+    const older = "0000000000000000000000000000000000000001";
+    const bodies: string[] = [];
+    const base = stub({ ancestors: [[older, SHA]], deliveredSha: older });
+    const runner = (cmd: string, _env?: Record<string, string>, input?: string) => {
+      if (input) bodies.push(input);
+      return base(cmd);
+    };
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      older,
+      RESULT,
       runner,
+    );
+    expect(res).toEqual({ posted: true });
+    const posted = JSON.parse(bodies.at(-1) as string).body as string;
+    // Marker still owns line 1 — merge-gate.ts finds the sticky by startswith.
+    expect(posted.split("\n")[0].startsWith(MARKER_PREFIX)).toBe(true);
+    expect(posted).toContain("NOT THE PR HEAD");
+    expect(posted).toContain(report);
+  });
+
+  it("refuses when attribution cannot be established rather than overwriting blind", () => {
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      SHA,
+      RESULT,
+      stub({ viewFails: true }),
+    );
+    expect(res).toEqual({ posted: false, reason: "pr-sha-unverified" });
+  });
+
+  it("read-back: a sticky overwritten by another runner is reported NOT delivered", () => {
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      SHA,
+      RESULT,
+      stub({ deliveredSha: FOREIGN_SHA }),
+    );
+    expect(res).toEqual({ posted: false, reason: "readback-mismatch" });
+  });
+
+  it("read-back: an unreadable read-back only warns — a flaky read must not unland a report", () => {
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      SHA,
+      RESULT,
+      stub({ deliveredSha: null }),
     );
     expect(res).toEqual({ posted: true });
   });

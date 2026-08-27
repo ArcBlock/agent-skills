@@ -200,10 +200,10 @@ export interface DeploymentConfig {
   /** Extra env applied to every run of this deployment. */
   env?: Record<string, string>;
   /**
-   * Per-skill env, keyed by skill local name (`issue-sweep`). This is how two concurrent
-   * routines avoid colliding: give each its own daemon ports and state dir, exactly as the
-   * hand-written cron block did (issue-sweep :4910/:8797, pr-sweep :4920/:8807). `{{CHECKOUT}}`
-   * expands to that run's checkout path.
+   * Per-skill env, keyed by skill local name (`issue-sweep`). Optional extras only —
+   * daemon isolation is a named instance (`arc service start fleet-issue-sweep` /
+   * `fleet-pr-sweep`), not ports in this map. `{{CHECKOUT}}` expands to that run's
+   * checkout path.
    */
   skillEnv?: Record<string, Record<string, string>>;
   /**
