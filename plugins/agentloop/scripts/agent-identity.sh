@@ -92,7 +92,10 @@ fi
 # its sessions — not something this repo or the fleet driver injects — so it works
 # regardless of who launched it. Confidence differs per tool:
 #   claude  CLAUDECODE=1 — Anthropic's CLI sets this for every session (verified live
-#           against a running session, 2026-08). $CLAUDE_CODE_ENTRYPOINT / a live-model
+#           against a running session, 2026-08), but an ancestor Claude process can leak
+#           it into a different engine. It is only a fallback; a launcher must set
+#           ARC_AGENT_ENGINE to the engine it actually spawned. $CLAUDE_CODE_ENTRYPOINT /
+#           a live-model
 #           env var do not exist, so self-detection can only ever fill `kind`, never
 #           `model` — that stays the launcher's job.
 #   codex   CODEX_SANDBOX is present — best-effort only. OpenAI has not documented this

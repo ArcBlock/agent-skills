@@ -197,6 +197,187 @@ export function stickyBody(
 }
 
 /**
+ * ⏱ PER-ROUND TIMING HISTORY.
+ *
+ * The report has always rendered this round's duration; what it could not do is
+ * let you SEE a trend, because the sticky comment is upsert-by-marker — every
+ * round PATCHes the same comment, so round N destroys round N-1's numbers. That
+ * is the entire gap this closes, and it is why the history is stored in the
+ * comment body rather than in a local ledger:
+ *
+ *   - The PR comment is the only store every producer shares. Linked worktrees, a
+ *     second machine and a cloud routine all deliver to the same PR, whereas
+ *     `.verify/` is per-checkout, gitignored, and keyed per-sha (a re-run of the
+ *     same sha overwrites it).
+ *   - It needs no new storage, no schema migration, and no cleanup: the history
+ *     dies with the PR it describes.
+ *
+ * Two representations, one direction: JSON inside an HTML comment is the machine
+ * truth, and the rendered table is derived FROM it. The table is never parsed
+ * back, so a human editing or reflowing it cannot corrupt the series.
+ *
+ * Concurrency is deliberately last-writer-wins. Two runners delivering to one PR
+ * in the same instant can each read the same prior history and one append is
+ * lost. That is a dropped row in a diagnostic series, not a correctness fault —
+ * and the sticky comment it lives in already has exactly those semantics (the
+ * `readback-mismatch` check in `deliverComment` is what catches the case that
+ * actually matters, a foreign runner overwriting the verdict).
+ */
+export const HISTORY_MARKER = "<!-- verify-history";
+
+/**
+ * How many rounds to keep. A PR that is pushed to for a week can easily see 30+
+ * gate runs, and every row costs body budget against BOTH GitHub's 65536-char
+ * limit and the tighter outbound comment-filter work budget (#1922) that already
+ * forces `postComment` to drop the Full Logs appendix. 30 rows ≈ 3KB rendered
+ * plus ≈3KB of JSON — enough to see a trend, small enough to never be the reason
+ * a report fails to post.
+ */
+export const HISTORY_CAP = 30;
+
+/**
+ * Upper bound on a recorded duration: 24h. No real round approaches it — the
+ * gate carries its own watchdog and the numbers come from `process.uptime()` —
+ * so a value above this is a corrupt or hand-edited record, not a slow run.
+ * It exists because `Number.isFinite` is true for 1e308, which sails through a
+ * plain non-negative check and then renders as `1e+305s` in the table (found by
+ * fuzzing the parser, not by a failing round).
+ */
+const MAX_RUN_MS = 24 * 60 * 60 * 1000;
+
+export interface VerifyRunEntry {
+  /**
+   * ISO-8601, always UTC. Several machines deliver to one PR, so a local-time
+   * stamp would not even sort correctly, let alone compare.
+   */
+  at: string;
+  sha: string;
+  scenario: string;
+  result: VerifyResult;
+  /** true wall clock of the whole gate process (queueing + git + checks) */
+  wallMs: number;
+  /** sum of per-check durations; null when this round ran no checks at all */
+  checksMs: number | null;
+  /** this round delivered cached/shared evidence instead of running checks */
+  reused?: boolean;
+}
+
+const RESULTS: readonly VerifyResult[] = ["PASS", "FAIL", "NA", "BLOCKED", "TIMEOUT", "PARTIAL"];
+
+/**
+ * Normalize one entry, or drop it. Doubles as the injection guard: the JSON is
+ * embedded in an HTML comment, so a `-->` reaching the payload would truncate
+ * the marker and silently corrupt every later parse. Rather than escape after
+ * the fact, every field is constrained to a shape that cannot contain it — hex
+ * sha, `[\w.-]` scenario, enumerated result, finite non-negative numbers, and an
+ * ISO date re-serialized from `Date`.
+ */
+function sanitizeEntry(raw: unknown): VerifyRunEntry | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const e = raw as Record<string, unknown>;
+  const at = typeof e.at === "string" && !Number.isNaN(Date.parse(e.at)) ? e.at : undefined;
+  const sha = typeof e.sha === "string" ? e.sha.match(/^[0-9a-f]{4,40}$/i)?.[0] : undefined;
+  const scenario =
+    typeof e.scenario === "string" ? e.scenario.replace(/[^\w.-]/g, "").slice(0, 40) : "";
+  const result = RESULTS.includes(e.result as VerifyResult)
+    ? (e.result as VerifyResult)
+    : undefined;
+  const ms = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= MAX_RUN_MS
+      ? Math.round(v)
+      : undefined;
+  const wallMs = ms(e.wallMs);
+  // An ABSENT checksMs is legitimate — it means the round ran no checks. A
+  // PRESENT but invalid one means the record is corrupt, and reading that as
+  // "no checks ran" would turn corruption into a plausible-looking row.
+  const checksMs = e.checksMs === undefined || e.checksMs === null ? null : ms(e.checksMs);
+  if (!at || !sha || !scenario || !result || wallMs === undefined || checksMs === undefined)
+    return undefined;
+  return {
+    at: new Date(at).toISOString(),
+    sha,
+    scenario,
+    result,
+    wallMs,
+    checksMs,
+    ...(e.reused === true ? { reused: true as const } : {}),
+  };
+}
+
+/**
+ * Recover the run series from a sticky comment body. Returns `[]` for every
+ * unreadable shape (absent marker, truncated marker, malformed JSON, wrong
+ * schema) — a history that cannot be read must degrade to "no history yet" and
+ * let this round start a fresh series, never throw and take the delivery down
+ * with it. Decodes HTML entities first: a body posted through the GitHub MCP
+ * tool arrives with `<!--` escaped to `&lt;!--` (#4283), and the marker would
+ * otherwise be invisible to us on the very next round.
+ */
+export function parseRunHistory(body: string | undefined): VerifyRunEntry[] {
+  if (!body) return [];
+  const decoded = decodeHtmlEntities(body);
+  const start = decoded.lastIndexOf(HISTORY_MARKER);
+  if (start === -1) return [];
+  const end = decoded.indexOf("-->", start);
+  if (end === -1) return [];
+  try {
+    const parsed = JSON.parse(decoded.slice(start + HISTORY_MARKER.length, end).trim()) as {
+      runs?: unknown;
+    };
+    if (!Array.isArray(parsed.runs)) return [];
+    return parsed.runs
+      .map(sanitizeEntry)
+      .filter((e): e is VerifyRunEntry => e !== undefined)
+      .slice(-HISTORY_CAP);
+  } catch {
+    return [];
+  }
+}
+
+const RESULT_ICON: Record<VerifyResult, string> = {
+  PASS: "✅",
+  FAIL: "❌",
+  NA: "⊘",
+  BLOCKED: "🚫",
+  TIMEOUT: "⏱️",
+  PARTIAL: "⚠️",
+};
+
+const secs = (ms: number | null): string => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
+
+/**
+ * Render the history block appended to the end of a sticky comment: a collapsed
+ * human table (newest first — the question is almost always "did this round get
+ * slower than the last one") plus the JSON payload that is the actual store.
+ * Returns "" for an empty series so a first round adds nothing.
+ */
+export function renderRunHistory(entries: VerifyRunEntry[]): string {
+  const clean = entries
+    .map(sanitizeEntry)
+    .filter((e): e is VerifyRunEntry => e !== undefined)
+    .slice(-HISTORY_CAP);
+  if (!clean.length) return "";
+  const rows = [...clean]
+    .reverse()
+    .map(
+      (e) =>
+        `| ${e.at.slice(5, 16).replace("T", " ")} | \`${e.scenario}\`${e.reused ? " ♻️" : ""} | ` +
+        `\`${e.sha.slice(0, 9)}\` | ${RESULT_ICON[e.result]} ${e.result} | ${secs(e.wallMs)} | ${secs(e.checksMs)} |`,
+    )
+    .join("\n");
+  const reusedNote = clean.some((e) => e.reused)
+    ? " ♻️ = delivered cached evidence, ran no checks."
+    : "";
+  return (
+    `\n\n<details><summary>⏱ Verification history — ${clean.length} round${clean.length > 1 ? "s" : ""} on this PR</summary>\n\n` +
+    `| when (UTC) | scenario | sha | result | wall | checks |\n` +
+    `|-----------|----------|-----|--------|------|--------|\n${rows}\n\n` +
+    `<sub>\`wall\` = the whole gate process. \`checks\` = sum of the per-check durations; the gap is queueing, git and evidence publication.${reusedNote} Newest first, last ${HISTORY_CAP} kept.</sub>\n\n` +
+    `</details>\n\n${HISTORY_MARKER} ${JSON.stringify({ v: 1, runs: clean })} -->`
+  );
+}
+
+/**
  * Resolve the target PR: explicit flag value, else the open PR for the current
  * branch (`gh pr view`). Undefined if neither resolves.
  */
@@ -444,6 +625,28 @@ export function readDeliveredSha(
   runner = run,
   markerPrefix = MARKER_PREFIX,
 ): string | undefined {
+  const body = readStickyBody(pr, runner, markerPrefix);
+  if (body === undefined) return undefined;
+  const first = body.split("\n").find((l) => l.trim().length > 0);
+  return first?.match(/sha=([0-9a-f]+)/)?.[1];
+}
+
+/**
+ * Fetch the current sticky comment's body, entity-decoded. `undefined` = the
+ * read did not run (no `gh`, no auth, no network) — distinct from `""`, which
+ * would mean an empty comment; callers must not read absence as "no history".
+ *
+ * Extracted from `readDeliveredSha` (which now calls it) rather than written a
+ * second time: the timing history needs the same comment `readDeliveredSha`
+ * already fetches, and two copies of this jq filter would be two places for the
+ * `shQuote`/`HTML_DECODE_JQ` interaction to rot — that pairing has already
+ * caused one silent degradation (see `shQuote`'s note).
+ */
+export function readStickyBody(
+  pr: string,
+  runner = run,
+  markerPrefix = MARKER_PREFIX,
+): string | undefined {
   const firstLineTest =
     `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
     `test("^${markerPrefix}")`;
@@ -453,10 +656,7 @@ export function readDeliveredSha(
     resolveGhRepoEnv(runner),
   );
   if (found.code !== 0) return undefined;
-  const first = decodeHtmlEntities(stripAnsi(found.out))
-    .split("\n")
-    .find((l) => l.trim().length > 0);
-  return first?.match(/sha=([0-9a-f]+)/)?.[1];
+  return decodeHtmlEntities(stripAnsi(found.out));
 }
 
 /**
@@ -465,6 +665,21 @@ export function readDeliveredSha(
  * failure so a requested post that didn't land can't pass silently — but never
  * changes the gate's exit code (PASS/FAIL is authoritative).
  */
+/**
+ * What this ROUND cost, for the timing history. Optional on `deliverComment` so
+ * non-verification callers of the same delivery path are unaffected; every
+ * scenario-runner exit path passes it, including the ones that reused evidence —
+ * "this round waited 40s to be told someone else already ran it" is exactly the
+ * kind of round a duration series should show, not hide.
+ */
+export interface RunMeta {
+  scenario: string;
+  wallMs: number;
+  /** null when this round ran no checks (NA exemption, or reused evidence) */
+  checksMs: number | null;
+  reused?: boolean;
+}
+
 export function deliverComment(
   args: CommentArgs,
   report: string,
@@ -472,6 +687,7 @@ export function deliverComment(
   result: VerifyResult,
   runner = run,
   markerPrefix = MARKER_PREFIX,
+  meta?: RunMeta,
 ): { posted: boolean; reason?: string } {
   if (!args.post) return { posted: false };
   const pr = resolvePr(args.pr, runner);
@@ -502,10 +718,31 @@ export function deliverComment(
   }
   // Third state: a genuine report for a genuine commit on this PR's branch that is not
   // its head. Deliverable — but never silently, or its green reads as a head gate.
-  const body =
+  const attributed =
     attribution.relation === "behind" && attribution.prHead
       ? `${notHeadNotice(pr, sha, attribution.prHead)}\n\n${report}`
       : report;
+
+  // ⏱ Append this round to the series the sticky already carries. The read is
+  // what makes the history survive the upsert; without it every PATCH would
+  // publish a one-row history and this would be no better than the total we
+  // already had. A failed read yields `[]`, which starts a fresh series rather
+  // than dropping the round — the one thing a duration series must never do is
+  // silently stop recording.
+  const body = meta
+    ? `${attributed}${renderRunHistory([
+        ...parseRunHistory(readStickyBody(pr, runner, markerPrefix)),
+        {
+          at: new Date().toISOString(),
+          sha,
+          scenario: meta.scenario,
+          result,
+          wallMs: meta.wallMs,
+          checksMs: meta.checksMs,
+          ...(meta.reused ? { reused: true as const } : {}),
+        },
+      ])}`
+    : attributed;
 
   if (args.dryRun) {
     console.error(

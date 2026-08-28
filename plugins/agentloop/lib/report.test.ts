@@ -124,6 +124,27 @@ describe("renderReport totality (#2734 — a check's missing optional field must
     expect(md).toContain("(1.2s total)");
   });
 
+  // ⏱ wall clock. `total` is the SUM of per-check durations and always has been;
+  // `wallMs` is the gate process's real elapsed time, which additionally covers
+  // broker queueing and git work. Both are shown because the GAP between them is
+  // the diagnostic — a round that waited four minutes for another runner's lease
+  // is otherwise indistinguishable from one that started instantly.
+  test("omits the wall clock when it was not measured (byte-identical to before)", () => {
+    expect(renderReport(results, { scenario: "pre-pr" })).toContain("(1.2s total)");
+  });
+
+  test("shows the wall clock beside the checks total when measured", () => {
+    const md = renderReport(results, { scenario: "pre-pr", wallMs: 5000 });
+    expect(md).toContain("(1.2s total · 5.0s wall)");
+    expect(md).not.toContain("NaN");
+  });
+
+  test("a wall clock far above the checks total still renders both (the queueing case)", () => {
+    expect(renderReport(results, { scenario: "pre-pr", wallMs: 254000 })).toContain(
+      "(1.2s total · 254.0s wall)",
+    );
+  });
+
   test("skipped: true with no stats and no reason still renders a bare cell", () => {
     const bare = [
       { check: "native", title: "Native", pass: true, blocking: false, skipped: true },

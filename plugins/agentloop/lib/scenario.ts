@@ -27,12 +27,15 @@
  * as a gate token. The report itself is still written — it is the diagnostic
  * artifact (PR #3062) — it just stops being currency.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   type CommentArgs,
   deliverComment,
+  MARKER_PREFIX,
   parseCommentArgs,
+  type RunMeta,
   stickyBody,
   type VerifyResult,
 } from "./comment.ts";
@@ -47,6 +50,19 @@ import {
   run,
   tail,
 } from "./report.ts";
+
+/**
+ * This gate's true wall clock, for the timing history.
+ *
+ * `process.uptime()` rather than a timestamp captured at the top of
+ * `runScenario`: the expensive parts of a round happen BEFORE the runner is
+ * reached — the repo's entry script opens its ownership gate, and a full
+ * scenario can then sit in the shared broker's single-flight queue waiting for
+ * another checkout's lease. Measuring from process start is the only reading
+ * that includes them, and it is what a human means by "how long did the gate
+ * take". Rounded to ms so a rendered value never carries false precision.
+ */
+const gateWallMs = (): number => Math.round(process.uptime() * 1000);
 
 /** Context handed to every check's `run`/`when`. */
 export interface RunContext {
@@ -148,6 +164,328 @@ function parseSelect(argv: string[], flag: string): Set<string> | undefined {
         set.add(id);
   }
   return set.size ? set : undefined;
+}
+
+interface NaRefusal {
+  sourceFiles: string[];
+  testReaders: Array<{ changedFile: string; testFile: string }>;
+}
+
+const SOURCE_FILE = /\.(?:[cm]?[jt]s|[jt]sx|py)$/i;
+const TEST_FILE =
+  /(?:^|\/)(?:__tests__\/[^/]+\.(?:[cm]?[jt]s|[jt]sx|py)|[^/]+(?:\.|_)(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx|py)|test_[^/]+\.py)$/i;
+const FILE_READERS = ["readFile", "readFileSync", "readTextFile", "readJson", "Bun.file", "open"];
+const DIRECTORY_READERS = ["readdir", "readdirSync", "opendir", "opendirSync"];
+
+interface StaticCall {
+  name: string;
+  args: string[];
+}
+
+function splitTopLevel(source: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") quote = char;
+    else if (char === "(") depth++;
+    else if (char === ")") depth--;
+    else if (char === "," && depth === 0) {
+      parts.push(source.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(source.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function matchingDelimiter(source: string, open: number, left = "(", right = ")"): number {
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let i = open; i < source.length; i++) {
+    const char = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") quote = char;
+    else if (char === left) depth++;
+    else if (char === right && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function staticCalls(source: string, names: readonly string[]): StaticCall[] {
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const pattern = new RegExp(`(?<![\\w])(${escaped})\\s*\\(`, "g");
+  const calls: StaticCall[] = [];
+  for (const match of source.matchAll(pattern)) {
+    const open = (match.index ?? 0) + match[0].lastIndexOf("(");
+    const close = matchingDelimiter(source, open);
+    if (close !== -1)
+      calls.push({ name: match[1], args: splitTopLevel(source.slice(open + 1, close)) });
+  }
+  return calls;
+}
+
+function withoutComments(source: string): string {
+  let result = "";
+  let quote = "";
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      result += char;
+    } else if (char === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      result += "\n";
+    } else if (char === "/" && next === "*") {
+      i += 2;
+      while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i++;
+    } else {
+      result += char;
+    }
+  }
+  return result;
+}
+
+function literal(expression: string): string | undefined {
+  const value = expression.trim();
+  const quote = value[0];
+  if ((quote !== '"' && quote !== "'" && quote !== "`") || value.at(-1) !== quote) return undefined;
+  const inner = value.slice(1, -1);
+  if (quote === "`" && inner.includes("${")) return undefined;
+  return inner.replace(/\\([\\'"`])/g, "$1");
+}
+
+function evaluatePath(
+  expression: string,
+  bindings: ReadonlyMap<string, string>,
+  testDir: string,
+  repoRoot: string,
+): string | undefined {
+  const value = expression.trim().replace(/\s+as\s+[^,]+$/, "");
+  const text = literal(value);
+  if (text !== undefined) return text;
+  if (value === "import.meta.dir" || value === "__dirname") return testDir;
+  if (/^(?:process\.cwd|Bun\.cwd)\(\)$/.test(value)) return repoRoot;
+  if (bindings.has(value)) return bindings.get(value);
+
+  const call = /^(?:(?:path|posix)\.)?(join|resolve)\s*\(([\s\S]*)\)$/.exec(value);
+  if (!call) return undefined;
+  const args = splitTopLevel(call[2]).map((arg) => evaluatePath(arg, bindings, testDir, repoRoot));
+  if (!args.length || args.some((arg) => arg === undefined)) return undefined;
+  const values = args as string[];
+  return call[1] === "resolve" ? resolve(...values) : join(...values);
+}
+
+function pathBindings(source: string, testDir: string, repoRoot: string): Map<string, string> {
+  const bindings = new Map<string, string>();
+  const assignments = [...source.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g)];
+  for (let pass = 0; pass < assignments.length; pass++) {
+    let changed = false;
+    for (const assignment of assignments) {
+      if (bindings.has(assignment[1])) continue;
+      const value = evaluatePath(assignment[2], bindings, testDir, repoRoot);
+      if (value !== undefined) {
+        bindings.set(assignment[1], value);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return bindings;
+}
+
+function absoluteCandidate(value: string, repoRoot: string): string {
+  return resolve(repoRoot, value);
+}
+
+function matchesRead(
+  changed: string,
+  candidate: string,
+  directory: boolean,
+  repoRoot: string,
+): boolean {
+  const target = absoluteCandidate(changed, repoRoot);
+  const readPath = absoluteCandidate(candidate, repoRoot);
+  return directory ? dirname(target) === readPath : target === readPath;
+}
+
+function helperReaders(
+  source: string,
+): Array<{ name: string; params: string[]; expression: string }> {
+  const helpers: Array<{ name: string; params: string[]; expression: string }> = [];
+  const functionPattern = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)[^{]*\{/g;
+  for (const match of source.matchAll(functionPattern)) {
+    const open = (match.index ?? 0) + match[0].lastIndexOf("{");
+    const close = matchingDelimiter(source, open, "{", "}");
+    if (close === -1) continue;
+    const call = staticCalls(source.slice(open + 1, close), FILE_READERS)[0];
+    if (call?.args[0]) {
+      helpers.push({
+        name: match[1],
+        params: splitTopLevel(match[2]).map((param) => param.replace(/\??\s*:.*/, "").trim()),
+        expression: call.args[0],
+      });
+    }
+  }
+  const arrowPattern = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\(([^)]*)\)\s*=>\s*([^;]+);/g;
+  for (const match of source.matchAll(arrowPattern)) {
+    const call = staticCalls(match[3], FILE_READERS)[0];
+    if (call?.args[0]) {
+      helpers.push({
+        name: match[1],
+        params: splitTopLevel(match[2]).map((param) => param.replace(/\??\s*:.*/, "").trim()),
+        expression: call.args[0],
+      });
+    }
+  }
+  return helpers;
+}
+
+/**
+ * Conservative static proof that a runnable test reads a changed path.
+ * Reader arguments are resolved relative to the test and repository instead
+ * of unioning unrelated strings from the whole file. Non-recursive directory
+ * readers cover direct children; small wrapper functions resolve at call sites.
+ */
+export function testReadsPath(
+  testSource: string,
+  changedFile: string,
+  testFile = "test.ts",
+  repoRoot = process.cwd(),
+): boolean {
+  const code = withoutComments(testSource);
+  const testDir = dirname(resolve(repoRoot, testFile));
+  const bindings = pathBindings(code, testDir, repoRoot);
+  for (const call of staticCalls(code, FILE_READERS)) {
+    const candidate = call.args[0] && evaluatePath(call.args[0], bindings, testDir, repoRoot);
+    if (candidate && matchesRead(changedFile, candidate, false, repoRoot)) return true;
+  }
+  for (const call of staticCalls(code, DIRECTORY_READERS)) {
+    const candidate = call.args[0] && evaluatePath(call.args[0], bindings, testDir, repoRoot);
+    if (candidate && matchesRead(changedFile, candidate, true, repoRoot)) return true;
+  }
+  for (const helper of helperReaders(code)) {
+    for (const call of staticCalls(code, [helper.name])) {
+      const local = new Map(bindings);
+      helper.params.forEach((param, index) => {
+        const value =
+          call.args[index] && evaluatePath(call.args[index], bindings, testDir, repoRoot);
+        if (value !== undefined) local.set(param, value);
+      });
+      const candidate = evaluatePath(helper.expression, local, testDir, repoRoot);
+      if (candidate && matchesRead(changedFile, candidate, false, repoRoot)) return true;
+    }
+  }
+  return false;
+}
+
+export function isStaticTestFile(path: string): boolean {
+  return TEST_FILE.test(path.replaceAll("\\", "/"));
+}
+
+function gitOutput(root: string | undefined, args: string[]): { code: number; out: string } {
+  const result = spawnSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  return { code: result.status ?? 1, out: result.stdout ?? "" };
+}
+
+function changedPaths(root: string, base: string): string[] | undefined {
+  const result = gitOutput(root, [
+    "diff",
+    "--name-status",
+    "-z",
+    "--diff-filter=ACDMRT",
+    `${base}..HEAD`,
+  ]);
+  if (result.code !== 0) return undefined;
+  const fields = result.out.split("\0").filter(Boolean);
+  const paths: string[] = [];
+  for (let i = 0; i < fields.length; ) {
+    const status = fields[i++];
+    const first = fields[i++];
+    if (!status || !first) break;
+    paths.push(first);
+    if (/^[RC]/.test(status)) {
+      const second = fields[i++];
+      if (second) paths.push(second);
+    }
+  }
+  return [...new Set(paths)];
+}
+
+/** Refuse `--na` unless the diff contains no JS/TS/Python source and no test-read files. */
+function naRefusal(base: string): NaRefusal | undefined {
+  const top = gitOutput(undefined, ["rev-parse", "--show-toplevel"]);
+  const root = top.out.trim();
+  if (top.code !== 0 || !root) {
+    return { sourceFiles: ["<unable to inspect diff>"], testReaders: [] };
+  }
+  const changedFiles = changedPaths(root, base);
+  if (!changedFiles) return { sourceFiles: ["<unable to inspect diff>"], testReaders: [] };
+  const sourceFiles = changedFiles.filter((path) => SOURCE_FILE.test(path));
+
+  const listed = gitOutput(root, ["ls-files", "-co", "--exclude-standard", "-z"]);
+  const testReaders: NaRefusal["testReaders"] = [];
+  if (listed.code !== 0) {
+    return { sourceFiles: [...sourceFiles, "<unable to enumerate tests>"], testReaders };
+  }
+  const tests = listed.out.split("\0").filter(isStaticTestFile);
+  for (const testFile of tests) {
+    let source: string;
+    try {
+      source = readFileSync(resolve(root, testFile), "utf8");
+    } catch {
+      continue;
+    }
+    for (const changedFile of changedFiles) {
+      if (testReadsPath(source, changedFile, testFile, root)) {
+        testReaders.push({ changedFile, testFile });
+      }
+    }
+  }
+
+  return sourceFiles.length || testReaders.length ? { sourceFiles, testReaders } : undefined;
+}
+
+function printNaRefusal(refusal: NaRefusal): void {
+  console.error("❌ --na refused: this diff has verifiable work; no exemption cache was written.");
+  for (const path of refusal.sourceFiles) {
+    console.error(`  source file: ${path}`);
+  }
+  for (const { changedFile, testFile } of refusal.testReaders) {
+    console.error(`  test reads changed file: ${testFile} → ${changedFile}`);
+  }
+  if (refusal.testReaders.length) {
+    console.error("  Run the named tests and then run the full verification scenario.");
+  }
 }
 
 function writeNa(
@@ -664,6 +1002,25 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   }
 
   const commentArgs: CommentArgs = parseCommentArgs(argv);
+
+  /**
+   * Every delivery goes through here so no exit path can forget to record its
+   * round. There are five of them (NA, --deliver-cached, two reused-evidence
+   * exits, and the normal completion), and a per-call-site argument list would
+   * make "this round was not recorded" a silent omission rather than a type
+   * error — the reused-evidence paths are precisely the ones most likely to be
+   * skipped by hand, and precisely the ones worth seeing in a duration series.
+   */
+  const deliver = (
+    report: string,
+    sha: string,
+    result: VerifyResult,
+    meta: Omit<RunMeta, "scenario">,
+  ) =>
+    deliverComment(commentArgs, report, sha, result, run, MARKER_PREFIX, {
+      scenario: config.scenario,
+      ...meta,
+    });
   const identity = config.identity?.("Verification") ?? "";
   const only = parseSelect(argv, "--only");
   const skip = parseSelect(argv, "--skip");
@@ -709,9 +1066,16 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const reason = argv[naIdx + 1] ?? "no reason given";
     const sha = head();
     const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
+    const refusal = naRefusal(base);
+    if (refusal) {
+      printNaRefusal(refusal);
+      finalExit(2, false, false);
+    }
     const report = writeNa(config.scenario, reason, sha, base, identity);
     console.log(`✅ N/A exemption written to .verify/${sha.slice(0, 9)}.md`);
-    const na = commentArgs.post ? deliverComment(commentArgs, report, sha, "NA") : { posted: true };
+    const na = commentArgs.post
+      ? deliver(report, sha, "NA", { wallMs: gateWallMs(), checksMs: null })
+      : { posted: true };
     if (!commentArgs.post) console.log(stickyBody(report, sha, "NA"));
     finalExit(0, commentArgs.post, na.posted);
   }
@@ -759,7 +1123,11 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     }
     const reused = provenanceNotice(cached);
     if (reused) console.error(reused.trimEnd());
-    const delivery = deliverComment(commentArgs, `${reused}${cached.report}`, sha, cached.result);
+    const delivery = deliver(`${reused}${cached.report}`, sha, cached.result, {
+      wallMs: gateWallMs(),
+      checksMs: null,
+      reused: true,
+    });
     // Diagnostics are reusable, but only PASS/NA are gate tokens.
     finalExit(
       cached.result === "PASS" || cached.result === "NA" ? 0 : 1,
@@ -802,12 +1170,11 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       );
       const reused = provenanceNotice(admission);
       if (reused) console.error(reused.trimEnd());
-      const cached = deliverComment(
-        commentArgs,
-        `${reused}${admission.report}`,
-        shaForBroker,
-        admission.result,
-      );
+      const cached = deliver(`${reused}${admission.report}`, shaForBroker, admission.result, {
+        wallMs: gateWallMs(),
+        checksMs: null,
+        reused: true,
+      });
       finalExit(
         admission.result === "PASS" || admission.result === "NA" ? 0 : 1,
         commentArgs.post,
@@ -829,12 +1196,11 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         );
         const reused = provenanceNotice(retry);
         if (reused) console.error(reused.trimEnd());
-        const cached = deliverComment(
-          commentArgs,
-          `${reused}${retry.report}`,
-          shaForBroker,
-          retry.result,
-        );
+        const cached = deliver(`${reused}${retry.report}`, shaForBroker, retry.result, {
+          wallMs: gateWallMs(),
+          checksMs: null,
+          reused: true,
+        });
         finalExit(
           retry.result === "PASS" || retry.result === "NA" ? 0 : 1,
           commentArgs.post,
@@ -949,12 +1315,20 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     ? undefined
     : `> ⚠️ **PARTIAL VERIFICATION — NOT A GATE.** ${selected.length} of ${config.checks.length} checks ran (\`${coverage.checks.join("`, `")}\`). ` +
       "The rest were never executed, so this report cannot satisfy the pre-push or merge gate. It is a diagnostic artifact.";
+  // Measured ONCE and shared by the report line and the history row, so the two
+  // can never disagree. Taken here rather than after delivery on purpose: the
+  // gate's work ends when the report exists — posting the comment is what
+  // happens to the result afterwards, and folding `gh` latency into "how long
+  // did verification take" would make the number unusable for comparing rounds.
+  const wallMs = gateWallMs();
+  const checksMs = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
   const report = renderReport(results, {
     scenario: config.scenario,
     base,
     sha,
     identity,
     notice,
+    wallMs,
   });
 
   if (argv.includes("--json")) {
@@ -964,7 +1338,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     // MCP and a later run can still find/upsert it.
     console.log(stickyBody(report, sha, result));
   }
-  const delivery = deliverComment(commentArgs, report, sha, result);
+  const delivery = deliver(report, sha, result, { wallMs, checksMs });
 
   // Cache a PASS for the pre-push gate — only when the tree is clean, so the
   // cached sha matches exactly what was verified.

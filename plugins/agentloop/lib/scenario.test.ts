@@ -8,9 +8,17 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const LIB = import.meta.dir;
 const dirs: string[] = [];
@@ -32,6 +40,22 @@ function repo(): string {
   git("add -A");
   git("commit -qm init");
   return dir;
+}
+
+/** Add one commit on top of the fixture's base, so `HEAD^..HEAD` is the PR diff. */
+function commitFiles(dir: string, files: Record<string, string>): void {
+  for (const [path, content] of Object.entries(files)) {
+    const full = join(dir, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content);
+  }
+  const committed = spawnSync("git", ["add", "-A"], { cwd: dir, encoding: "utf8" });
+  expect(committed.status).toBe(0);
+  const commit = spawnSync("git", ["commit", "-qm", "fixture change"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  expect(commit.status).toBe(0);
 }
 
 /** Run a one-check scenario in `dir`; returns HEAD sha + the runner's exit code. */
@@ -82,7 +106,12 @@ function runScenarioIn(
  * A three-check scenario, so `--only` can select a real subset. Returns HEAD sha,
  * exit code, and combined output.
  */
-function runMultiIn(dir: string, extraArgv = ""): { sha: string; code: number; out: string } {
+function runMultiIn(
+  dir: string,
+  extraArgv = "",
+  resolveBase = "HEAD",
+  cwd = dir,
+): { sha: string; code: number; out: string } {
   const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-multi-"));
   dirs.push(scriptDir);
   const script = join(scriptDir, "multi-run.ts");
@@ -92,12 +121,12 @@ function runMultiIn(dir: string, extraArgv = ""): { sha: string; code: number; o
     script,
     `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
      runScenario(
-       { scenario: "unit", resolveBase: () => "HEAD",
+       { scenario: "unit", resolveBase: () => ${JSON.stringify(resolveBase)},
          checks: [${["a", "b", "c"].map(check).join(", ")}] },
        ["bun", "multi-run.ts"${extraArgv}],
      );`,
   );
-  const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], { encoding: "utf8" });
+  const r = spawnSync("bun", [script], { cwd, encoding: "utf8" });
   const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
     encoding: "utf8",
   }).stdout.trim();
@@ -183,11 +212,145 @@ describe("runScenario — partial verification is not a gate token (#5067)", () 
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
   });
 
-  test("an NA exemption is full coverage over an empty check set", () => {
+  test("NA accept: an unread documentation file still receives the exemption", () => {
     const dir = repo();
-    const { sha } = runMultiIn(dir, `, "--na", "docs-only change"`);
+    commitFiles(dir, {
+      "docs/accept-path/unread-i5199.md": "This new document is not read by a test.\n",
+    });
+    const { sha, code } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(0);
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("NA");
     expect(meta(dir, sha)).toMatchObject({ fullScenario: true, checks: [] });
+  });
+
+  test("NA reject: names the test that reads each changed documentation file", () => {
+    const dir = repo();
+    commitFiles(dir, {
+      "docs/architecture/did-space.md": "old did-space contract\n",
+      "docs/architecture/did-space-local-dx.md": "old local-dx contract\n",
+      ".claude/verify/did-space-docs-sentinel.test.ts": `
+        import { readFileSync } from "node:fs";
+        import { join } from "node:path";
+        const ARCH = join(import.meta.dir, "..", "..", "docs", "architecture");
+        const read = (name: string) => readFileSync(join(ARCH, name), "utf8");
+        read("did-space.md");
+        read("did-space-local-dx.md");
+      `,
+    });
+    commitFiles(dir, {
+      "docs/architecture/did-space.md": "rewritten did-space contract\n",
+      "docs/architecture/did-space-local-dx.md": "rewritten local-dx contract\n",
+    });
+
+    const { sha, code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain("docs/architecture/did-space.md");
+    expect(out).toContain("docs/architecture/did-space-local-dx.md");
+    expect(out).toContain(".claude/verify/did-space-docs-sentinel.test.ts");
+    expect(existsSync(join(dir, ".verify", `${sha}.result`))).toBe(false);
+  });
+
+  test("NA reject: a TypeScript source diff cannot claim a no-verification exemption", () => {
+    const dir = repo();
+    commitFiles(dir, { "src/index.ts": "export const answer = 1;\n" });
+    commitFiles(dir, { "src/index.ts": "export const answer = 2;\n" });
+
+    const { sha, code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain("src/index.ts");
+    expect(out).toContain("source file");
+    expect(existsSync(join(dir, ".verify", `${sha}.result`))).toBe(false);
+  });
+
+  test("NA reject: NUL-delimited diff preserves a non-ASCII TypeScript path", () => {
+    const dir = repo();
+    commitFiles(dir, { "src/功能.ts": "export const answer = 1;\n" });
+
+    const { code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain("src/功能.ts");
+  });
+
+  test("NA reject: a rename checks both the old and new documentation paths", () => {
+    const dir = repo();
+    commitFiles(dir, {
+      "docs/contract.md": "contract\n",
+      "test/contract.test.ts": `
+        import { readFileSync } from "node:fs";
+        readFileSync("docs/contract.md", "utf8");
+      `,
+    });
+    renameSync(join(dir, "docs/contract.md"), join(dir, "docs/renamed.md"));
+    const committed = spawnSync("git", ["add", "-A"], { cwd: dir, encoding: "utf8" });
+    expect(committed.status).toBe(0);
+    expect(spawnSync("git", ["commit", "-qm", "rename fixture"], { cwd: dir }).status).toBe(0);
+
+    const { code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain("docs/contract.md");
+    expect(out).toContain("test/contract.test.ts");
+  });
+
+  test("NA reject: __tests__ source files are runnable static readers", () => {
+    const dir = repo();
+    commitFiles(dir, {
+      "docs/contract.md": "old\n",
+      "src/__tests__/docs-contract.ts": `
+        import { readFileSync } from "node:fs";
+        readFileSync("docs/contract.md", "utf8");
+      `,
+    });
+    commitFiles(dir, { "docs/contract.md": "new\n" });
+
+    const { code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain("src/__tests__/docs-contract.ts");
+  });
+
+  test("NA accept: reader-shaped prose in a test comment is not a dependency", () => {
+    const dir = repo();
+    commitFiles(dir, {
+      "docs/contract.md": "old\n",
+      "test/unrelated.test.ts": `
+        // This example is prose only: readFileSync("docs/contract.md", "utf8")
+        test("unrelated", () => expect(true).toBe(true));
+      `,
+    });
+    commitFiles(dir, { "docs/contract.md": "new\n" });
+
+    const { code } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(0);
+  });
+
+  test("NA reject is independent of the invocation cwd", () => {
+    const dir = repo();
+    commitFiles(dir, {
+      "docs/contract.md": "old\n",
+      "test/contract.test.ts": `
+        import { readFileSync } from "node:fs";
+        readFileSync("docs/contract.md", "utf8");
+      `,
+    });
+    commitFiles(dir, { "docs/contract.md": "new\n" });
+
+    const { code, out } = runMultiIn(
+      dir,
+      `, "--na", "docs-only change"`,
+      "HEAD^",
+      join(dir, "docs"),
+    );
+    expect(code).toBe(2);
+    expect(out).toContain("test/contract.test.ts");
+  });
+
+  test("NA reject: Python source is explicitly verifiable", () => {
+    const dir = repo();
+    commitFiles(dir, { ".claude/skills/example/scripts/check.py": "print('checked')\n" });
+
+    const { code, out } = runMultiIn(dir, `, "--na", "docs-only change"`, "HEAD^");
+    expect(code).toBe(2);
+    expect(out).toContain(".claude/skills/example/scripts/check.py");
+    expect(out).toContain("source file");
   });
 });
 

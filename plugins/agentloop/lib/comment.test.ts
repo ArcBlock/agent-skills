@@ -9,15 +9,22 @@ import {
   type CommentArgs,
   decodeHtmlEntities,
   deliverComment,
+  HISTORY_CAP,
+  HISTORY_MARKER,
   HTML_DECODE_JQ,
   MARKER_PREFIX,
   makeMarker,
   parseCommentArgs,
+  parseRunHistory,
   postComment,
   readDeliveredSha,
+  readStickyBody,
+  renderRunHistory,
   resolvePr,
   stickyBody,
+  type VerifyRunEntry,
 } from "./comment.ts";
+import { trimFullLogsSection } from "./report.ts";
 
 const MARKER = MARKER_PREFIX;
 const SHA = "abc1234567890def";
@@ -363,6 +370,238 @@ function stub(o: StubOpts = {}) {
     return ok();
   };
 }
+
+/**
+ * ⏱ Per-round timing history.
+ *
+ * The accept path is the whole point here, and it is easy to get a green suite
+ * without it: a `renderRunHistory` that returned "" and a `parseRunHistory` that
+ * returned [] would satisfy every "malformed input degrades to []" assertion
+ * below. So the load-bearing tests are the round-trip and the two-round
+ * accumulation through `deliverComment` — those fail if the feature does
+ * nothing, which is exactly the failure mode a reject-only suite cannot see.
+ */
+describe("run history (⏱ per-round durations)", () => {
+  const entry = (over: Partial<VerifyRunEntry> = {}): VerifyRunEntry => ({
+    at: "2026-08-28T16:33:00.000Z",
+    sha: "b7e953cd380275dba09b30d2676e891ffe7945c5",
+    scenario: "pre-merge",
+    result: "PASS",
+    wallMs: 94200,
+    checksMs: 90700,
+    ...over,
+  });
+
+  it("round-trips a series through render → parse", () => {
+    const runs = [
+      entry({ at: "2026-08-28T15:14:00.000Z", sha: "80e2981", scenario: "pre-pr" }),
+      entry(),
+    ];
+    expect(parseRunHistory(renderRunHistory(runs))).toEqual(runs);
+  });
+
+  it("renders a human table carrying both durations, the scenario and the sha", () => {
+    const md = renderRunHistory([entry()]);
+    expect(md).toContain("94.2s");
+    expect(md).toContain("90.7s");
+    expect(md).toContain("pre-merge");
+    expect(md).toContain("b7e953cd3");
+    expect(md).toContain("Verification history");
+  });
+
+  it("renders an em dash, not NaN, for a round that ran no checks", () => {
+    const md = renderRunHistory([entry({ checksMs: null, reused: true })]);
+    expect(md).not.toContain("NaN");
+    expect(md).toContain("| — |");
+    expect(md).toContain("♻️");
+  });
+
+  it("an empty series renders nothing at all (a first round adds no block)", () => {
+    expect(renderRunHistory([])).toBe("");
+  });
+
+  it("degrades to [] for every unreadable shape rather than throwing", () => {
+    expect(parseRunHistory(undefined)).toEqual([]);
+    expect(parseRunHistory("## a report with no history block")).toEqual([]);
+    expect(parseRunHistory(`${HISTORY_MARKER} {not json} -->`)).toEqual([]);
+    expect(parseRunHistory(`${HISTORY_MARKER} {"v":1,"runs":"nope"} -->`)).toEqual([]);
+    // truncated: marker opened, never closed
+    expect(parseRunHistory(`${HISTORY_MARKER} {"v":1,"runs":[]}`)).toEqual([]);
+  });
+
+  it("drops malformed entries without losing the valid ones", () => {
+    const body = `${HISTORY_MARKER} ${JSON.stringify({
+      v: 1,
+      runs: [{ bogus: true }, entry(), { at: "nonsense", sha: "zzz" }],
+    })} -->`;
+    expect(parseRunHistory(body)).toEqual([entry()]);
+  });
+
+  // #4283 isomorph: a body posted through the GitHub MCP tool comes back with
+  // `<!--` escaped. If the marker were matched raw, the very next round would
+  // see no history and silently restart the series.
+  it("still finds the history in an MCP-escaped body", () => {
+    const escaped = renderRunHistory([entry()])
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+    expect(escaped).not.toContain(HISTORY_MARKER);
+    expect(parseRunHistory(escaped)).toEqual([entry()]);
+  });
+
+  // Found by fuzzing, not by a failing round: Number.isFinite(1e308) is true, so
+  // an unbounded check renders "1e+305s" into the table. A duration above 24h is
+  // a corrupt record, and a corrupt record must not become a plausible row.
+  it("rejects durations no real round could produce", () => {
+    const hist = (over: Partial<VerifyRunEntry>) =>
+      parseRunHistory(`${HISTORY_MARKER} ${JSON.stringify({ v: 1, runs: [entry(over)] })} -->`);
+    expect(hist({ wallMs: 1e308 })).toEqual([]);
+    expect(hist({ wallMs: 25 * 60 * 60 * 1000 })).toEqual([]);
+    expect(hist({ wallMs: Number.POSITIVE_INFINITY })).toEqual([]);
+    expect(hist({ wallMs: -1 })).toEqual([]);
+    // the accept side of the same bound — a genuinely long round is still kept
+    expect(hist({ wallMs: 23 * 60 * 60 * 1000 })).toHaveLength(1);
+  });
+
+  it("distinguishes an absent checksMs (ran no checks) from a corrupt one", () => {
+    const withChecks = (v: unknown) =>
+      parseRunHistory(
+        `${HISTORY_MARKER} ${JSON.stringify({ v: 1, runs: [{ ...entry(), checksMs: v }] })} -->`,
+      );
+    expect(withChecks(null)).toHaveLength(1);
+    expect(withChecks(null)[0].checksMs).toBeNull();
+    expect(withChecks(1e308)).toEqual([]);
+    expect(withChecks("nope")).toEqual([]);
+  });
+
+  it(`keeps only the last ${HISTORY_CAP} rounds`, () => {
+    const many = Array.from({ length: HISTORY_CAP + 5 }, (_, i) => entry({ wallMs: i * 1000 }));
+    const parsed = parseRunHistory(renderRunHistory(many));
+    expect(parsed).toHaveLength(HISTORY_CAP);
+    // the newest survived, the oldest were dropped
+    expect(parsed[parsed.length - 1].wallMs).toBe((HISTORY_CAP + 4) * 1000);
+    expect(parsed[0].wallMs).toBe(5000);
+  });
+
+  // The payload lives inside an HTML comment, so a `-->` reaching it would
+  // truncate the marker and make every later parse read a corrupt series.
+  it("cannot be truncated by a scenario name containing the comment terminator", () => {
+    const md = renderRunHistory([entry({ scenario: "evil--><script>" })]);
+    expect(md).not.toContain("--><script>");
+    const parsed = parseRunHistory(md);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].scenario).toBe("evil--script");
+  });
+
+  // postComment retries with this trim on a comment-filter budget 403 (#1922);
+  // the history must survive that retry or the round is recorded only when the
+  // report happens to be small.
+  it("survives the Full Logs trim that a size-rejected report goes through", () => {
+    const report = `## Report\n\n### Full Logs\n\n- **Build**: \`.verify/abc.build.log\`\n\n<sub>Generated by the \`agentloop\` verification engine</sub>`;
+    const trimmed = trimFullLogsSection(`${report}${renderRunHistory([entry()])}`, "abc");
+    expect(trimmed).toContain("Omitted");
+    expect(parseRunHistory(trimmed)).toEqual([entry()]);
+  });
+
+  it("readStickyBody reports undefined (not empty) when the read itself fails", () => {
+    expect(readStickyBody("742", () => fail("no gh"))).toBeUndefined();
+    expect(readStickyBody("742", () => ok("## body"))).toBe("## body");
+  });
+
+  /**
+   * THE accept-path test: a second round must find the first round's row and
+   * publish both. A history that silently reset each round would still pass
+   * every degradation test above.
+   */
+  it("appends this round to the history the sticky comment already carries", () => {
+    const prior = renderRunHistory([
+      entry({
+        at: "2026-08-28T15:14:00.000Z",
+        sha: "80e2981",
+        scenario: "pre-pr",
+        wallMs: 641000,
+        checksMs: 630700,
+      }),
+    ]);
+    let current = `${makeMarker("80e2981", RESULT)}\n## earlier report${prior}`;
+    let posted = "";
+    const runner = (cmd: string, _env?: Record<string, string>, input?: string) => {
+      if (cmd.includes("gh pr view") && cmd.includes("headRefOid"))
+        return ok(JSON.stringify({ headRefOid: SHA, headRefName: "feat/x" }));
+      if (cmd.includes("git remote get-url")) return ok("git@github.com:ArcBlock/arc.git\n");
+      if (cmd.includes("--jq") && cmd.includes(".body")) return ok(current);
+      if (cmd.includes("--jq")) return ok("123");
+      if (cmd.includes("-X PATCH") || cmd.includes("-X POST")) {
+        posted = input ?? "";
+        current = JSON.parse(posted).body as string;
+        return ok("ok");
+      }
+      return ok();
+    };
+
+    const args: CommentArgs = { post: true, pr: "742", dryRun: false };
+    const res = deliverComment(args, "## Report", SHA, RESULT, runner, MARKER_PREFIX, {
+      scenario: "pre-merge",
+      wallMs: 94200,
+      checksMs: 90700,
+    });
+
+    expect(res.posted).toBe(true);
+    const history = parseRunHistory(JSON.parse(posted).body as string);
+    expect(history).toHaveLength(2);
+    expect(history[0].scenario).toBe("pre-pr");
+    expect(history[0].wallMs).toBe(641000);
+    expect(history[1].scenario).toBe("pre-merge");
+    expect(history[1].wallMs).toBe(94200);
+    expect(history[1].checksMs).toBe(90700);
+  });
+
+  it("records the round even when the sticky read fails, starting a fresh series", () => {
+    let posted = "";
+    const runner = (cmd: string, _env?: Record<string, string>, input?: string) => {
+      if (cmd.includes("gh pr view") && cmd.includes("headRefOid"))
+        return ok(JSON.stringify({ headRefOid: SHA, headRefName: "feat/x" }));
+      if (cmd.includes("git remote get-url")) return ok("git@github.com:ArcBlock/arc.git\n");
+      // the read-back after POST must still work, or delivery reports failure
+      if (cmd.includes("--jq") && cmd.includes(".body"))
+        return posted ? ok(JSON.parse(posted).body as string) : fail("read blew up");
+      if (cmd.includes("--jq")) return ok("");
+      if (cmd.includes("-X PATCH") || cmd.includes("-X POST")) {
+        posted = input ?? "";
+        return ok("ok");
+      }
+      return ok();
+    };
+    const args: CommentArgs = { post: true, pr: "742", dryRun: false };
+    deliverComment(args, "## Report", SHA, RESULT, runner, MARKER_PREFIX, {
+      scenario: "pre-pr",
+      wallMs: 1234,
+      checksMs: 1000,
+    });
+    expect(parseRunHistory(JSON.parse(posted).body as string)).toHaveLength(1);
+  });
+
+  it("omits the history block entirely when the caller passes no run meta", () => {
+    let posted = "";
+    const runner = (cmd: string, _env?: Record<string, string>, input?: string) => {
+      if (cmd.includes("gh pr view") && cmd.includes("headRefOid"))
+        return ok(JSON.stringify({ headRefOid: SHA, headRefName: "feat/x" }));
+      if (cmd.includes("git remote get-url")) return ok("git@github.com:ArcBlock/arc.git\n");
+      if (cmd.includes("--jq") && cmd.includes(".body"))
+        return ok(posted ? (JSON.parse(posted).body as string) : `${makeMarker(SHA, RESULT)}\n`);
+      if (cmd.includes("--jq")) return ok("");
+      if (cmd.includes("-X PATCH") || cmd.includes("-X POST")) {
+        posted = input ?? "";
+        return ok("ok");
+      }
+      return ok();
+    };
+    const args: CommentArgs = { post: true, pr: "742", dryRun: false };
+    deliverComment(args, "## Report", SHA, RESULT, runner, MARKER_PREFIX);
+    expect(JSON.parse(posted).body as string).not.toContain(HISTORY_MARKER);
+  });
+});
 
 describe("attributeShaToPr (#5060)", () => {
   it("classifies the PR's own head as head", () => {

@@ -12,14 +12,15 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const SCRIPT = join(import.meta.dir, "agent-capabilities.sh");
+const CAPS_SCRIPT = join(import.meta.dir, "agent-capabilities.sh");
+const IDENTITY_SCRIPT = join(import.meta.dir, "agent-identity.sh");
 
 function runCaps(env: NodeJS.ProcessEnv = process.env): {
   code: number;
   tags: string[];
   stderr: string;
 } {
-  const p = Bun.spawnSync(["bash", SCRIPT], { env, cwd: import.meta.dir });
+  const p = Bun.spawnSync(["bash", CAPS_SCRIPT], { env, cwd: import.meta.dir });
   const stdout = p.stdout.toString();
   return {
     code: p.exitCode ?? 1,
@@ -96,5 +97,44 @@ describe("dns-localhost-subdomain probe (arc#4102)", () => {
     // gh is present in this harness (identity.test.ts / pre-pr both use it).
     // A probe that `exit 1`s the whole script would drop every other tag.
     expect(tags).toContain("gh-cli");
+  });
+});
+
+function identity(env: NodeJS.ProcessEnv): string {
+  const result = Bun.spawnSync(["bash", IDENTITY_SCRIPT, "--runner", "test"], {
+    cwd: import.meta.dir,
+    env,
+  });
+  expect(result.exitCode).toBe(0);
+  return result.stdout.toString().trim();
+}
+
+function identityBaseEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.ARC_AGENT_ENGINE;
+  delete env.ARC_AGENT_MODEL;
+  delete env.CLAUDECODE;
+  delete env.CODEX_SANDBOX;
+  return env;
+}
+
+describe("agent identity engine provenance", () => {
+  test("launcher engine wins over conflicting inherited CLI markers in both directions", () => {
+    const inherited = {
+      ...identityBaseEnv(),
+      CLAUDECODE: "1",
+      CODEX_SANDBOX: "seatbelt",
+    };
+    expect(identity({ ...inherited, ARC_AGENT_ENGINE: "codex" })).toContain("engine:codex");
+    expect(identity({ ...inherited, ARC_AGENT_ENGINE: "claude" })).toContain("engine:claude");
+  });
+
+  test("interactive sessions retain self-detection when no launcher marker exists", () => {
+    expect(identity({ ...identityBaseEnv(), CLAUDECODE: "1" })).toContain("engine:claude");
+    expect(identity({ ...identityBaseEnv(), CODEX_SANDBOX: "seatbelt" })).toContain("engine:codex");
+  });
+
+  test("engine is always present even when no source can identify it", () => {
+    expect(identity(identityBaseEnv())).toContain("engine:unknown");
   });
 });
