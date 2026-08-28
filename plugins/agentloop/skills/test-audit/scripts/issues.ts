@@ -15,15 +15,20 @@
  * and its witness in the body. That is one unit of work for one owner, which is
  * what an issue is supposed to be.
  *
- * ## This module never writes to GitHub
+ * ## Writing to GitHub is opt-in
  *
- * It renders drafts. Creating issues is a side effect on a shared surface, so it
- * stays an explicit human/agent act through the normal publishing path. The
- * dedup marker is emitted so that path can upsert rather than duplicate.
+ * `draftIssues` only renders. `publishIssues` upserts, and is reachable only
+ * through an explicit `--create` — filing issues is a side effect on a shared
+ * surface that other people then have to triage, so it is never the default.
+ * Both paths carry the `test-audit-key` marker, which is what makes a re-run
+ * edit the existing issue instead of filing a duplicate.
  */
 import type { Adapter } from "./adapter.ts";
 import { defaultGroupOf } from "./adapter.ts";
 import type { Finding } from "./rules.ts";
+
+/** Label every issue this module files, so the upsert lookup is a cheap listing. */
+export const ISSUE_LABEL = "test-audit";
 
 export interface IssueDraft {
   /** Stable dedup key: one issue per rule per owning unit. */
@@ -180,4 +185,109 @@ export function draftIssues(findings: Finding[], adapter: Adapter): IssueDraft[]
         findings: fs,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// Optional publishing
+// ---------------------------------------------------------------------------
+
+function gh(args: string[], stdin?: string): { out: string; code: number } {
+  const r = Bun.spawnSync(["gh", ...args], stdin ? { stdin: Buffer.from(stdin) } : {});
+  const out = `${new TextDecoder().decode(r.stdout)}${new TextDecoder().decode(r.stderr)}`;
+  return { out: out.trim(), code: r.exitCode };
+}
+
+export interface PublishResult {
+  key: string;
+  action: "created" | "updated" | "failed";
+  issue?: number;
+  detail?: string;
+}
+
+/**
+ * Upsert one issue per draft, keyed on the `test-audit-key` marker in the body.
+ *
+ * Off by default and reachable only through an explicit `--create`: filing
+ * issues is a side effect on a shared surface that other people then have to
+ * triage, and "the tool did it on its own" is how a backlog fills with things
+ * nobody chose.
+ *
+ * **The marker is the identity, not the title.** Titles carry a live count
+ * (`有 12 处 catch-swallow`) that changes the moment anyone fixes one, so
+ * matching on them would file a fresh duplicate every run — which is precisely
+ * what the predecessor's per-finding, line-numbered dedup key would have done.
+ * Matching on the marker means a re-run EDITS the issue that already exists,
+ * and a group that has been fixed simply stops being drafted.
+ */
+export function publishIssues(drafts: IssueDraft[], repo: string): PublishResult[] {
+  if (gh(["--version"]).code !== 0) {
+    return drafts.map((d) => ({
+      key: d.key,
+      action: "failed" as const,
+      detail: "gh CLI unavailable",
+    }));
+  }
+  // Idempotent; an already-present label is not an error worth reporting.
+  gh([
+    "label",
+    "create",
+    ISSUE_LABEL,
+    "-R",
+    repo,
+    "--description",
+    "Filed by test-audit",
+    "--color",
+    "D4C5F9",
+  ]);
+
+  const existing = new Map<string, number>();
+  const listed = gh([
+    "issue",
+    "list",
+    "-R",
+    repo,
+    "--state",
+    "open",
+    "--label",
+    ISSUE_LABEL,
+    "--limit",
+    "200",
+    "--json",
+    "number,body",
+  ]);
+  if (listed.code === 0 && listed.out.startsWith("[")) {
+    for (const it of JSON.parse(listed.out) as { number: number; body: string }[]) {
+      const m = /<!-- test-audit-key: (.+?) -->/.exec(it.body ?? "");
+      if (m?.[1]) existing.set(m[1], it.number);
+    }
+  }
+
+  return drafts.map((d) => {
+    const found = existing.get(d.key);
+    if (found) {
+      const r = gh(["issue", "edit", String(found), "-R", repo, "--body-file", "-"], d.body);
+      return r.code === 0
+        ? { key: d.key, action: "updated" as const, issue: found }
+        : { key: d.key, action: "failed" as const, issue: found, detail: r.out };
+    }
+    const r = gh(
+      [
+        "issue",
+        "create",
+        "-R",
+        repo,
+        "--title",
+        d.title,
+        "--label",
+        ISSUE_LABEL,
+        "--body-file",
+        "-",
+      ],
+      d.body,
+    );
+    const num = Number(/\/issues\/(\d+)/.exec(r.out)?.[1] ?? 0) || undefined;
+    return r.code === 0
+      ? { key: d.key, action: "created" as const, issue: num }
+      : { key: d.key, action: "failed" as const, detail: r.out };
+  });
 }

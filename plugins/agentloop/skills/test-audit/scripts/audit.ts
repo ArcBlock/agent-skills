@@ -14,7 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import type { Adapter } from "./adapter.ts";
 import { scanDiffFile } from "./diff.ts";
-import { draftIssues } from "./issues.ts";
+import { draftIssues, publishIssues } from "./issues.ts";
 import { type Finding, parse, scanFile } from "./rules.ts";
 
 function git(args: string[], cwd?: string): { out: string; ok: boolean } {
@@ -216,12 +216,30 @@ async function main(): Promise<number> {
     for (const d of drafts) {
       console.log(`${"=".repeat(72)}\n${d.title}\n${"=".repeat(72)}\n${d.body}\n`);
     }
-    console.log(
-      `\n${drafts.length} draft(s) printed. Nothing was created.\n` +
-        `Each body carries a \`test-audit-key\` marker — publish with upsert-by-marker so a\n` +
-        `re-run updates the existing issue instead of filing a duplicate.`,
-    );
-    return 0;
+    if (!flag("create")) {
+      console.log(
+        `\n${drafts.length} draft(s) printed. Nothing was created.\n` +
+          `Add --create --repo <owner/name> to upsert them (keyed on the test-audit-key marker,\n` +
+          `so a re-run edits the existing issue instead of filing a duplicate).`,
+      );
+      return 0;
+    }
+
+    const repo = value("repo");
+    if (!repo) {
+      console.error("test-audit: --create requires --repo <owner/name>");
+      return 2;
+    }
+    console.log(`\nupserting ${drafts.length} issue(s) into ${repo} …`);
+    let failed = 0;
+    for (const p of publishIssues(drafts, repo)) {
+      if (p.action === "failed") failed++;
+      const where = p.issue ? `#${p.issue}` : "";
+      console.log(
+        `  ${p.action.padEnd(8)} ${where.padEnd(7)} ${p.key}${p.detail ? ` — ${p.detail}` : ""}`,
+      );
+    }
+    return failed > 0 ? 1 : 0;
   }
 
   const onlyRule = value("rule");

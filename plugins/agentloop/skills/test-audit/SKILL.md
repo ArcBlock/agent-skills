@@ -1,6 +1,6 @@
 ---
 name: test-audit
-description: Audit a test suite for tests that cannot fail — vacuous bodies, swallowed assertions, and diffs that weaken or disable coverage. Parses with the TypeScript AST (never regex), reports findings with a machine-checkable witness, and gates only on rules measured against real merged history. Use to review changed tests on a PR, to sweep a tree for tests that verify nothing, or to calibrate before turning a rule blocking.
+description: Find tests that cannot fail — bodies that assert nothing, assertions swallowed by `catch {}`, and changes that weaken, delete or disable coverage. Parses with the TypeScript AST (never regex) and reports every finding with a machine-checkable witness. Use when reviewing a PR that touches `*.test.*` and you need to know whether it made the suite weaker (a gutted test passes MORE reliably, so a green test run proves nothing); when asked what is wrong with a repo's tests or to sweep for tests that verify nothing; when asked to file issues for test-quality debt; or when deciding whether a rule is trustworthy enough to block on. Also triggers on "空跑的测试", "测试有没有用", "test quality", "vacuous test", "did this PR weaken the tests".
 ---
 
 # Test Audit
@@ -36,6 +36,38 @@ marker for upsert, and rolls the long tail of one-off groups into a single
 per-rule list. On arc that turns 108 findings into 17 drafts. **It prints and
 exits** — creating issues is a side effect on a shared surface and stays an
 explicit act by whoever ran it.
+
+## When invoked — pick the mode, then read the output
+
+There are four modes and they answer different questions. Choose from what was
+actually asked; do not run all of them.
+
+| What you were asked | Mode | Then |
+|---|---|---|
+| "review this PR's tests" / a PR number / you are inside `pr-review` | `diff --base <merge-base>` | **Read the gate row first.** In a repo where this is wired as a verification check (arc: `testQuality`), `pre-merge` already ran it — quote that row rather than re-running. Only run it yourself when there is no such row. |
+| "what's wrong with our tests" / "sweep" / "backlog" | `scan` | Report the NEW-vs-baseline split, not the raw total. The baseline is accepted debt; re-announcing it every time is how a report becomes wallpaper. |
+| "file issues for this" | `issues` | Print the drafts. Add `--create --repo <owner/name>` **only if the human asked for issues to be created** — the flag is the authorisation, and it is never inferred. |
+| "should rule X block?" / "is this rule any good?" | `replay --rule X --verbose` | Read the hits. A rule earns `block` only with a demonstrated true positive and a near-zero false-positive rate on that history. |
+
+### Reading the output
+
+1. **Separate blocking from advisory before saying anything.** They mean
+   different things: `block` = this change makes the suite lie; `warn` = worth a
+   glance. Reporting "12 findings" without that split is noise.
+2. **Quote the witness, not just the count.** Every finding carries a
+   machine-checkable reason. `path:line` plus the witness is the whole value —
+   a bare count cannot be acted on or disputed.
+3. **A finding is a claim about a test, not a verdict on the author.** Several
+   rules are deliberately tuned for recall over precision (see the bar section
+   below), so some advisory hits are legitimate code. Read the site before
+   asserting it is broken.
+4. **Never edit `.claude/test-audit-baseline.json` to make a run clean.** The
+   baseline is accepted debt, rewritten only when a human decides to accept the
+   current state (`scan --write-baseline`). Silencing a new finding by adding
+   its key is indistinguishable from fixing it — and it is the one move that
+   turns this whole tool back into decoration.
+5. **Never raise a severity to make a point.** Promotion to `block` requires a
+   `replay` run, and it is the repo owner's call, not the reviewing agent's.
 
 In arc the diff mode is also wired into the verification gate as the
 `testQuality` check (`.claude/verify/checks/check-test-quality.ts`), so
