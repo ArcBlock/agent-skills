@@ -64,17 +64,45 @@ export async function loadAdapter(root: string, configPath?: string): Promise<Ad
   return { ...adapter, root };
 }
 
-const ALWAYS_EXCLUDED = ["node_modules/", "/dist/", "/build/"];
-
-export async function collectTestFiles(adapter: Adapter): Promise<string[]> {
-  const excludes = [...ALWAYS_EXCLUDED, ...(adapter.excludes ?? [])];
+/**
+ * Enumerate test files by asking GIT what the source files are.
+ *
+ * ## Why not a filesystem glob with an exclude list
+ *
+ * That was the first implementation, and it silently lost a file. Its
+ * `ALWAYS_EXCLUDED` carried `"/build/"` to skip build output, which also
+ * matched `runtimes/node/test/build/readonly-tree-manifest.test.ts` — 11 KB of
+ * tracked, live test source in a directory that happens to be called `build`.
+ * The scan reported "3369 test files scanned" and looked healthy.
+ *
+ * That is the exact failure this whole tool exists to catch, one level up: a
+ * check whose COVERAGE quietly shrinks reports the same green as one that is
+ * working, and its own output cannot tell you which. The predecessor skill died
+ * of it (five hardcoded directories, blind to 25% of the tree); repeating it
+ * with a substring blacklist would have been the same bug in a new costume.
+ *
+ * `git ls-files` removes the guesswork: build output, `node_modules` and every
+ * other generated tree are gitignored, so they are excluded BY CONSTRUCTION
+ * rather than by a list someone has to keep correct. `--others
+ * --exclude-standard` adds files that are new but not ignored, so a test
+ * written and not yet staged is still audited.
+ *
+ * `adapter.excludes` still applies, but it is now for genuine repo policy
+ * (nested checkouts, the auditor's own fixtures) rather than for re-deriving
+ * what `.gitignore` already knows.
+ */
+export function collectTestFiles(adapter: Adapter): string[] {
+  const tracked = git(["ls-files", "-z", ...adapter.testGlobs], adapter.root);
+  const untracked = git(
+    ["ls-files", "-z", "--others", "--exclude-standard", ...adapter.testGlobs],
+    adapter.root,
+  );
+  const excludes = adapter.excludes ?? [];
   const seen = new Set<string>();
-  for (const pattern of adapter.testGlobs) {
-    const glob = new Bun.Glob(pattern);
-    // `dot: true` is deliberate — tooling trees like `.claude/` hold real test
-    // files, and excluding them is how a scan surface silently shrinks.
-    for await (const f of glob.scan({ cwd: adapter.root, onlyFiles: true, dot: true })) {
-      if (excludes.some((x) => f.includes(x) || f.startsWith(x.replace(/^\//, "")))) continue;
+  for (const blob of [tracked.out, untracked.out]) {
+    for (const f of blob.split("\0")) {
+      if (!f) continue;
+      if (excludes.some((x) => f.includes(x))) continue;
       seen.add(f);
     }
   }
@@ -196,7 +224,7 @@ async function main(): Promise<number> {
     return findings.some((f) => f.severity === "block") ? 1 : 0;
   }
 
-  const files = await collectTestFiles(adapter);
+  const files = collectTestFiles(adapter);
   let findings = scanTree(adapter, files);
 
   // `issues` groups a sweep into one draft per (rule × owning unit) and PRINTS
