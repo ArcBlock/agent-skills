@@ -1,6 +1,21 @@
 /**
  * test-audit — turn a tree sweep into a small number of actionable issues.
  *
+ * ## KNOWN DEBT: the reader-facing vocabulary here is not parameterised
+ *
+ * This is engine code, shipped to any consuming repo, and the plugin's rule is
+ * "换一个不是 arc 的仓库，这行会不会错？会错 = per-repo". The section headers
+ * (问题/证据/方案/验收) and `CONFIDENCE` are Chinese because arc's
+ * `comment_language` is `zh`; `REMEDY` is English. Both are wrong in the same
+ * way — the language belongs to the CONSUMER, not to the engine, and right now
+ * it is neither consistent nor configurable.
+ *
+ * Left as-is deliberately rather than half-fixed: arc is currently the only
+ * consumer, and inventing an i18n layer for one consumer is speculative. The
+ * correct shape when a second repo adopts this is an optional `strings` table
+ * on the `Adapter`, with English defaults. Written down here so the next
+ * adopter finds a known gap instead of a surprise.
+ *
  * ## Why grouping is the whole design
  *
  * A sweep of this repo produces ~108 findings. Filing 108 issues is not a
@@ -69,8 +84,14 @@ export const CONFIDENCE: Record<string, string> = {
     "它只能陈述「这个测试不见了」，**无法判断该不该不见**——功能被删时测试跟着删是正确的。先看同一个改动有没有删掉对应功能。",
 };
 
-/** What to do about each rule, in the words the fix actually needs. */
-const REMEDY: Record<string, { problem: string; fix: string; accept: string }> = {
+/**
+ * What to do about each rule, in the words the fix actually needs.
+ *
+ * Exported because the PR gate renders the same advice next to a finding. One
+ * source of truth: a reviewer reading the report and an agent reading the issue
+ * must not be told two different things about the same rule.
+ */
+export const REMEDY: Record<string, { problem: string; fix: string; accept: string }> = {
   only: {
     problem: "`.only` is committed, so every other test in the file is silently skipped.",
     fix: "Remove the `.only`.",
