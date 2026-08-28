@@ -38,6 +38,37 @@ export interface IssueDraft {
   findings: Finding[];
 }
 
+/**
+ * Measured precision per rule, stated IN the issue body.
+ *
+ * Without it, whoever picks the issue up — increasingly an agent — reads the
+ * site list as a defect list and "fixes" all of it. Two of these rules are
+ * deliberately tuned for recall over precision, because they only ever write to
+ * an advisory backlog where a missed vacuous test is the costlier error. That
+ * choice is correct for detection and dangerous for dispatch: it guarantees a
+ * known fraction of every list is working code.
+ *
+ * `no-assertions` at 76.5% is the sharp one. Roughly one site in four is the
+ * accept half of an accept/reject pair — a test that calls a void guard and
+ * expects no throw — and "fixing" those deletes exactly the coverage this repo
+ * cares most about, leaving a gate with only reject tests behind it.
+ *
+ * An issue that hides its own error rate is asking to be acted on blindly.
+ */
+export const CONFIDENCE: Record<string, string> = {
+  only: "构造性判定，无误报。",
+  "test-disabled": "构造性判定，无误报。",
+  "catch-swallow": "对独立人工标注实测：14/14 假阳消除、6/6 真阳保留。命中基本可信。",
+  "empty-catch":
+    "收紧为「try 块内含断言」后精度显著提升（未收紧前 7.4%）。命中基本可信，仍建议逐条读。",
+  "no-assertions":
+    "**精度 76.5%、召回 100%** —— 约每 4 处有 1 处是合法的，最常见的是「调用一个 void 守卫函数、期望它不抛」这种 accept-path 测试（它是 accept/reject 对的另一半，删掉就等于只剩 reject）。**逐条判断后再动手，不要整批修。**",
+  "assertion-weakened":
+    "在 300 个真实 commit 上真阳 0 次（两次命中都是刻意的行为变更）。**先确认是不是行为真的变了。**",
+  "test-removed":
+    "它只能陈述「这个测试不见了」，**无法判断该不该不见**——功能被删时测试跟着删是正确的。先看同一个改动有没有删掉对应功能。",
+};
+
 /** What to do about each rule, in the words the fix actually needs. */
 const REMEDY: Record<string, { problem: string; fix: string; accept: string }> = {
   only: {
@@ -154,6 +185,7 @@ export function draftIssues(findings: Finding[], adapter: Adapter): IssueDraft[]
         "",
         "## 证据",
         "",
+        ...(CONFIDENCE[rule] ? [`> **这条规则的实测可信度**：${CONFIDENCE[rule]}`, ""] : []),
         ...(shared ? [`共同判据：${shared}`, ""] : []),
         sites,
         "",
