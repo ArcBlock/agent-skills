@@ -26,9 +26,13 @@ import { type CheckResult, deriveResult, isSkipped, passed } from "./report.ts";
 import {
   type CachedEvidence,
   type CheckSpec,
+  capabilityDrift,
+  observedEnvGaps,
+  probeCapabilities,
   provenanceNotice,
   type RunContext,
   runCheckGuarded,
+  undeclaredEnvGaps,
 } from "./scenario.ts";
 
 const LIB = import.meta.dir;
@@ -1375,6 +1379,10 @@ describe("provenanceNotice force-rerun command (#5339)", () => {
     result: "PASS",
     coverage: { fullScenario: true, checks: ["build"] },
     location: { worktree: "/tmp/tree", hostClone: "/tmp/clone/.git" },
+    // #5386: a record answers for an environment too, and discloses what its checks
+    // reported about it. The declares-nothing, no-gap case is the empty pair.
+    capabilities: {},
+    envGaps: [],
   };
 
   /** The command exactly as the notice offers it for pasting. */
@@ -1677,5 +1685,432 @@ describe("runScenario — a throwing check does not take the run down (#5591)", 
     expect(readFileSync(join(dir, ".verify", `${sha}.c.log`), "utf8")).toContain("log-c");
     expect(readFileSync(join(dir, ".verify", `${sha}.a.log`), "utf8")).toContain("log-a");
     expect(meta(dir, sha).checks).toEqual(["a", "boom", "c"]);
+  });
+});
+
+/**
+ * #5386 — the shared evidence broker keyed a verdict on
+ * `{sha, scenario, base, location}`, but at least one check's ANSWER also
+ * depends on an environment capability the identity never recorded (can this
+ * host reach the upstream it mirrors?). A FAIL produced where upstream was
+ * unreachable was then served to a checkout where it WAS reachable: "I cannot
+ * reach it here" was delivered as "this PR is broken".
+ *
+ * The fix puts the capability vector in the identity — in the artifacts AND in
+ * the record's directory slot, the same shape #5339 used for location.
+ *
+ * The ACCEPT arms are load-bearing. "Reuse nothing, ever" satisfies every
+ * reject assertion below while destroying the broker's entire point (#5223),
+ * so each direction is paired with a case proving that a genuinely identical
+ * environment STILL reuses.
+ */
+describe("environment capability is part of the evidence identity (#5386)", () => {
+  describe("capabilityDrift — the comparison itself", () => {
+    test("ACCEPT: an identical, determinate vector is not drift", () => {
+      expect(capabilityDrift({ upstream: "yes" }, { upstream: "yes" })).toEqual([]);
+      expect(
+        capabilityDrift({ upstream: "no", dns: "yes" }, { dns: "yes", upstream: "no" }),
+      ).toEqual([]);
+      // The declares-nothing repo — today's behaviour, byte for byte.
+      expect(capabilityDrift({}, {})).toEqual([]);
+    });
+
+    test("REJECT (the reported direction): a record made WITHOUT the capability is not an answer for a host that has it", () => {
+      const drift = capabilityDrift({ upstream: "no" }, { upstream: "yes" });
+      expect(drift).toHaveLength(1);
+      // REASON: it names which input differed, and which way round.
+      expect(drift[0]).toContain("upstream");
+      expect(drift[0]).toContain("recorded no");
+      expect(drift[0]).toContain("here yes");
+    });
+
+    test("REJECT (the reverse, dangerous direction): a record made WITH the capability is not an answer for a host that lacks it", () => {
+      const drift = capabilityDrift({ upstream: "yes" }, { upstream: "no" });
+      expect(drift).toHaveLength(1);
+      expect(drift[0]).toContain("upstream");
+      expect(drift[0]).toContain("recorded yes");
+      expect(drift[0]).toContain("here no");
+    });
+
+    test("REJECT: a capability the record never mentions is drift, named as absent", () => {
+      expect(capabilityDrift({}, { upstream: "yes" })[0]).toContain("recorded absent");
+      expect(capabilityDrift({ upstream: "yes" }, {})[0]).toContain("here absent");
+    });
+
+    test("REJECT: a record that states no capability vector at all is refused, and says so", () => {
+      // A pre-#5386 record cannot say what environment it answers for. Reusing
+      // it is exactly the bug — so it is refused, and the refusal names the
+      // missing statement instead of pretending two vectors differed.
+      for (const recorded of [undefined, null, "yes", 7, { upstream: "maybe" }]) {
+        const drift = capabilityDrift(recorded, { upstream: "yes" });
+        expect(drift.length).toBeGreaterThan(0);
+        expect(drift.join(" ")).toContain("states no environment capabilities");
+      }
+    });
+
+    test("a probe that throws is `unknown`, and two equally-unknown hosts still reuse", () => {
+      // Excludes "it refused because the checker itself is broken": a probe
+      // that cannot answer must not silently switch the broker off. It records
+      // an honest third state, and that state compares like any other.
+      const caps = probeCapabilities([
+        {
+          id: "upstream",
+          probe: () => {
+            throw new Error("probe blew up");
+          },
+        },
+        { id: "dns", probe: () => true },
+      ]);
+      expect(caps).toEqual({ upstream: "unknown", dns: "yes" });
+      expect(capabilityDrift(caps, caps)).toEqual([]);
+      expect(capabilityDrift(caps, { upstream: "yes", dns: "yes" })).toHaveLength(1);
+    });
+  });
+
+  describe("observed env gaps join the vector even with no declared probe", () => {
+    test("a check that reported an env gap is an environment input, however it said so", () => {
+      const base: CheckResult = {
+        check: "tests",
+        title: "Tests",
+        pass: false,
+        blocking: false,
+        durationMs: 1,
+      };
+      expect(
+        observedEnvGaps([
+          { ...base, stats: { envGap: "dns-localhost-subdomain" } },
+          {
+            ...base,
+            check: "mirror",
+            failure: { class: "ENV_GAP", reason: "upstream-unreachable" },
+          },
+          { ...base, check: "green", pass: true, blocking: true },
+        ]),
+      ).toEqual(["dns-localhost-subdomain", "upstream-unreachable"]);
+    });
+
+    test("a gap nobody declared is separated out, because that is the one nothing keys on", () => {
+      expect(undeclaredEnvGaps(["dns", "upstream"], { upstream: "yes" })).toEqual(["dns"]);
+      // Declared, therefore already an identity input — not part of the loud residual.
+      expect(undeclaredEnvGaps(["upstream"], { upstream: "no" })).toEqual([]);
+      expect(undeclaredEnvGaps([], {})).toEqual([]);
+    });
+  });
+
+  describe("end to end, through the real broker", () => {
+    const shaOfRepo = (dir: string): string =>
+      spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+
+    /**
+     * A scenario whose single check both depends on and reports an environment
+     * capability, exactly like the mirror check in #5386:
+     *
+     *   TEST_UPSTREAM=1 → it can run  → a real verdict (red when TEST_FAIL=1)
+     *   TEST_UPSTREAM=0 → it cannot   → non-blocking env gap, the run is green
+     *
+     * Every invocation appends to `runs`, so "did it actually re-run?" is a
+     * fact on disk rather than an inference from an exit code.
+     */
+    function capabilityScript(runs: string, scenario = "cap"): string {
+      const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-capability-"));
+      dirs.push(scriptDir);
+      const script = join(scriptDir, "capability-run.ts");
+      writeFileSync(
+        script,
+        `import { appendFileSync } from "node:fs";
+         import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+         const reachable = () => process.env.TEST_UPSTREAM === "1";
+         runScenario({
+           scenario: ${JSON.stringify(scenario)},
+           resolveBase: () => "HEAD",
+           capabilities: [{ id: "upstream-reachable", probe: reachable }],
+           checks: [{ id: "mirror", run: () => {
+             appendFileSync(${JSON.stringify(runs)}, (process.env.TEST_UPSTREAM ?? "0") + "\\n");
+             if (!reachable())
+               return { check: "mirror", title: "Mirror", pass: false, blocking: false,
+                        durationMs: 1, rawFull: "upstream=unreachable" };
+             return { check: "mirror", title: "Mirror", pass: process.env.TEST_FAIL !== "1",
+                      blocking: true, durationMs: 1, rawFull: "upstream=reachable" };
+           }}],
+         }, process.argv);`,
+      );
+      return script;
+    }
+
+    function runsLog(): string {
+      const dir = mkdtempSync(join(tmpdir(), "agentloop-capability-runs-"));
+      dirs.push(dir);
+      const runs = join(dir, "runs.log");
+      writeFileSync(runs, "");
+      return runs;
+    }
+
+    const countRuns = (runs: string): number =>
+      readFileSync(runs, "utf8")
+        .split("\n")
+        .filter((l) => l.trim()).length;
+
+    const exec = (script: string, cwd: string, env: Record<string, string>) => {
+      const r = spawnSync("bun", [script], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+      });
+      return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+    };
+
+    test("ACCEPT: the same environment still reuses — the broker keeps working", () => {
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      expect(exec(script, dir, { TEST_UPSTREAM: "1" }).code).toBe(0);
+      const second = exec(script, dir, { TEST_UPSTREAM: "1" });
+      expect(second.code).toBe(0);
+      expect(second.out).toContain("Reused evidence");
+      // And the refusal machinery stayed quiet — this is a real hit, not a
+      // "refused because the checker is broken".
+      expect(second.out).not.toContain("environment capability");
+      expect(countRuns(runs)).toBe(1);
+    });
+
+    test("REJECT (reported direction): a verdict recorded where the capability was missing is not served to a host that has it", () => {
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      // #5386's own reproduction: the answer here was decided by "unreachable".
+      expect(exec(script, dir, { TEST_UPSTREAM: "0", TEST_FAIL: "1" }).code).toBe(0);
+      const capable = exec(script, dir, { TEST_UPSTREAM: "1" });
+      expect(capable.out).not.toContain("Reused evidence");
+      expect(countRuns(runs)).toBe(2);
+    });
+
+    test("REJECT (the reverse, dangerous direction): a PASS recorded where the check could NOT run is not served to a host that can run it", () => {
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      const sha = shaOfRepo(dir);
+      // Restricted host: the check cannot run, its gap is non-blocking, PASS.
+      expect(exec(script, dir, { TEST_UPSTREAM: "0", TEST_FAIL: "1" }).code).toBe(0);
+      expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+      // Capable host, same sha, same tree: it must not inherit that green.
+      const capable = exec(script, dir, { TEST_UPSTREAM: "1", TEST_FAIL: "1" });
+      expect(capable.out).not.toContain("Reused evidence");
+      expect(countRuns(runs)).toBe(2);
+      // …and having really run it, the gate is red — the failure the reused
+      // green would have laundered.
+      expect(capable.code).not.toBe(0);
+      expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
+    });
+
+    test("REASON: the re-run says which environment input differed, and both states", () => {
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      expect(exec(script, dir, { TEST_UPSTREAM: "0" }).code).toBe(0);
+      const capable = exec(script, dir, { TEST_UPSTREAM: "1" });
+      expect(capable.out).toContain("environment capability");
+      expect(capable.out).toContain("upstream-reachable");
+      expect(capable.out).toContain("recorded no");
+      expect(capable.out).toContain("here yes");
+    });
+
+    test("publication never lands in another environment's slot — both records survive", () => {
+      // Codex P2's hazard: if the publish destination were derived from anything the
+      // run learned AFTER admission, it could be redirected onto a slot that already
+      // holds a terminal verdict, overwriting it with no `--retry-failed` and no
+      // archive. The destination is the slot the lease was taken on, which admission
+      // has already proven empty — so two environments at one location accumulate two
+      // records rather than clobbering each other.
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      expect(exec(script, dir, { TEST_UPSTREAM: "1" }).code).toBe(0);
+      expect(exec(script, dir, { TEST_UPSTREAM: "0" }).code).toBe(0);
+      const byLocation = join(
+        dir,
+        ".git",
+        "agentloop",
+        "verification",
+        shaOfRepo(dir),
+        "cap",
+        "HEAD",
+        "by-location",
+      );
+      const slots = readdirSync(byLocation);
+      expect(slots).toHaveLength(2);
+      // Each slot states the environment it was produced under, and they differ —
+      // nothing was overwritten and no audit trail was erased.
+      const stated = slots
+        .map(
+          (slot) =>
+            JSON.parse(readFileSync(join(byLocation, slot, "metadata.json"), "utf8")).capabilities,
+        )
+        .map((c) => JSON.stringify(c))
+        .sort();
+      expect(stated).toEqual([
+        JSON.stringify({ "upstream-reachable": "no" }),
+        JSON.stringify({ "upstream-reachable": "yes" }),
+      ]);
+    });
+
+    test("the vector is in the artifacts, not only in the slot path", () => {
+      const dir = repo();
+      const runs = runsLog();
+      const script = capabilityScript(runs);
+      expect(exec(script, dir, { TEST_UPSTREAM: "1" }).code).toBe(0);
+      expect(meta(dir, shaOfRepo(dir)).capabilities).toEqual({ "upstream-reachable": "yes" });
+    });
+
+    /**
+     * The two halves of a gapped host, which are SEPARABLE and were separately decided:
+     *
+     *  1. **Reading back its own artifact is forced.** A gap is knowable only after the
+     *     run, so it cannot be an identity a reader computes before one. Keying it made
+     *     the admission slot and the publish slot different forever, so the host could
+     *     never read back what it had just written — and `tools/pre-push.sh` gates the
+     *     push on exactly that call. This half is structural; there is no version of the
+     *     design where it is a choice.
+     *
+     *  2. **Publishing REUSABLE evidence is a cost choice, and it was reversed.** Round
+     *     2 let a gapped record be reused, on the argument that the gap was disclosed.
+     *     Disclosure is prose; `requireStickyGate` parses `result=`, so a host WITH the
+     *     capability inherited a green this gate never measured there. Conductor ruling:
+     *     withhold the shared record. The price — a gapped host re-runs every time — is
+     *     paid on a host that is by definition unhealthy.
+     *
+     * Every ACCEPT arm above has no gap, so none of them can see either half.
+     */
+    describe("a reported env gap is disclosed, and never breaks the host that reported it", () => {
+      function observedScript(runs: string): string {
+        const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-observed-"));
+        dirs.push(scriptDir);
+        const script = join(scriptDir, "observed-run.ts");
+        writeFileSync(
+          script,
+          `import { appendFileSync } from "node:fs";
+           import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+           runScenario({
+             scenario: "observed",
+             resolveBase: () => "HEAD",
+             checks: [{ id: "tests", run: () => {
+               appendFileSync(${JSON.stringify(runs)}, "run\\n");
+               if (process.env.TEST_GAP === "1")
+                 return { check: "tests", title: "Tests", pass: false, blocking: false,
+                          durationMs: 1, stats: { envGap: "dns-localhost-subdomain" } };
+               return { check: "tests", title: "Tests", pass: true, blocking: true, durationMs: 1 };
+             }}],
+           }, process.argv);`,
+        );
+        return script;
+      }
+
+      test("ACCEPT: two ordinary runs with no env gap still reuse", () => {
+        const dir = repo();
+        const runs = runsLog();
+        const script = observedScript(runs);
+        expect(exec(script, dir, { TEST_GAP: "0" }).code).toBe(0);
+        const second = exec(script, dir, { TEST_GAP: "0" });
+        expect(second.out).toContain("Reused evidence");
+        expect(countRuns(runs)).toBe(1);
+      });
+
+      test("ACCEPT: a run that OBSERVED a gap can read back its own artifact — the push gate lives here", () => {
+        const dir = repo();
+        const runs = runsLog();
+        const script = observedScript(runs);
+        // arc's own shape: a check reports `stats.envGap`, the repo declares no probe.
+        expect(exec(script, dir, { TEST_GAP: "1" }).code).toBe(0);
+        expect(readFileSync(join(dir, ".verify", `${shaOfRepo(dir)}.result`), "utf8")).toBe("PASS");
+        // `tools/pre-push.sh` gates the push on exactly this call. When the record is
+        // written under one vector and read back under another it can never succeed,
+        // and the gate says PASS while the push is refused forever.
+        const cached = spawnSync("bun", [script, "--deliver-cached"], {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, TEST_GAP: "1" },
+        });
+        expect(cached.status).toBe(0);
+      });
+
+      test("REJECT (half 2): a gapped run publishes NO reusable evidence, and says why", () => {
+        const dir = repo();
+        const runs = runsLog();
+        const script = observedScript(runs);
+        const first = exec(script, dir, { TEST_GAP: "1" });
+        expect(first.code).toBe(0);
+        expect(first.out).toContain("without publishing reusable evidence");
+        expect(first.out).toContain("dns-localhost-subdomain");
+        // Nothing banked: the store holds no record for this identity at all, so no
+        // host — gapped or capable — can inherit a verdict a gap helped decide.
+        const store = join(dir, ".git", "agentloop", "verification", shaOfRepo(dir));
+        const records = existsSync(store)
+          ? spawnSync("bash", ["-c", `find ${JSON.stringify(store)} -name metadata.json | wc -l`], {
+              encoding: "utf8",
+            }).stdout.trim()
+          : "0";
+        expect(records).toBe("0");
+        // The cost, asserted rather than implied: this host re-runs.
+        const second = exec(script, dir, { TEST_GAP: "1" });
+        expect(second.out).not.toContain("Reused evidence");
+        expect(countRuns(runs)).toBe(2);
+      });
+
+      test("ACCEPT: withholding the record does NOT withhold the push token — half 1 stays green", () => {
+        // The pair that keeps half 2 from becoming "reuse nothing, ever": the shared
+        // record is refused, the LOCAL artifact is not, so this host's own push gate
+        // still works. Break half 1 while fixing half 2 and this turns red.
+        const dir = repo();
+        const runs = runsLog();
+        const script = observedScript(runs);
+        expect(exec(script, dir, { TEST_GAP: "1" }).code).toBe(0);
+        const cached = spawnSync("bun", [script, "--deliver-cached"], {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, TEST_GAP: "1" },
+        });
+        expect(cached.status).toBe(0);
+      });
+
+      test("DISCLOSURE: the gap is on the record, in the report, and on the delivery line", () => {
+        const dir = repo();
+        const runs = runsLog();
+        const script = observedScript(runs);
+        const first = exec(script, dir, { TEST_GAP: "1" });
+        // On the record — and NOT smuggled into the key, which is what keeps the two
+        // arms above green.
+        const recorded = meta(dir, shaOfRepo(dir));
+        expect(recorded.envGaps).toEqual(["dns-localhost-subdomain"]);
+        expect(recorded.capabilities).toEqual({});
+        // In this run's own report: an undeclared environment input is stated, not
+        // silently absorbed — a host that CAN do it may reuse this answer.
+        expect(first.out).toContain("Environment gap outside the evidence key");
+        expect(first.out).toContain("dns-localhost-subdomain");
+        // …and repeated whenever that verdict is handed on rather than re-measured —
+        // `--deliver-cached` is the surviving hand-off, since a gapped run now banks
+        // nothing shared. "It ran and passed" and "it could not run here" must not be
+        // the same colour on the report that satisfies the push gate.
+        const cached = spawnSync("bun", [script, "--deliver-cached"], {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, TEST_GAP: "1" },
+        });
+        const out = `${cached.stdout}${cached.stderr}`;
+        expect(out).toContain("Reused evidence");
+        expect(out).toContain("reported environment gap(s)");
+        expect(out).toContain("dns-localhost-subdomain");
+      });
+
+      test("REJECT: declaring a probe for that same id DOES make it an identity input", () => {
+        // The remedy the disclosure points at, end to end: once declared, the fact is
+        // probed before the run and both directions close (the arms above this block).
+        expect(capabilityDrift({ "dns-localhost-subdomain": "no" }, {})).toHaveLength(1);
+        expect(
+          capabilityDrift(
+            { "dns-localhost-subdomain": "no" },
+            { "dns-localhost-subdomain": "yes" },
+          )[0],
+        ).toContain("recorded no, here yes");
+      });
+    });
   });
 });

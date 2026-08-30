@@ -84,3 +84,37 @@ substitute a single `tsc`/`build` command for the scenario script.
   lives in the git COMMON dir, so in a linked worktree it is NOT under the
   worktree's own `.git`. A cached FAIL is not retried on its own — pass
   `--retry-failed`, which the reuse line now says out loud.
+- **…and by WHAT THE HOST COULD DO while it was produced** (#5386). `location`
+  answers *where*, not *with what*. Some checks' answers depend on an
+  environment fact — can this host reach the upstream it mirrors, does
+  `*.localhost` resolve — and an input outside the identity gives one identity
+  two correct answers. A repo declares those facts as `capabilities` next to
+  its check list (`{ id, probe }`); the vector is probed once per run, recorded
+  on every artifact, and forms the record's slot. A verdict produced **without**
+  a capability is never served to a host that has it, and — the direction that
+  actually launders failures — a green produced **because a check could not
+  run** is never served to a host that would really have run it. Refusals name
+  the capability and both its states.
+  - **Only a fact that can be PROBED ahead of the run is eligible to be keyed.**
+    A gap a check *reports* (`stats.envGap` / `failure.class = "ENV_GAP"`) is
+    knowable only afterwards, so it never enters the key: the slot a reader
+    computes could never be the slot such a run publishes into, and that host
+    would be unable to read back its own artifact, which livelocks `pre-push`.
+  - **A run an env gap decided publishes no reusable evidence at all.** It still
+    writes its LOCAL artifact — that is this host's own answer for its own push
+    gate — but nothing is banked for anyone to inherit, and the run says so.
+    Disclosure alone was not enough: the notice is prose while the gate parses
+    `result=`, so a host that HAS the capability would inherit a green this gate
+    never measured there. This is a publish-time decision, not an identity input,
+    and it is the same shape as the dirty-tree rule beside it. The price is that
+    a gapped host re-runs every time; declare the capability to get reuse back.
+  - **`unknown` is an equality class.** A probe that throws records `unknown`,
+    and two hosts whose probes threw for *different* reasons will reuse each
+    other's evidence. That is a named residual, accepted deliberately: the
+    alternative — `unknown` matching nothing — lets one broken probe silently
+    switch the broker off, which looks identical to a working broker. A repo
+    that wants a hard answer should return `false`, which is its own class.
+  - **Bumping `EVIDENCE_SCHEMA_VERSION` costs one full gate per runner.** Every
+    banked record is invalidated, so on the release that carries a bump each
+    fleet runner re-runs its whole gate once, per in-flight (sha, scenario,
+    base, location). Real, one-time, and worth stating before you bump.
