@@ -203,7 +203,7 @@ Step 3 的分派行有了正确的 work-type),再并入本轮候选集走 Step 2
 
 **Then drop the reserved/locked ones (并发协调,见 [`issue-review` ★并发锁](../issue-review/SKILL.md)):**
 
-- **`agent:hold`** — 人类保留 = **终态冻结,不是处理冻结**("没我反馈别做不可逆动作",不是"别理它")。hold 期间**绝不 close / 绝不代表它做终态处置**,直到人摘掉 label;但**人类新评论照常进 Step 2 候选**——人专门在 hold 的条目上说话,恰是最高优先级输入,必须读并响应(回 comment / 按人类明确要求干活)。无人类新输入的 hold 条目才跳过。
+- **`agent:hold`** — 人类保留 = **终态冻结,不是处理冻结**("没我反馈别做不可逆动作",不是"别理它")。hold 期间**绝不 close / 绝不代表它做终态处置**,直到人摘掉 label;但**人类新评论照常进 Step 2 候选**——人专门在 hold 的条目上说话,恰是最高优先级输入,必须读并响应(回 comment / 按人类明确要求干活)。无人类新输入的 hold 条目才跳过。可执行闸是 hook `deny-guarded-issue-close.ts`（#5426）；散文不是闸。
 - **`agent:processing`(新鲜)** — 正被另一个 run 处理。每候选读它有没有这个 label;有就查锁龄(见下),**TTL 30min 内 → SKIP**(别人在做),**过期 → 不跳**(上一个 runner 崩了,Step 3 会重新 acquire 抢锁)。锁龄取该 label 最后一次 `labeled` 事件时间:
   ```bash
   gh api --paginate repos/{owner}/{repo}/issues/<N>/timeline \
@@ -640,7 +640,7 @@ premise-check 的要求都不一样,分开处理:
   → don't stage it.
 - **Deletion provenance:** content is recoverable via git history; the audit
   comment preserves it. AI **never** auto-merges; humans merge.
-- Push: `git push -u origin <branch>`; retry on network error with backoff.
+- Push: `git push -u origin <branch>` for a fast-forward / new branch. After rebase/amend, `bun scripts/git-push-lease.ts` — never bare `git push --force-with-lease` (fetch updates the tracking ref and the lease silently passes; #5212). Retry on network error with backoff.
 - **★ Verification 强约束(proposing 侧,机制而非纪律):** PR 路径**不再有
   任何 CI**(`ci.yml`/`pr-title.yml` 已删),verification 脚本是唯一 pre-submit 门控。
   - push 前**必须**跑 `<verification_entry>`,硬门控未过

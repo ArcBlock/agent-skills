@@ -32,6 +32,8 @@ bun .claude/plugins/agentloop/skills/epic-conductor/scripts/assert-no-live-child
 ```
 Exit 0 only when none of those ids are live. Ghost `status=running` with a dead pid does not block (recover-territory). Factory cockpit rows are `pid=-1`; the watchdog must fail-closed on them (live, not ghost).
 
+That watchdog covers live **workers**. Its artifact-side twin — no PR of yours left hanging on someone else's red — is the §9 closeout gate `assert-no-blocked-prs.ts`.
+
 ## When this skill applies (and when it doesn't)
 
 USE IT when: a human hands you an epic (or a decomposable body of multi-issue work) and wants it implemented end-to-end, and **they remain reachable** for high-level decisions ("safe default + object-if-wrong"), not per-step approval.
@@ -280,6 +282,21 @@ For a **security-face** PR, post a short **risk-summary** comment before merging
 - **Worktree cleanup**: `git worktree remove` / `prune` leftover worktrees at the end.
 
 ### 9. Closeout (mandatory — the epic isn't done until this is posted)
+
+**Hard exit gate — run this BEFORE any of the wrap steps below.** You may not close out while you still own a PR that is blocked by a foreign red whose referenced issue is still open:
+
+```bash
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/assert-no-blocked-prs.ts" --epic <epic#>
+```
+
+Exit 0 is required to proceed. Exit 1 = a PR you own cites a witness issue that is still open. Exit 2 = usage, or a precondition could not be checked — **fail-closed, "couldn't check" is never "clear"**, and the refusal names which precondition (`gh` / `prs` / `evidence` / `issue`) was unavailable. There is no bypass: the way past a hold is to clear the foreign red, or to merge/close the PR itself.
+
+This is the **artifact-side twin** of the `assert-no-live-children.ts` rule in *Orchestration invariants* — that one says no worker is still running, this one says no product is still hanging. One discipline: **a conductor must not exit on unfinished state it created.** Foreign-red ownership was assigned to the conductor precisely so those PRs would have an owner; a conductor that closes the epic while one still hangs hands it straight back to nobody.
+
+> ⚠️ **Read the refusal, don't just obey it.** The witness issue in the attribution evidence is a **human-supplied** input: the attribution gate machine-checks only that it EXISTS and is OPEN, never that it has any causal relation to the reds — any open issue passes. So this gate's precision is capped by the witness's. Every refusal prints the witness number and the state it read for exactly that reason: if the cited issue has nothing to do with that PR's red, the evidence is wrong and the fix is to correct the attribution, not to route around the gate. The converse also holds — a closed witness releases the gate without proving the red is gone.
+>
+> Two more limits, stated so they are not mistaken for coverage: **(1)** the gate's scope is the `epic:<n>` label, which you apply yourself — a blocked PR that never got labelled is invisible to it; **(2)** only the gate's own verification comments count as evidence (marker-checked), so a PR whose report was never posted reads as "no claim". Neither is detectable from inside the gate.
+
 - **Cohesion check**: on the merged main, run the deterministic gate / full suites across the touched packages — N PRs merged in sequence MUST cohere; catch integration breakage no single PR's CI saw.
 - **End-to-end verification**: drive the epic's actual thesis end-to-end on real infrastructure (real data, real services), as far as the merged code allows. Be HONEST about **user-reachable vs mechanism-level** where a wiring seam remains, and file the seam as a follow-up.
 - **Visual verification when there's a UI**: capture **screenshots of every real rendered surface**, upload them so they inline in GitHub (raw host on the default branch — a bare comment post can drop images), and post ONE walkthrough comment on the epic with captioned inline screenshots + the terminal evidence for non-UI steps. If the human asked for a screenshotted closeout, this step is the deliverable, not an extra.

@@ -496,7 +496,7 @@ bash "$AGENTLOOP_ROOT/scripts/merge-verified-pr.sh" <n> --method squash
 
 | 机械阻塞 | agent 自己做 |
 |---|---|
-| 格式/空格/lint 噪音(profile `formatter` 报的) | 在 **PR 分支**上 `<formatter>`/ 删空格 → commit → `git push`(push 到对方分支需有权限;无权限才升级) |
+| 格式/空格/lint 噪音(profile `formatter` 报的) | 在 **PR 分支**上 `<formatter>`/ 删空格 → commit → `git push`(ff / 新提交;push 到对方分支需有权限;无权限才升级)。rebase/amend 后用 `bun scripts/git-push-lease.ts`，禁止裸 `git push --force-with-lease`（#5212） |
 | base 落后 / `BLOCKED-behind` | `gh pr update-branch <n> --rebase`,然后重跑 `pre-merge` |
 | verification 过期(push 后未重验) | 重跑 `<pre_merge_entry> --comment <n>` → `<merge_gate_entry> <n>` 过闸 |
 | review **已明确指出**的一处小确定性改动(补一行、改个 id、删冗余) | 直接在 PR 分支补上 |

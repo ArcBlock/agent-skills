@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { ENV_GAP_CAPABILITY, envGapIdentity, FAILURE_REASONS } from "./failure-class.ts";
 import { type CheckResult, deriveResult, isSkipped, passed } from "./report.ts";
 import {
   type CachedEvidence,
@@ -2112,5 +2113,94 @@ describe("environment capability is part of the evidence identity (#5386)", () =
         ).toContain("recorded no, here yes");
       });
     });
+  });
+});
+
+describe("env-gap identity — one gap, one id, whichever spelling reported it (P2-2)", () => {
+  const red = (over: Partial<CheckResult>): CheckResult => ({
+    check: "tests",
+    title: "Tests (affected)",
+    pass: false,
+    blocking: true,
+    ...over,
+  });
+
+  test("REJECT — the two spellings of the SAME gap do not become two gaps", () => {
+    // The bug: `stats.envGap` says `dns-localhost-subdomain`, `failure.reason`
+    // says `dns-localhost-subdomain-missing`, and a union reports BOTH — so a
+    // repo that declares the probe clears one and is nagged about the other
+    // forever. Two spellings of one fact, inside the epic about two spellings
+    // of one fact.
+    const both = red({
+      stats: { envGap: "dns-localhost-subdomain" },
+      failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" },
+    });
+    expect(observedEnvGaps([both])).toEqual(["dns-localhost-subdomain"]);
+  });
+
+  test("each spelling ALONE yields the same single identity", () => {
+    expect(observedEnvGaps([red({ stats: { envGap: "dns-localhost-subdomain" } })])).toEqual([
+      "dns-localhost-subdomain",
+    ]);
+    expect(
+      observedEnvGaps([
+        red({ failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" } }),
+      ]),
+    ).toEqual(["dns-localhost-subdomain"]);
+  });
+
+  test("ACCEPT — declaring the probe now CLEARS the notice from either spelling", () => {
+    // This is the whole point: before normalisation the taxonomy spelling was
+    // unclearable, because a host cannot declare an ABSENCE as a capability.
+    const declared = { "dns-localhost-subdomain": "yes" } as const;
+    for (const r of [
+      red({ stats: { envGap: "dns-localhost-subdomain" } }),
+      red({ failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" } }),
+    ]) {
+      expect(undeclaredEnvGaps(observedEnvGaps([r]), declared)).toEqual([]);
+    }
+  });
+
+  test("REJECT — an UNdeclared gap is still loud (the normalisation is not a mute button)", () => {
+    const r = red({ failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" } });
+    expect(undeclaredEnvGaps(observedEnvGaps([r]), {})).toEqual(["dns-localhost-subdomain"]);
+  });
+
+  test("the mapping is EXPLICIT — an unmapped reason passes through verbatim, never stemmed", () => {
+    // No prefix matching: `envGapIdentity` must not turn a repo's own coined
+    // reason into a neighbour by string surgery. A guessed equivalence and a
+    // measured one are the same colour.
+    expect(envGapIdentity("dns-localhost-subdomain-missing-but-different")).toBe(
+      "dns-localhost-subdomain-missing-but-different",
+    );
+    expect(envGapIdentity("some-repo-specific-gap")).toBe("some-repo-specific-gap");
+    for (const reason of ["upstream-unreachable", "disk-exhausted"] as const) {
+      // `null` in the table = no probe emits a tag for this yet, so the reason
+      // IS its own identity. Stated, not silently absent.
+      expect(ENV_GAP_CAPABILITY[reason]).toBeNull();
+      expect(envGapIdentity(reason)).toBe(reason);
+    }
+  });
+
+  test("the table is exhaustive over the ENV_GAP reason vocabulary", () => {
+    // Type-level already, but assert it at runtime too: a reason added to
+    // FAILURE_REASONS.ENV_GAP without an identity decision is the hole this
+    // whole section exists to close.
+    expect(Object.keys(ENV_GAP_CAPABILITY).sort()).toEqual([...FAILURE_REASONS.ENV_GAP].sort());
+  });
+
+  test("a non-ENV_GAP failure contributes no gap at all", () => {
+    expect(
+      observedEnvGaps([red({ failure: { class: "CODE", reason: "observed-test-failures" } })]),
+    ).toEqual([]);
+    expect(observedEnvGaps([red({ pass: true })])).toEqual([]);
+  });
+
+  test("distinct gaps still stay distinct", () => {
+    const two = [
+      red({ failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" } }),
+      red({ check: "x", failure: { class: "ENV_GAP", reason: "disk-exhausted" } }),
+    ];
+    expect(observedEnvGaps(two)).toEqual(["disk-exhausted", "dns-localhost-subdomain"]);
   });
 });

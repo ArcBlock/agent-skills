@@ -52,6 +52,7 @@ import {
   stickyBody,
   type VerifyResult,
 } from "./comment.ts";
+import { envGapIdentity } from "./failure-class.ts";
 import {
   type CheckResult,
   deriveResult,
@@ -926,14 +927,22 @@ export function capabilityDrift(recorded: unknown, current: CapabilitySet): stri
  *
  * Both spellings are read because both exist — `stats.envGap` predates the taxonomy
  * (`applyLocalhostDnsGap`), `failure.class = "ENV_GAP"` is the vocabulary of
- * `docs/architecture/verification-result-taxonomy.md` §2.1.
+ * `docs/architecture/verification-result-taxonomy.md` §2.1 — but they are NOT
+ * unioned. Reading both and counting both reports ONE gap under TWO ids, so
+ * declaring the capability clears one identity and the notice never clears
+ * (arc#5612 review, P2-2). {@link envGapIdentity} normalises them onto the
+ * CAPABILITY id, which is both the token this function's consumer
+ * ({@link undeclaredEnvGaps}) subtracts and the token the probe itself prints.
+ * The mapping is an explicit, exhaustive table — never a prefix match, because a
+ * guessed equivalence and a measured one are the same colour.
  */
 export function observedEnvGaps(results: readonly CheckResult[]): string[] {
   const ids = new Set<string>();
   for (const r of results) {
     const stat = r.stats?.envGap;
-    if (typeof stat === "string" && stat.trim()) ids.add(stat.trim());
-    if (r.failure?.class === "ENV_GAP" && r.failure.reason.trim()) ids.add(r.failure.reason.trim());
+    if (typeof stat === "string" && stat.trim()) ids.add(envGapIdentity(stat.trim()));
+    if (r.failure?.class === "ENV_GAP" && r.failure.reason.trim())
+      ids.add(envGapIdentity(r.failure.reason.trim()));
   }
   return [...ids].sort();
 }
