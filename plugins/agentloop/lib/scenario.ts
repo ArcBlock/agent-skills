@@ -52,10 +52,11 @@ import {
   stickyBody,
   type VerifyResult,
 } from "./comment.ts";
-import { envGapIdentity } from "./failure-class.ts";
+import { deriveRunClass, envGapIdentity, isFailureClass } from "./failure-class.ts";
 import {
   type CheckResult,
   deriveResult,
+  type FailureClass,
   head,
   isSkipped,
   mergeBase,
@@ -693,6 +694,8 @@ interface SharedEvidence extends EvidenceCoverage {
   /** Environment gaps the checks reported. Disclosure only — never keyed (see
    *  {@link observedEnvGaps} for why an after-the-fact input cannot be an identity). */
   envGaps: string[];
+  /** taxonomy class of the run's failure (#5626). Disclosure, never keyed. */
+  failureClass?: FailureClass;
   sourceHead: string;
   sourceClean: true;
   completedAt: string;
@@ -708,6 +711,17 @@ export interface CachedEvidence {
   capabilities: CapabilitySet;
   /** env gaps its checks reported; disclosed to every reader, never part of the key. */
   envGaps: string[];
+  /**
+   * The taxonomy class this run's failure carries (#5626 / §2.5), or absent when
+   * nothing failed. A SIDE CHANNEL: `result` is untouched, no new `VerifyResult`
+   * value exists, and `requireStickyGate`'s accept set is still exactly
+   * `{PASS, NA}` (R2(a)). It only changes the next step a consumer PRINTS.
+   *
+   * Not part of the evidence key. A class is a property of the answer, not of the
+   * question, so keying on it would split the slot for one sha in two and make a
+   * reader unable to find its own record.
+   */
+  failureClass?: FailureClass;
 }
 
 /** An unscoped run of every check the config declares. */
@@ -863,6 +877,22 @@ function parseEnvGaps(value: unknown, where: string): string[] | undefined {
     `⚠ ${where}: environment-gap disclosure is unreadable (${JSON.stringify(value)}); refusing the record rather than reading it as gap-free.`,
   );
   return undefined;
+}
+
+/**
+ * A record's stated taxonomy class, or `undefined` when it states none (#5626).
+ *
+ * Deliberately NOT fail-closed, unlike {@link parseEnvGaps} one function up. The
+ * asymmetry is the point: env-gap disclosure decides whether a record may be
+ * REUSED, so a shape change that silently reads as "gap-free" would launder a
+ * colour. A class decides only which sentence a consumer prints, and dropping it
+ * degrades to the pre-taxonomy behaviour every old record already has. Refusing a
+ * whole record over an unrecognised class would make a future vocabulary
+ * extension retroactively destroy today's evidence, which trades a real cost for
+ * no safety.
+ */
+function parseFailureClass(value: unknown): FailureClass | undefined {
+  return typeof value === "string" && isFailureClass(value) ? value : undefined;
 }
 
 const CAPABILITY_STATES: readonly string[] = ["yes", "no", "unknown"];
@@ -1284,6 +1314,7 @@ function readSharedEvidence(
       location: producedAt as EvidenceLocation,
       capabilities: parseCapabilities(metadata.capabilities) as CapabilitySet,
       envGaps: disclosed,
+      failureClass: parseFailureClass(metadata.failureClass),
     };
   } catch {
     return undefined;
@@ -1303,6 +1334,14 @@ function writeLocalCache(
   mkdirSync(".verify", { recursive: true });
   writeFileSync(`.verify/${sha}.md`, cached.report, "utf8");
   writeFileSync(`.verify/${sha}.result`, cached.result, "utf8");
+  // #5626 — the class, beside the result and never inside it. Written and REMOVED
+  // in the same breath: a leftover `.class` from an earlier run on this same sha
+  // would have a consumer print a next step for a verdict that no longer exists,
+  // which is worse than printing none. Absence is the documented fallback signal,
+  // so it has to mean "this run had no class", not "some run once did".
+  const classFile = `.verify/${sha}.class`;
+  if (cached.failureClass) writeFileSync(classFile, `${cached.failureClass}\n`, "utf8");
+  else rmSync(classFile, { force: true });
   writeAtomic(
     `.verify/${sha}.metadata.json`,
     `${JSON.stringify({
@@ -1320,6 +1359,9 @@ function writeLocalCache(
       // env gaps its checks reported (disclosure, not key).
       capabilities: cached.capabilities,
       envGaps: cached.envGaps,
+      // #5626: …and WHAT KIND of red, so a reused record still knows its next step.
+      // `undefined` drops out of JSON, which is exactly the "no class" encoding.
+      failureClass: cached.failureClass,
     })}\n`,
   );
 }
@@ -1369,6 +1411,7 @@ function readLocalCache(
       location: producedAt as EvidenceLocation,
       capabilities: parseCapabilities(metadata.capabilities) as CapabilitySet,
       envGaps: disclosed,
+      failureClass: parseFailureClass(metadata.failureClass),
     };
   } catch {
     return undefined;
@@ -1570,6 +1613,9 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
     // admission entirely. One source, so they cannot drift apart.
     capabilities,
     envGaps: cached.envGaps,
+    // #5626: travels with the record so a reader in another tree inherits the
+    // next step, not just the colour. Never keyed — see `CachedEvidence`.
+    failureClass: cached.failureClass,
     sourceHead: sha,
     sourceClean: true,
     completedAt: new Date().toISOString(),
@@ -2100,6 +2146,13 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // the checks ran; what they reported about the environment travels ON the record.
   const envGaps = observedEnvGaps(results);
   const undeclaredGaps = undeclaredEnvGaps(envGaps, declaredCapabilities);
+  // #5626 — the run's class, on the SAME footing as `envGaps`: derived from what the
+  // checks reported, disclosed on the record, and read by no gate. It is computed
+  // BEFORE attribution on purpose. `applyAttribution` changes the aggregate verdict
+  // while leaving every red row red (§5.3), so the classes present are a statement
+  // about the checks, not about the verdict the run ended up with — which is exactly
+  // what makes the `ENV_GAP` + `PASS` pair expressible at all (§2.5).
+  const failureClass = deriveRunClass(results);
   // arc#5534 / #5593 — ATTRIBUTION, not exemption. A red that is provably not
   // this change's own never made this change unverified, so the aggregate
   // verdict it should have had all along is PASS. `results` is NOT modified:
@@ -2209,6 +2262,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       location: here,
       capabilities: declaredCapabilities,
       envGaps,
+      failureClass,
     });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
@@ -2247,6 +2301,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       location: here,
       capabilities: declaredCapabilities,
       envGaps,
+      failureClass,
     });
   }
 

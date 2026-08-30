@@ -16,13 +16,16 @@ import {
   CRITERIA_LADDER,
   classifyFailure,
   classifyFailureRung,
+  deriveRunClass,
   explainLadder,
   FAILURE_ACTORS,
   FAILURE_REASONS,
+  isFailureClass,
   type LadderRung,
   type LadderSignals,
+  RUN_CLASS_PRECEDENCE,
 } from "./failure-class.ts";
-import type { FailureClass } from "./report.ts";
+import type { CheckResult, FailureClass } from "./report.ts";
 
 /** A real assertion failure: something named went red, nothing else fired. */
 const REAL_FAILURE: LadderSignals = { observedTestFailures: true };
@@ -300,5 +303,114 @@ describe("the reason vocabulary is closed and per-reason actors are exhaustive (
     const text = explainLadder();
     for (const r of CRITERIA_LADDER) expect(text).toContain(r.id);
     expect(text).toContain("[R0 fallback]");
+  });
+});
+
+/**
+ * W1.2 (#5626) — the RUN-level class. A run has many checks and pre-push prints
+ * at most ONE next step, so a total precedence is the only thing that keeps
+ * "which sentence does the human see" deterministic.
+ */
+describe("deriveRunClass — one run, one next step (§2.5 / W1.2)", () => {
+  const red = (cls: FailureClass, id = cls): CheckResult => ({
+    check: id,
+    title: id,
+    pass: false,
+    blocking: true,
+    failure: { class: cls, reason: FAILURE_REASONS[cls][0] },
+  });
+  /** A red the gate IGNORES — `passed()` tolerates it, so the run can still be green. */
+  const warn = (cls: FailureClass, id = `${cls}-warn`): CheckResult => ({
+    ...red(cls, id),
+    blocking: false,
+  });
+  const green: CheckResult = { check: "ok", title: "OK", pass: true, blocking: true };
+
+  test("ACCEPT: a run with no failure at all has no class (absence is a statement)", () => {
+    expect(deriveRunClass([green, green])).toBeUndefined();
+    expect(deriveRunClass([])).toBeUndefined();
+  });
+
+  test("ACCEPT: each class survives on its own — seven inputs, seven answers", () => {
+    for (const cls of Object.keys(FAILURE_REASONS) as FailureClass[]) {
+      expect(deriveRunClass([green, red(cls)])).toBe(cls);
+    }
+  });
+
+  test("the precedence is a permutation of the vocabulary — no class unreachable", () => {
+    expect([...RUN_CLASS_PRECEDENCE].sort()).toEqual(Object.keys(FAILURE_REASONS).sort());
+  });
+
+  test("REJECT: a real CODE red is never masked by a softer class's next step", () => {
+    // "Re-run once" / "move host" printed over a genuine assertion failure is the
+    // classifier error §4 forbids: it is how a bug walks into main.
+    for (const softer of ["BUDGET", "ENV_GAP", "CONTENTION", "PREEXISTING", "TOOLCHAIN"] as const) {
+      expect(deriveRunClass([red(softer, "a"), red("CODE", "b")])).toBe("CODE");
+    }
+  });
+
+  test("UNKNOWN outranks even CODE: the gate failed to answer, so a human decides", () => {
+    expect(deriveRunClass([red("CODE", "a"), red("UNKNOWN", "b")])).toBe("UNKNOWN");
+  });
+
+  test("ENV_GAP is last: it is the one class that co-occurs with a green run", () => {
+    expect(RUN_CLASS_PRECEDENCE[RUN_CLASS_PRECEDENCE.length - 1]).toBe("ENV_GAP");
+    // …and alone it still surfaces, which is what the PASS special case reads.
+    expect(deriveRunClass([green, red("ENV_GAP")])).toBe("ENV_GAP");
+  });
+
+  test("the answer is the precedence's, not the results array's order", () => {
+    expect(deriveRunClass([red("ENV_GAP", "a"), red("BUDGET", "b")])).toBe("BUDGET");
+    expect(deriveRunClass([red("BUDGET", "a"), red("ENV_GAP", "b")])).toBe("BUDGET");
+  });
+
+  /**
+   * #5632 review, P3-1. A warn-only check that THROWS yields a NON-BLOCKING
+   * `UNKNOWN` (`runCheckGuarded` honours `c.blocking ?? true` — the path #5594
+   * opened for mirror consumers). On class precedence alone that `UNKNOWN`
+   * outranks a blocking `CODE` red and prints "stop, escalate to a human" over
+   * a bug the agent could have fixed in one round.
+   *
+   * The fix is blocking DOMINANCE, not blocking-ONLY: dropping non-blocking
+   * failures outright would delete §2.5's `ENV_GAP` row, whose failure is
+   * `blocking: false` BY CONSTRUCTION (`applyLocalhostDnsGap`) — that is the
+   * whole reason the run is green and the whole reason the special case exists.
+   * The arms below pin both halves so neither reading can be restored silently.
+   */
+  describe("a blocking red outranks a non-blocking one (#5632 P3-1)", () => {
+    test("REJECT: a non-blocking UNKNOWN never masks a blocking CODE", () => {
+      expect(deriveRunClass([warn("UNKNOWN"), red("CODE")])).toBe("CODE");
+      // …and the array order does not rescue it either.
+      expect(deriveRunClass([red("CODE"), warn("UNKNOWN")])).toBe("CODE");
+    });
+
+    test("REJECT: no non-blocking class outranks a blocking CODE", () => {
+      for (const cls of Object.keys(FAILURE_REASONS) as FailureClass[]) {
+        expect(deriveRunClass([warn(cls), red("CODE")]), `warn ${cls}`).toBe("CODE");
+      }
+    });
+
+    test("ACCEPT: a blocking UNKNOWN still outranks a blocking CODE", () => {
+      // Dominance orders the TIERS; inside a tier the precedence is untouched.
+      expect(deriveRunClass([red("UNKNOWN", "a"), red("CODE", "b")])).toBe("UNKNOWN");
+    });
+
+    test("ACCEPT: §2.5's ENV_GAP row survives — a NON-BLOCKING gap still yields a class", () => {
+      // The load-bearing arm against "only blocking failures count". Under that
+      // reading this returns undefined, no `.class` is written, and the "not a
+      // clean green" notice — deliverable 3 of #5626 — never prints again.
+      expect(deriveRunClass([green, warn("ENV_GAP")])).toBe("ENV_GAP");
+    });
+
+    test("within the non-blocking tier the precedence still applies", () => {
+      expect(deriveRunClass([warn("ENV_GAP"), warn("CODE")])).toBe("CODE");
+    });
+  });
+
+  test("isFailureClass accepts every declared class and refuses anything else", () => {
+    for (const cls of Object.keys(FAILURE_REASONS)) expect(isFailureClass(cls)).toBe(true);
+    for (const junk of ["", "pass", "code", "CODE ", "FAIL", "PASS"]) {
+      expect(isFailureClass(junk)).toBe(false);
+    }
   });
 });

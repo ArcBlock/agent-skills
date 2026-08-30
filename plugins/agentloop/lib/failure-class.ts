@@ -48,7 +48,7 @@
  * only changes the SENTENCE a consumer prints.
  */
 
-import type { CheckFailure, FailureClass } from "./report.ts";
+import type { CheckFailure, CheckResult, FailureClass } from "./report.ts";
 
 /**
  * Who has to act on this red. Per taxonomy §2.4 the actor is a property of the
@@ -431,6 +431,117 @@ export function classifyFailureRung(signals: LadderSignals): LadderRung {
 /** The actor who must act on a failure, per §3.3 / §6. */
 export function actorFor(failure: CheckFailure): FailureActor {
   return FAILURE_ACTORS[failure.reason as FailureReason] ?? "human";
+}
+
+/** Whether a string is one of the seven declared classes. Never a prefix match. */
+export function isFailureClass(value: string): value is FailureClass {
+  return Object.hasOwn(FAILURE_REASONS, value);
+}
+
+/**
+ * The RUN-level precedence (W1.2, #5626): which class's next step a run prints
+ * when its checks disagree.
+ *
+ * ## Why a run needs a precedence at all
+ *
+ * The ladder answers "what is THIS check's class". A run has many checks and one
+ * human reading one sentence, so something has to pick. Left to the results
+ * array's order, the sentence a developer sees would depend on the order checks
+ * happen to be registered in — which is the same non-determinism §4.2 wrote the
+ * ladder to remove, one level up.
+ *
+ * ## Why this order
+ *
+ * - `UNKNOWN` first — no `CheckResult` was produced, so the gate itself failed to
+ *   answer, and every other class in the same run was computed by machinery whose
+ *   soundness is now in question. Its action ("stop, escalate") is also the only
+ *   one that cannot make things worse.
+ * - `CODE` next, above every softer class. §4's standing bias: mistaking a real
+ *   bug for a flake puts bad code in main, while the reverse costs one round. A
+ *   run holding a genuine assertion failure must never print "re-run once" or
+ *   "move to another host" — those sentences would be read as permission.
+ * - `ENV_GAP` last, because it is the only class that co-occurs with a GREEN run
+ *   (§2.5: `applyLocalhostDnsGap` clears `blocking`, so `passed()` ignores it).
+ *   Anything else present in the same run is a red, and a red's next step is the
+ *   more urgent one.
+ * - The middle three are ordered by how much they ask of the actor, and they are
+ *   mutually exclusive in practice today.
+ *
+ * The array is asserted at import time to be a permutation of the vocabulary, so
+ * a class added to `FAILURE_REASONS` without a place here fails loudly instead of
+ * becoming unreachable.
+ */
+export const RUN_CLASS_PRECEDENCE: readonly FailureClass[] = [
+  "UNKNOWN",
+  "CODE",
+  "TOOLCHAIN",
+  "BUDGET",
+  "CONTENTION",
+  "PREEXISTING",
+  "ENV_GAP",
+];
+
+{
+  const declared = Object.keys(FAILURE_REASONS).sort();
+  const ordered = [...RUN_CLASS_PRECEDENCE].sort();
+  if (declared.join() !== ordered.join()) {
+    throw new Error(
+      `RUN_CLASS_PRECEDENCE is not a permutation of the class vocabulary (taxonomy §2.1): ` +
+        `declared [${declared.join(", ")}] vs ordered [${ordered.join(", ")}]`,
+    );
+  }
+}
+
+/**
+ * The one class this run reports, or `undefined` when nothing failed.
+ *
+ * `undefined` is a STATEMENT, not a hole: it is what tells a consumer to fall
+ * back to its pre-taxonomy behaviour, and it is the same answer an old record or
+ * a producer that has never heard of this field gives. That equivalence is
+ * deliberate — the read side ships to a repo the moment it merges, while the
+ * write side only reaches fleet runners once the plugin is published (§10.1), so
+ * "no class" has to be a first-class, well-behaved input.
+ *
+ * ## Blocking DOMINANCE, and why not a blocking-only filter (#5632 review, P3-1)
+ *
+ * A warn-only check that THROWS yields a NON-BLOCKING `UNKNOWN`
+ * (`runCheckGuarded` honours the spec's own `c.blocking ?? true` — the path
+ * #5594 opened for mirror consumers). On class precedence alone that `UNKNOWN`
+ * outranks a blocking `CODE` red, so the gate would print "stop, escalate to a
+ * human" over a bug the agent could have fixed in one round. Wrong actor, wrong
+ * action, and it wastes the one thing escalation is for.
+ *
+ * So a blocking failure's class wins over any non-blocking one, and the
+ * precedence above orders each tier internally.
+ *
+ * It is NOT a filter that drops non-blocking failures, which is the obvious
+ * one-line reading and is wrong: §2.5's `ENV_GAP` row is `blocking: false` BY
+ * CONSTRUCTION (`applyLocalhostDnsGap` clears it, which is precisely why that
+ * run is green). Filtering would return `undefined` there, write no `.class`,
+ * and permanently silence the "this is not a clean green" notice — deleting the
+ * one deliverable that made the class a separate file in the first place. The
+ * hazard is a non-blocking class OUTRANKING a blocking one, not a non-blocking
+ * class existing.
+ *
+ * Reading `blocking` here is a comparison, never a write: R2(b) is about
+ * SETTING `pass` / clearing `blocking` / setting `skipped`, and this sets
+ * nothing. The gate's colour is decided by `passed()` exactly as before; all
+ * that changes is which sentence a consumer PRINTS.
+ */
+export function deriveRunClass(
+  results: readonly Pick<CheckResult, "failure" | "blocking">[],
+): FailureClass | undefined {
+  const blocking = new Set<string>();
+  const warnOnly = new Set<string>();
+  for (const r of results) {
+    if (!r.failure) continue;
+    (r.blocking ? blocking : warnOnly).add(r.failure.class);
+  }
+  // Blocking DOMINANCE, then precedence inside each tier.
+  return (
+    RUN_CLASS_PRECEDENCE.find((cls) => blocking.has(cls)) ??
+    RUN_CLASS_PRECEDENCE.find((cls) => warnOnly.has(cls))
+  );
 }
 
 /** The ladder as text, for a report or an issue comment. */

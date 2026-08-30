@@ -2204,3 +2204,125 @@ describe("env-gap identity — one gap, one id, whichever spelling reported it (
     expect(observedEnvGaps(two)).toEqual(["disk-exhausted", "dns-localhost-subdomain"]);
   });
 });
+
+/**
+ * W1.2 (#5626) — `.verify/<sha>.class` lands beside `.verify/<sha>.result`.
+ *
+ * A SIDE CHANNEL, per R2(a): no new `VerifyResult` value, and `.result` keeps
+ * saying exactly what it said before. The two files together are what let a
+ * consumer branch on the next step without the gate's accept set moving a byte.
+ */
+describe("runScenario — the run's class lands beside its result (#5626)", () => {
+  /** One check that reports `pass`/`blocking` and, optionally, a taxonomy class. */
+  function runClassedIn(
+    dir: string,
+    check: { pass: boolean; blocking?: boolean; failure?: { class: string; reason: string } },
+    extraArgv = "",
+  ): { sha: string; code: number; out: string } {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-class-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "classed-run.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario(
+         { scenario: "unit", resolveBase: () => "HEAD",
+           checks: [{ id: "only", run: () => ({
+             check: "only", title: "Only", durationMs: 1, rawFull: "log",
+             pass: ${check.pass}, blocking: ${check.blocking ?? true},
+             ${check.failure ? `failure: ${JSON.stringify(check.failure)},` : ""}
+           }) }] },
+         ["bun", "classed-run.ts"${extraArgv}],
+       );`,
+    );
+    const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], { encoding: "utf8" });
+    const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    return { sha, code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  }
+
+  const classFile = (dir: string, sha: string) => join(dir, ".verify", `${sha}.class`);
+
+  test("ACCEPT: a classified red writes the class next to an unchanged FAIL result", () => {
+    const dir = repo();
+    const { sha, code } = runClassedIn(dir, {
+      pass: false,
+      failure: { class: "CONTENTION", reason: "killed-by-signal" },
+    });
+    expect(code).toBe(1);
+    // R2(a): the result value is exactly what it was before this wave.
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("FAIL");
+    expect(readFileSync(classFile(dir, sha), "utf8").trim()).toBe("CONTENTION");
+  });
+
+  test("ACCEPT: §2.5's ENV_GAP row — a non-blocking gap is PASS on disk AND classed", () => {
+    // The one row where the class contradicts the colour. If only `.result` is
+    // written, this run is indistinguishable from a clean green — which is the
+    // exact thing the pre-push special case exists to say out loud.
+    const dir = repo();
+    const { sha, code } = runClassedIn(dir, {
+      pass: false,
+      blocking: false,
+      failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" },
+    });
+    expect(code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+    expect(readFileSync(classFile(dir, sha), "utf8").trim()).toBe("ENV_GAP");
+  });
+
+  test("ACCEPT: a clean green writes NO class file — absence is the fallback signal", () => {
+    const dir = repo();
+    const { sha, code } = runClassedIn(dir, { pass: true });
+    expect(code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+    expect(existsSync(classFile(dir, sha))).toBe(false);
+  });
+
+  test("REJECT: a stale class from an earlier run is removed, not left to mislead", () => {
+    // Same sha, a real second gate (`--retry-failed`) that comes back green. A
+    // leftover `.class` would have pre-push print a next step for a verdict that
+    // no longer exists — worse than printing none.
+    const dir = repo();
+    const first = runClassedIn(dir, {
+      pass: false,
+      failure: { class: "BUDGET", reason: "budget-exhausted" },
+    });
+    expect(readFileSync(classFile(dir, first.sha), "utf8").trim()).toBe("BUDGET");
+    const second = runClassedIn(dir, { pass: true }, `, "--retry-failed"`);
+    expect(second.sha).toBe(first.sha);
+    expect(second.code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
+    expect(existsSync(classFile(dir, first.sha))).toBe(false);
+  });
+
+  test("the class travels on the record, so REUSED evidence still branches", () => {
+    // Single-flight (#5060): the second invocation does not re-run, it reuses the
+    // banked verdict. If the class did not ride along on the record, every reuse
+    // would silently drop back to the pre-taxonomy sentence.
+    const dir = repo();
+    const { sha } = runClassedIn(dir, {
+      pass: false,
+      failure: { class: "TOOLCHAIN", reason: "bun-below-declared-engines" },
+    });
+    expect(meta(dir, sha).failureClass).toBe("TOOLCHAIN");
+    rmSync(classFile(dir, sha));
+    const again = runClassedIn(dir, { pass: true });
+    expect(again.code).toBe(1);
+    expect(again.out).toContain("reused shared");
+    expect(readFileSync(classFile(dir, sha), "utf8").trim()).toBe("TOOLCHAIN");
+  });
+
+  test("REJECT: an N/A exemption is classless and clears any stale class", () => {
+    const dir = repo();
+    const { sha } = runClassedIn(dir, {
+      pass: false,
+      failure: { class: "CODE", reason: "observed-test-failures" },
+    });
+    expect(existsSync(classFile(dir, sha))).toBe(true);
+    const na = runClassedIn(dir, { pass: true }, `, "--na", "docs-only change"`);
+    expect(na.code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("NA");
+    expect(existsSync(classFile(dir, sha))).toBe(false);
+  });
+});
