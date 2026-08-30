@@ -323,6 +323,7 @@ const PR_BRANCH = "fix/1234-thing";
 interface StubOpts {
   prHead?: string;
   prBranch?: string;
+  prBody?: string;
   /** `gh pr view --json headRefOid` fails (no gh, no auth, no such PR) */
   viewFails?: boolean;
   /** ordered pairs for which `git merge-base --is-ancestor a b` succeeds */
@@ -349,6 +350,7 @@ function stub(o: StubOpts = {}) {
             JSON.stringify({
               headRefOid: o.prHead ?? SHA,
               headRefName: o.prBranch ?? PR_BRANCH,
+              body: o.prBody ?? "",
             }),
           );
     if (cmd.startsWith("git branch --contains")) return ok(`${o.shaBranches ?? PR_BRANCH}\n`);
@@ -727,6 +729,20 @@ describe("deliverComment", () => {
     );
     expect(res).toEqual({ posted: true });
     expect(cmds.some((c) => c.includes("-X POST") || c.includes("-X PATCH"))).toBe(true);
+  });
+
+  it("wires PR-body declarations into issue claims during --comment delivery", () => {
+    const cmds: string[] = [];
+    const res = deliverComment(
+      { post: true, pr: "742", dryRun: false },
+      report,
+      SHA,
+      RESULT,
+      stub({ cmds, prBody: "Part of #5471" }),
+    );
+    expect(res).toEqual({ posted: true });
+    expect(cmds.some((cmd) => cmd.includes("issues/5471/labels"))).toBe(true);
+    expect(cmds.some((cmd) => cmd.includes("issues/5471/comments"))).toBe(true);
   });
 
   it("arm 1 (accept): a not-yet-pushed descendant still delivers — the pre-push hook runs before the ref update", () => {

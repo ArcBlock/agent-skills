@@ -71,3 +71,16 @@ substitute a single `tsc`/`build` command for the scenario script.
   logs land at `.verify/<sha>.<check>.log`; the comment keeps the table and
   failure tails. Do not treat the 24h wall-clock of a polluted machine as a
   savings baseline.
+- **Evidence is keyed by WHERE it was produced, not just by sha** (#5339). Each
+  record carries `location` (tree + host clone) and the report says so on a
+  `📍 Produced at` line. Same location reuses (that is #5223's benefit);
+  a DIFFERENT tree at the same sha gets its own slot and therefore a real run,
+  so re-verifying from a clean checkout is a working move again rather than one
+  the cache silently swallows. Single-flight still spans locations — two trees
+  never run the same gate concurrently, the second one just runs after. When a
+  sibling location already holds a record, the report names it instead of
+  implying its own answer is the only one. To force a re-run, follow the
+  **resolved** path the reuse notice prints (`Shared record: …`): the store
+  lives in the git COMMON dir, so in a linked worktree it is NOT under the
+  worktree's own `.git`. A cached FAIL is not retried on its own — pass
+  `--retry-failed`, which the reuse line now says out loud.

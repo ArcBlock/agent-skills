@@ -19,6 +19,45 @@ import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/**
+ * The class of a verification failure — the shared vocabulary of
+ * `docs/architecture/verification-result-taxonomy.md` §2.1. Each value names a
+ * DIFFERENT next step, defined by the triple (observable criterion, actor,
+ * action); two classes with the same triple would be one class.
+ *
+ * Only `UNKNOWN` is produced today (#5591 / W1.1a builds its carrying surface —
+ * see `runCheckGuarded` in scenario.ts). The rest are declared here so the
+ * classifiers that already exist in a consuming repo's checks get wired into
+ * THIS vocabulary rather than each coining a parallel one.
+ */
+export type FailureClass =
+  | "CODE"
+  | "BUDGET"
+  | "ENV_GAP"
+  | "TOOLCHAIN"
+  | "CONTENTION"
+  | "PREEXISTING"
+  | "UNKNOWN";
+
+/**
+ * Why a check is red, in a form a consumer can BRANCH on.
+ *
+ * The point of carrying a class next to `pass` is that `pass: false` alone is
+ * same-coloured: "the code is broken", "the host lacks a capability" and "the
+ * check itself threw" are three different next steps wearing one boolean.
+ * `scripts/nightly-test.ts:1435-1442` is the repo's own instance of that bug —
+ * it catches a throwing step and writes `pass = false`, and the report cannot
+ * then say whether the step ran.
+ */
+export interface CheckFailure {
+  class: FailureClass;
+  /**
+   * Stable, machine-readable reason within the class — never a rendered
+   * sentence. Consumers match on it; humans read `rawTail`.
+   */
+  reason: string;
+}
+
 export interface CheckResult {
   /** stable id, e.g. "build" / "types" (semantic) */
   check: string;
@@ -53,6 +92,18 @@ export interface CheckResult {
    * section points here instead of inlining tens of kilobytes of tool output.
    */
   logPath?: string;
+  /**
+   * Class + machine reason for a RED result (#5591). Optional: a passing check
+   * carries none, and a check written in a consuming repo that has never heard
+   * of this field keeps working unchanged — adding an optional field to this
+   * contract is free, widening `requireStickyGate`'s {PASS, NA} accept set is
+   * not (taxonomy §0.3).
+   *
+   * It never changes the gate's colour by itself. Nothing here may set
+   * `pass: true`, `blocking: false`, or `skipped` — the three things `passed()`
+   * tolerates (taxonomy R2).
+   */
+  failure?: CheckFailure;
 }
 
 /** Monotonic within one process — enough to keep concurrent `run()`s apart. */
@@ -426,6 +477,8 @@ export function renderReport(
     base?: string;
     sha?: string;
     identity?: string;
+    /** where this report was produced — the artifact carries its conditions (#5339) */
+    origin?: string;
     notice?: string;
     wallMs?: number;
   },
@@ -477,11 +530,12 @@ export function renderReport(
   // engine stays repo-agnostic; still injected deterministically so an agent
   // cannot forget provenance.
   const identity = opts.identity?.trim();
+  const origin = opts.origin?.trim();
   const notice = opts.notice?.trim();
   return `${identity ? `${identity}\n\n` : ""}## Verification Report — \`${opts.scenario}\`${
     opts.base ? ` (affected base \`${opts.base.slice(0, 9)}\`)` : ""
   }${shaStr}
-${notice ? `\n${notice}\n` : ""}
+${origin ? `\n${origin}\n` : ""}${notice ? `\n${notice}\n` : ""}
 | Check | Result | Stats | Duration |
 |-------|--------|-------|----------|
 ${rows}

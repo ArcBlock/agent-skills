@@ -274,7 +274,10 @@ skill just absent) — guard it with an existence check on `.claude-plugin/plugi
   `runScenario` from this engine and calls `runScenario(config, process.argv)`.
   During in-repo development the import is a relative path into
   `.claude/plugins/agentloop/`; once this engine moves to its own repo the
-  import points at a pinned checkout.
+  import points at a pinned checkout. A real `--comment <PR#>` delivery also
+  mirrors every `Part of #N`, `Fixes #N`, or `Closes #N` declaration in the PR
+  body onto issue `#N`: it adds `agent:processing` once and upserts one
+  PR-keyed claim comment. A body with no declaration is a zero-write no-op.
 - **Prompt skills** — the `skills/` here load into Claude Code. For headless /
   cron use the reliable path is `claude -p --plugin-dir <this-dir> …` (a committed
   `extraKnownMarketplaces` in project settings does **not** auto-install in

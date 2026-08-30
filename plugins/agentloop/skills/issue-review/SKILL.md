@@ -497,6 +497,20 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
 ### Step 0 — acquire 并发锁 + 判轮次 + 读 KB 热启动(先做,决定省不省)
 **最先 acquire 并发锁**(见「★ 并发锁」):已被新鲜 `agent:processing` 持有 → SKIP 退出;否则加锁(`--dry-run` 不加)。并行 `issue-sweep` 的主控只分配 slot、**不替 worker 预加锁**;worker 到这里自行即时 acquire。再读共享 KB(`gh issue view <kb_issue>` 的 body)拿 repo 拓扑热启动,别从零探索。再 `gh issue view <n> --comments`:有既往 AI 结论 + human 意见 → 走「轮次感知」热启动路径,**跳过**下面会重复的全量步骤,只做 human 指定的下一步;否则走冷启动 Step 1–6(冷启动也按价值分档)。**收尾**:普通单 issue 调用把本轮新学到的拓扑事实 append/修正进 KB body;作为并行 `issue-sweep` worker 时不直接改 KB body,把结构化 KB delta 返回主控统一折叠。两种模式都由本 worker **release 锁(Step 7)**。
 
+**claim 后、任何实现/worktree 写入前必须检查开放 PR 路径重叠。** 当本轮将进入实现时，
+先从已核验的执行计划形成结构化 `allowedPaths`（repo-relative file/directory prefixes；不得从
+issue 标题或自然语言猜），再运行：
+
+```bash
+bun <plugin_root>/scripts/check-pr-path-overlap.ts --run-args '{"allowedPaths":["<prefix>"]}'
+```
+
+目录 prefix 包含具体文件，所以 `scripts/` 与 PR 的 `scripts/foo.ts` 是 overlap。`overlap`
+必须在开工前报告 PR 号和具体文件，再由人/既有策略决定是否继续；`clean` 才表示确实查过且
+无重叠；`unavailable`（paths 缺失/为空、`gh`/网络/auth/数据不可读）必须停止实现并显式回报，
+不得当成 clean。comment-only 的 review 无 repo write，不伪造 `allowedPaths`，也不得声称已做
+路径重叠检查。
+
 ### Step 1 — 读 issue 全貌
 `gh issue view <n> --json title,body,author,labels,state,milestone` + `--comments`。记下:文档路径、引用的 spec/范式、关键 commits、**全部 human/AI 意见**(human 意见优先级最高)。
 

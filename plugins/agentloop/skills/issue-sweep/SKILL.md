@@ -339,6 +339,11 @@ human's latest comment — this is `issue-review`'s resolve phase:
 3. **会改 repo 的 worker 必须使用独立 worktree。** comment-only / research / idea /
    triage 等只读代码的 worker 可共用主 checkout;任何会 edit/format/test/commit/push/
    open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree。
+   主控把由已核验执行计划得到的结构化 `allowedPaths` 一并交给 `issue-review` worker；worker
+   在 claim 成功后、创建/写入 worktree 前运行
+   `bun <plugin_root>/scripts/check-pr-path-overlap.ts --run-args '{"allowedPaths":[...]}'`。
+   不得从标题猜路径。checker 的 `overlap` 要报告 PR/文件，`clean` 才能继续；`unavailable`
+   必须停止实现并显式回报，不能塌陷为“无重叠”。
    **worktree 必须建在 `$AGENTLOOP_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**——fleet
    driver 已把这个变量注入 worker 环境(专属 agentloop 的固定目录,不是系统 `/tmp`、
    也不是部署方的 `TMPDIR`),字面照抄即可:

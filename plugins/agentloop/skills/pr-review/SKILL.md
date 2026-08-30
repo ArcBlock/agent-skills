@@ -308,7 +308,7 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 
 ```bash
 # diff 命中 UI Face Paths(regex 见 repo-profile.md「UI Face Paths」;下方为 arc 的值)→ 触发
-gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|providers/runtime/web-device/|providers/.+/aup/|packages/aup/|packages/core/)' \
+gh pr diff "$n" --name-only | grep -Eq '^(blocklets/|providers/runtime/ui/|providers/runtime/web-device/|providers/.+/aup/|packages/aup/)' \
   && echo "UI 面命中 → 跑 /ui-verify --pr $n"
 ```
 

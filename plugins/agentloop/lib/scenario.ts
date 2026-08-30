@@ -27,15 +27,28 @@
  * as a gate token. The report itself is still written — it is the diagnostic
  * artifact (PR #3062) — it just stops being currency.
  */
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   type CommentArgs,
   deliverComment,
   MARKER_PREFIX,
   parseCommentArgs,
   type RunMeta,
+  shQuote,
   stickyBody,
   type VerifyResult,
 } from "./comment.ts";
@@ -494,30 +507,47 @@ function writeNa(
   sha: string,
   base: string,
   identity: string,
+  location: EvidenceLocation,
 ): string {
-  const naBody = `## Verification Report — \`${scenario}\` N/A\n\n**Reason**: ${reason}\n\n*This PR is exempt from automated TS verification.*\n\n<sub>Exemption written by the agentloop verification engine via \`--na\`.</sub>`;
+  const naBody = `## Verification Report — \`${scenario}\` N/A\n\n${originNotice(location, scenario, base)}\n\n**Reason**: ${reason}\n\n*This PR is exempt from automated TS verification.*\n\n<sub>Exemption written by the agentloop verification engine via \`--na\`.</sub>`;
   // Identity header (#1347/#1776), same placement as renderReport's normal path —
   // prepended into the report body so it lands after the sticky marker line,
   // keeping the marker on line 1 for merge-gate.ts's startswith lookup.
   const report = identity ? `${identity}\n\n${naBody}` : naBody;
   // An exemption is a statement about the WHOLE scenario ("no TS to run here"), not a
   // scoped subset — so it is full coverage over an empty executed set (#5067).
-  writeLocalCache(sha, scenario, base, { report, result: "NA", coverage: FULL_COVERAGE([]) });
+  writeLocalCache(sha, scenario, base, {
+    report,
+    result: "NA",
+    coverage: FULL_COVERAGE([]),
+    location,
+  });
   return report;
 }
 
 interface ScenarioLease {
   path: string;
-  /** Shared leases own a SHA-scoped broker record, local ones only a worktree lock. */
-  shared?: { dir: string; sha: string; scenario: string; base: string };
+  /**
+   * Shared leases own a broker record, local ones only a worktree lock. `dir` is the
+   * LOCATION-scoped record slot; the lock itself lives one level up, in the coordination
+   * directory, so single-flight still spans every location (#5339).
+   */
+  shared?: {
+    dir: string;
+    sha: string;
+    scenario: string;
+    base: string;
+    location: EvidenceLocation;
+  };
 }
 
 /**
- * Bumped 1 → 2 for #5067's coverage fields. Every reader already rejects a record whose
- * `schemaVersion` is not the one it expects, so the bump makes pre-#5067 records — which
- * cannot say what they covered — expire instead of being read as full gates by default.
+ * Bumped 1 → 2 for #5067's coverage fields, 2 → 3 for #5339's production location. Every
+ * reader already rejects a record whose `schemaVersion` is not the one it expects, so the
+ * bump makes older records — which cannot say what they covered, or where they were
+ * produced — expire instead of being read as full gates by default.
  */
-const EVIDENCE_SCHEMA_VERSION = 2;
+const EVIDENCE_SCHEMA_VERSION = 3;
 
 /**
  * What a verification record actually covered (#5067).
@@ -540,18 +570,19 @@ interface SharedEvidence extends EvidenceCoverage {
   /** Resolved affected-detection base; pre-merge's origin/main tip is dynamic. */
   base: string;
   result: VerifyResult;
-  sourceWorktree: string;
+  /** WHERE this record was produced (#5339) — written by the producer, never inferred. */
+  location: EvidenceLocation;
   sourceHead: string;
   sourceClean: true;
   completedAt: string;
 }
 
-interface CachedEvidence {
+export interface CachedEvidence {
   report: string;
   result: VerifyResult;
   coverage: EvidenceCoverage;
-  /** worktree that produced it, when known (shared broker records carry it). */
-  sourceWorktree?: string;
+  /** the location that produced it — part of the key, not decoration (#5339). */
+  location: EvidenceLocation;
 }
 
 /** An unscoped run of every check the config declares. */
@@ -590,8 +621,111 @@ function sharedRoot(): string | undefined {
   return common ? resolve(common, "agentloop", "verification") : undefined;
 }
 
+/**
+ * The single-flight COORDINATION directory for one verification identity. Keyed on
+ * (sha, scenario, base) only — deliberately NOT on location — so two checkouts still
+ * never run the same expensive gate concurrently (#4800/#5060).
+ */
 function sharedDir(root: string, sha: string, scenario: string, base: string): string {
   return resolve(root, sha, safeScenario(scenario), safeScenario(base));
+}
+
+/**
+ * Where a verification record was produced (#5339).
+ *
+ * Evidence used to be keyed by (sha, scenario, base) ALONE, so a verdict produced in one
+ * tree silently became this SHA's verdict in every tree sharing the git common dir: a
+ * poisoned or flaky red stuck to the commit everywhere, and the one honest response —
+ * re-verify from a different, clean location — was exactly what the cache made impossible.
+ *
+ * So location is part of the KEY and part of the ARTIFACT, written by the side that knows
+ * the answer (the producer) rather than inferred by a consumer from its environment
+ * (epic #5328). The distinction that matters is same-location vs cross-location reuse, not
+ * cache vs no cache: same location still reuses (#5223's benefit), a different location
+ * gets its own slot and therefore a real run.
+ */
+interface EvidenceLocation {
+  /** worktree root that ran the checks (git toplevel; cwd when git cannot say). */
+  worktree: string;
+  /** the clone every linked worktree shares, or `unknown` when git cannot say (#5140). */
+  hostClone: string;
+}
+
+/** #5140: a field we could not determine is explicitly unknown, never omitted. */
+const UNKNOWN_FIELD = "unknown";
+
+function evidenceLocation(): EvidenceLocation {
+  const top = run("git rev-parse --show-toplevel 2>/dev/null");
+  const worktree = top.code === 0 && top.out.trim() ? resolve(top.out.trim()) : process.cwd();
+  return { worktree, hostClone: gitCommonDir() ?? UNKNOWN_FIELD };
+}
+
+function parseLocation(value: unknown): EvidenceLocation | undefined {
+  const candidate = value as Partial<EvidenceLocation> | undefined;
+  if (
+    !candidate ||
+    typeof candidate.worktree !== "string" ||
+    typeof candidate.hostClone !== "string"
+  )
+    return undefined;
+  return { worktree: candidate.worktree, hostClone: candidate.hostClone };
+}
+
+function sameLocation(a: EvidenceLocation | undefined, b: EvidenceLocation): boolean {
+  return a !== undefined && a.worktree === b.worktree && a.hostClone === b.hostClone;
+}
+
+/**
+ * One directory segment per location. The hash makes it unique and path-safe; the leading
+ * basename keeps the store browsable, which is half the point of recording provenance.
+ */
+function locationId(location: EvidenceLocation): string {
+  const digest = createHash("sha256")
+    .update(`${location.hostClone}\n${location.worktree}`)
+    .digest("hex")
+    .slice(0, 12);
+  // `.`/`..` would be a path segment, not a name — collapse them before they become one.
+  const name = safeScenario(basename(location.worktree)).replace(/^\.+$/, "");
+  return `${name || "root"}-${digest}`;
+}
+
+/** The RECORD directory: one slot per producing location, so records never overwrite each other. */
+function evidenceDir(coordination: string, location: EvidenceLocation): string {
+  return resolve(coordination, "by-location", locationId(location));
+}
+
+/**
+ * Complete records for this same identity produced at OTHER locations. #5325 had two
+ * different verdicts alive for one PR with nothing on the page saying so; a report that
+ * knows a sibling record exists says so instead of implying its own answer is the only one.
+ */
+function otherLocationRecords(
+  coordination: string,
+  self: EvidenceLocation,
+): { location: EvidenceLocation; result: string }[] {
+  const byLocation = resolve(coordination, "by-location");
+  let slots: string[];
+  try {
+    slots = readdirSync(byLocation);
+  } catch {
+    return [];
+  }
+  const mine = locationId(self);
+  const found: { location: EvidenceLocation; result: string }[] = [];
+  for (const slot of slots) {
+    if (slot === mine) continue;
+    try {
+      const metadata = JSON.parse(
+        readFileSync(`${byLocation}/${slot}/metadata.json`, "utf8"),
+      ) as Partial<SharedEvidence>;
+      const location = parseLocation(metadata.location);
+      if (location && typeof metadata.result === "string")
+        found.push({ location, result: metadata.result });
+    } catch {
+      // A crashed or half-written sibling is not a fact worth reporting.
+    }
+  }
+  return found;
 }
 
 function readOwnerPid(path: string): number | undefined {
@@ -613,6 +747,132 @@ function processIsAlive(pid: number | undefined): boolean {
   }
 }
 
+/** POSIX rename onto an existing directory; treat as "already held". */
+function isLeaseHeldError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR";
+}
+
+function renameErrnoName(errno: number): string {
+  switch (errno) {
+    case 17:
+      return "EEXIST";
+    case 21:
+      return "EISDIR";
+    case 39:
+    case 66:
+      return "ENOTEMPTY";
+    default:
+      return "EEXIST";
+  }
+}
+
+function renameHeldError(code: string, dest: string): NodeJS.ErrnoException {
+  const err = new Error(`${code}: exclusive rename '${dest}'`) as NodeJS.ErrnoException;
+  err.code = code;
+  err.syscall = "rename";
+  err.path = dest;
+  return err;
+}
+
+/**
+ * `rename(2)` replaces an empty destination directory. Exclusive rename
+ * (Darwin `RENAME_EXCL` / Linux `RENAME_NOREPLACE`) fails instead, so a
+ * mixed-version peer between mkdir and owner.json — or a lock emptied
+ * during `rmSync` — cannot be stolen (Codex P1 on #5361).
+ */
+function loadExclusiveRename(): ((from: string, to: string) => void) | undefined {
+  try {
+    const ffi = createRequire(import.meta.url)("bun:ffi") as {
+      dlopen: (
+        path: string,
+        symbols: Record<string, { args: unknown[]; returns: unknown }>,
+      ) => { symbols: Record<string, (...args: never[]) => unknown> };
+      FFIType: { ptr: unknown; i32: unknown; u32: unknown };
+      ptr: (buf: Uint8Array) => number;
+      read: { i32: (p: number) => number };
+    };
+    const { dlopen, FFIType, ptr, read } = ffi;
+    if (process.platform === "darwin") {
+      const lib = dlopen("/usr/lib/libSystem.B.dylib", {
+        renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+        __error: { args: [], returns: FFIType.ptr },
+      });
+      const RENAME_EXCL = 0x00000004;
+      return (from, to) => {
+        const fromBuf = Buffer.from(`${from}\0`);
+        const toBuf = Buffer.from(`${to}\0`);
+        const rc = lib.symbols.renamex_np(ptr(fromBuf), ptr(toBuf), RENAME_EXCL) as number;
+        if (rc === 0) return;
+        throw renameHeldError(renameErrnoName(read.i32(lib.symbols.__error() as number)), to);
+      };
+    }
+    if (process.platform === "linux") {
+      const lib = dlopen("libc.so.6", {
+        renameat2: {
+          args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32],
+          returns: FFIType.i32,
+        },
+        __errno_location: { args: [], returns: FFIType.ptr },
+      });
+      const AT_FDCWD = -100;
+      const RENAME_NOREPLACE = 1;
+      return (from, to) => {
+        const fromBuf = Buffer.from(`${from}\0`);
+        const toBuf = Buffer.from(`${to}\0`);
+        const rc = lib.symbols.renameat2(
+          AT_FDCWD,
+          ptr(fromBuf),
+          AT_FDCWD,
+          ptr(toBuf),
+          RENAME_NOREPLACE,
+        ) as number;
+        if (rc === 0) return;
+        throw renameHeldError(
+          renameErrnoName(read.i32(lib.symbols.__errno_location() as number)),
+          to,
+        );
+      };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+const exclusiveRename = loadExclusiveRename();
+
+/**
+ * Atomically publish `from/` onto `to/` only if `to` does not exist — including
+ * as an empty directory. Plain `renameSync` is not exclusive on POSIX.
+ */
+function renameNoReplace(from: string, to: string): void {
+  if (exclusiveRename) {
+    exclusiveRename(from, to);
+    return;
+  }
+  if (existsSync(to)) throw renameHeldError("EEXIST", to);
+  renameSync(from, to);
+}
+
+/**
+ * Create `lock/` already containing owner.json. Once the lock directory is
+ * visible it has an owner, so `owner === undefined` is a corrupt lease again
+ * rather than the mkdir→write race (#5361). Dest must not already exist
+ * (empty leftover included) — `rename(2)` would replace an empty dir.
+ */
+function createLeaseLock(lock: string, owner: Record<string, unknown>): void {
+  mkdirSync(dirname(lock), { recursive: true });
+  const tmp = mkdtempSync(join(dirname(lock), `${basename(lock)}.tmp-`));
+  try {
+    writeFileSync(join(tmp, "owner.json"), `${JSON.stringify(owner)}\n`, "utf8");
+    renameNoReplace(tmp, lock);
+  } catch (err) {
+    rmSync(tmp, { recursive: true, force: true });
+    throw err;
+  }
+}
+
 /**
  * One verification scenario may own its check process trees at a time. This
  * prevents a caller-side timeout/retry from turning one expensive gate into
@@ -624,20 +884,18 @@ function acquireLocalScenarioLease(scenario: string): ScenarioLease | undefined 
   mkdirSync(".verify/.leases", { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      mkdirSync(path);
-      writeFileSync(
-        `${path}/owner.json`,
-        `${JSON.stringify({ pid: process.pid, scenario, startedAt: new Date().toISOString() })}\n`,
-        "utf8",
-      );
+      createLeaseLock(path, {
+        pid: process.pid,
+        scenario,
+        startedAt: new Date().toISOString(),
+      });
       return { path };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (!isLeaseHeldError(err)) throw err;
       const owner = readOwnerPid(path);
-      // `mkdir` makes the lock visible before its owner metadata is written.
-      // Treat a missing or malformed owner record as an active, ambiguous lock:
-      // another runner may be between those two operations. Reclaiming it here
-      // would admit duplicate gates precisely during the acquisition race.
+      // Lock creation is atomic (temp dir + rename), so a missing/malformed
+      // owner is a corrupt lease, not the mkdir→write window. Reclaiming it
+      // would admit duplicate gates if another owner is still using it.
       if (owner === undefined) {
         console.error(
           `❌ ${scenario} has an unreadable verification lease; refusing duplicate gate admission.`,
@@ -651,7 +909,7 @@ function acquireLocalScenarioLease(scenario: string): ScenarioLease | undefined 
         return undefined;
       }
       // A crashed owner leaves no process to coordinate with. Reclaim only
-      // this scenario's own lock directory, then retry its atomic mkdir once.
+      // this scenario's own lock directory, then retry its atomic create once.
       rmSync(path, { recursive: true, force: true });
     }
   }
@@ -674,6 +932,7 @@ function readSharedEvidence(
   sha: string,
   scenario: string,
   base: string,
+  location: EvidenceLocation,
 ): CachedEvidence | undefined {
   const metadataPath = `${dir}/metadata.json`;
   const reportPath = `${dir}/report.md`;
@@ -683,6 +942,7 @@ function readSharedEvidence(
   try {
     const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Partial<SharedEvidence>;
     const result = readFileSync(resultPath, "utf8").trim() as VerifyResult;
+    const producedAt = parseLocation(metadata.location);
     if (
       metadata.schemaVersion !== EVIDENCE_SCHEMA_VERSION ||
       metadata.scenario !== scenario ||
@@ -692,6 +952,10 @@ function readSharedEvidence(
       metadata.sourceClean !== true ||
       metadata.result !== result ||
       !isCoverage(metadata) ||
+      // #5339: a record only answers for the location that produced it. The slot is
+      // already location-keyed; re-checking the producer's own statement here means a
+      // record misfiled into another location's slot still cannot be reused as its own.
+      !sameLocation(producedAt, location) ||
       // Only a full run is ever published here; a record claiming otherwise is not
       // shared evidence and must not be reused as one (#5067).
       metadata.fullScenario !== true ||
@@ -703,8 +967,7 @@ function readSharedEvidence(
       report: readFileSync(reportPath, "utf8"),
       result,
       coverage: FULL_COVERAGE(metadata.checks as string[]),
-      sourceWorktree:
-        typeof metadata.sourceWorktree === "string" ? metadata.sourceWorktree : undefined,
+      location: producedAt as EvidenceLocation,
     };
   } catch {
     return undefined;
@@ -735,11 +998,18 @@ function writeLocalCache(
       // tell a full PASS from a `--only a,b` PASS, and `pre-push` accepted both.
       fullScenario: cached.coverage.fullScenario,
       checks: cached.coverage.checks,
+      // #5339: and WHERE it was produced, so this artifact answers for a place too.
+      location: cached.location,
     })}\n`,
   );
 }
 
-function readLocalCache(sha: string, scenario: string, base: string): CachedEvidence | undefined {
+function readLocalCache(
+  sha: string,
+  scenario: string,
+  base: string,
+  location: EvidenceLocation,
+): CachedEvidence | undefined {
   const reportFile = `.verify/${sha}.md`;
   const resultFile = `.verify/${sha}.result`;
   const metadataFile = `.verify/${sha}.metadata.json`;
@@ -748,12 +1018,15 @@ function readLocalCache(sha: string, scenario: string, base: string): CachedEvid
   try {
     const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Partial<SharedEvidence>;
     const result = readFileSync(resultFile, "utf8").trim() as VerifyResult;
+    const producedAt = parseLocation(metadata.location);
     if (
       metadata.schemaVersion !== EVIDENCE_SCHEMA_VERSION ||
       metadata.sha !== sha ||
       metadata.scenario !== scenario ||
       metadata.base !== base ||
       !isCoverage(metadata) ||
+      // A `.verify/` copied into another tree is another location's answer (#5339).
+      !sameLocation(producedAt, location) ||
       !["PASS", "NA", "FAIL", "TIMEOUT", "PARTIAL"].includes(result)
     ) {
       return undefined;
@@ -765,6 +1038,7 @@ function readLocalCache(sha: string, scenario: string, base: string): CachedEvid
         fullScenario: metadata.fullScenario as boolean,
         checks: metadata.checks as string[],
       },
+      location: producedAt as EvidenceLocation,
     };
   } catch {
     return undefined;
@@ -786,25 +1060,27 @@ function acquireSharedScenarioLease(
   sha: string,
   scenario: string,
   base: string,
+  location: EvidenceLocation,
 ): ScenarioLease | CachedEvidence | undefined {
-  const dir = sharedDir(root, sha, scenario, base);
-  const lock = `${dir}/lease.lock`;
+  const coordination = sharedDir(root, sha, scenario, base);
+  const dir = evidenceDir(coordination, location);
+  const lock = `${coordination}/lease.lock`;
   const deadline = Date.now() + sharedWaitMs();
   mkdirSync(dir, { recursive: true });
 
   for (;;) {
-    const cached = readSharedEvidence(dir, sha, scenario, base);
+    const cached = readSharedEvidence(dir, sha, scenario, base, location);
     if (cached) return cached;
     try {
-      mkdirSync(lock);
-      writeFileSync(
-        `${lock}/owner.json`,
-        `${JSON.stringify({ pid: process.pid, scenario, sha, startedAt: new Date().toISOString() })}\n`,
-        "utf8",
-      );
-      // A completed writer may have released immediately before our mkdir.
+      createLeaseLock(lock, {
+        pid: process.pid,
+        scenario,
+        sha,
+        startedAt: new Date().toISOString(),
+      });
+      // A completed writer may have released immediately before our create.
       // Re-check while holding the lock; if so we only reuse it and do not run.
-      const completed = readSharedEvidence(dir, sha, scenario, base);
+      const completed = readSharedEvidence(dir, sha, scenario, base, location);
       if (completed) {
         rmSync(lock, { recursive: true, force: true });
         return completed;
@@ -816,16 +1092,19 @@ function acquireSharedScenarioLease(
       if (hasPartialSharedEvidence(dir)) {
         rmSync(lock, { recursive: true, force: true });
         console.error(
-          `❌ ${scenario}@${sha.slice(0, 9)} has incomplete shared verification evidence; refusing to overwrite it with a duplicate gate.`,
+          `❌ ${scenario}@${sha.slice(0, 9)} has unreadable shared verification evidence; refusing to overwrite it with a duplicate gate.`,
         );
+        // #5339: name the resolved record, because it is not under this worktree's `.git`
+        // and this message is the only thing that knows where it actually is.
+        console.error(`   Inspect or remove: ${dir}`);
         return undefined;
       }
-      return { path: lock, shared: { dir, sha, scenario, base } };
+      return { path: lock, shared: { dir, sha, scenario, base, location } };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (!isLeaseHeldError(err)) throw err;
       const owner = readOwnerPid(lock);
-      // mkdir precedes owner.json.  A missing/malformed owner is ambiguous and
-      // therefore fail-closed: deleting it would reopen the duplicate-gate race.
+      // Lock creation is atomic, so a missing/malformed owner is corrupt, not
+      // a racer between mkdir and write. Deleting it would reopen the race.
       if (owner === undefined) {
         console.error(
           `❌ ${scenario}@${sha.slice(0, 9)} has an unreadable shared verification lease; refusing duplicate gate admission.`,
@@ -858,30 +1137,34 @@ function acquireFailedEvidenceRetryLease(
   sha: string,
   scenario: string,
   base: string,
+  location: EvidenceLocation,
 ): ScenarioLease | CachedEvidence | undefined {
-  const dir = sharedDir(root, sha, scenario, base);
-  const lock = `${dir}/lease.lock`;
+  const coordination = sharedDir(root, sha, scenario, base);
+  const dir = evidenceDir(coordination, location);
+  const lock = `${coordination}/lease.lock`;
   const deadline = Date.now() + sharedWaitMs();
   mkdirSync(dir, { recursive: true });
 
   for (;;) {
     try {
-      mkdirSync(lock);
-      writeFileSync(
-        `${lock}/owner.json`,
-        `${JSON.stringify({ pid: process.pid, scenario, sha, retryFailed: true, startedAt: new Date().toISOString() })}\n`,
-        "utf8",
-      );
-      const cached = readSharedEvidence(dir, sha, scenario, base);
+      createLeaseLock(lock, {
+        pid: process.pid,
+        scenario,
+        sha,
+        retryFailed: true,
+        startedAt: new Date().toISOString(),
+      });
+      const cached = readSharedEvidence(dir, sha, scenario, base, location);
       if (!cached) {
         if (hasPartialSharedEvidence(dir)) {
           rmSync(lock, { recursive: true, force: true });
           console.error(
-            `❌ ${scenario}@${sha.slice(0, 9)} has incomplete shared verification evidence; refusing retry overwrite.`,
+            `❌ ${scenario}@${sha.slice(0, 9)} has unreadable shared verification evidence; refusing retry overwrite.`,
           );
+          console.error(`   Inspect or remove: ${dir}`);
           return undefined;
         }
-        return { path: lock, shared: { dir, sha, scenario, base } };
+        return { path: lock, shared: { dir, sha, scenario, base, location } };
       }
       if (cached.result === "PASS" || cached.result === "NA") {
         rmSync(lock, { recursive: true, force: true });
@@ -894,9 +1177,9 @@ function acquireFailedEvidenceRetryLease(
         const source = `${dir}/${name}`;
         if (existsSync(source)) renameSync(source, `${archive}/${name}`);
       }
-      return { path: lock, shared: { dir, sha, scenario, base } };
+      return { path: lock, shared: { dir, sha, scenario, base, location } };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (!isLeaseHeldError(err)) throw err;
       const owner = readOwnerPid(lock);
       if (owner === undefined) {
         console.error(
@@ -921,7 +1204,8 @@ function acquireFailedEvidenceRetryLease(
 
 function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedEvidence): void {
   if (!lease?.shared) return;
-  const { dir, sha, scenario, base } = lease.shared;
+  const { dir, sha, scenario, base, location } = lease.shared;
+  mkdirSync(dir, { recursive: true });
   writeAtomic(`${dir}/report.md`, cached.report);
   writeAtomic(`${dir}/result`, `${cached.result}\n`);
   const metadata: SharedEvidence = {
@@ -932,7 +1216,7 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
     sha,
     base,
     result: cached.result,
-    sourceWorktree: process.cwd(),
+    location,
     sourceHead: sha,
     sourceClean: true,
     completedAt: new Date().toISOString(),
@@ -943,26 +1227,49 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
 }
 
 /**
- * #5060, second half: the broker single-flights on (sha, scenario, base), so a delivered
- * report may be ANOTHER checkout's run — the `reused shared evidence` line says so on
- * stderr, where nobody reading the PR will ever see it. The merge gate is fail-closed on
- * the sha either way; this is about what a human reads, so the report itself says whose
- * run it is rather than implying it was produced by the run that delivered it.
+ * #5223: reuse must be a different color from "this invocation actually ran". Silent reuse
+ * is how an agent burns three full wall-clock waits believing it re-ran.
  *
- * #5223: same-checkout reuse must also be a different color from "this invocation
- * actually ran". Silent same-checkout reuse is how an agent burns three full
- * wall-clock waits thinking it re-ran. Cross-checkout still names the other tree;
- * same-checkout names both cache locations so deleting one is not enough.
+ * #5339: and the way out must be followable. This used to print a LITERAL
+ * `.git/agentloop/verification/<sha>` — wrong twice over for the factory, where every agent
+ * works in a linked worktree whose `.git` is a FILE: the record lives in the git COMMON
+ * dir, at a path this notice is the only thing in a position to know. So it prints the
+ * resolved record path, not a template. Reuse is now always same-location (a different
+ * location gets its own slot and therefore a real run), hence the single branch.
  */
-function provenanceNotice(cached: CachedEvidence): string {
-  const from = cached.sourceWorktree;
-  if (from && from !== process.cwd()) {
-    return `> ℹ **Reused evidence** — produced by another checkout (\`${from}\`) for this same commit, not by the run that delivered it.\n\n`;
-  }
+export function provenanceNotice(
+  cached: CachedEvidence,
+  sha: string,
+  record: string | undefined,
+): string {
+  const at = cached.location;
+  // `record` is a resolved filesystem path, and paths may legally contain `'`. This line
+  // is offered for PASTING, so a raw interpolation is not a cosmetic bug: a legitimate
+  // apostrophe breaks the command, and a hostile path closes the quote and appends a
+  // second one — to an `rm -rf`. `shQuote` is the same POSIX escape the comment layer
+  // already relies on; ordinary paths come out byte-identical to the old string.
+  const force = record ? `rm -rf .verify/${sha}.* ${shQuote(record)}` : `rm -rf .verify/${sha}.*`;
   return (
-    "> ℹ **Reused evidence** — produced by an earlier run for this same commit, not by this invocation. " +
-    "To force a real re-run, delete both `.verify/<sha>.*` and `.git/agentloop/verification/<sha>`.\n\n"
+    "> ℹ **Reused evidence** — produced by an earlier run at this same location for this " +
+    "same commit, not by the invocation that delivered it.\n" +
+    `> Produced at tree \`${at.worktree}\` · host clone \`${at.hostClone}\`.\n` +
+    `> Shared record: \`${record ?? UNKNOWN_FIELD}\`\n` +
+    `> Force a real re-run here: \`${force}\`\n\n`
   );
+}
+
+/** The production conditions this artifact carries with it (epic #5328; accept 1 of #5339). */
+function originNotice(location: EvidenceLocation, scenario: string, base: string): string {
+  return `> 📍 **Produced at** — tree \`${location.worktree}\` · host clone \`${location.hostClone}\` · scenario \`${scenario}\` · base \`${base}\``;
+}
+
+/** Say out loud that this sha has more than one answer, rather than shipping one of them (#5325). */
+function divergenceNotice(
+  others: { location: EvidenceLocation; result: string }[],
+): string | undefined {
+  if (!others.length) return undefined;
+  const list = others.map((o) => `tree \`${o.location.worktree}\` → **${o.result}**`).join("; ");
+  return `> ⚠️ **Independent evidence for this commit exists elsewhere** — ${list}. This report is this location's own run; they are separate facts about the same sha, not one verdict.`;
 }
 
 /** Write a check's full tool output next to the report so the markdown stays a table (#5223). */
@@ -972,6 +1279,71 @@ function persistCheckLog(sha: string, r: CheckResult): CheckResult {
   const logPath = `.verify/${sha}.${r.check}.log`;
   writeFileSync(logPath, r.rawFull);
   return { ...r, logPath };
+}
+
+/**
+ * Run one check and ALWAYS return a `CheckResult` — the carrying surface for
+ * `UNKNOWN` (#5591; `docs/architecture/verification-result-taxonomy.md` §5.4).
+ *
+ * ## Why this exists
+ *
+ * `UNKNOWN`'s criterion is "no `CheckResult` was produced at all". Before this
+ * wrapper, `c.run(ctx)` was called bare: a check that threw took the whole
+ * process down, so no result was produced — and `failure.class` is a field
+ * INSIDE `CheckResult`. The class was self-referential and unreachable. Every
+ * other class could be assigned; this one could not exist.
+ *
+ * ## Three decisions, each load-bearing
+ *
+ * 1. **The class is preserved, not flattened into the boolean.** The repo
+ *    already has this wrapper's shape at `scripts/nightly-test.ts:1435-1442`,
+ *    and it is an instance of the very bug this taxonomy exists to fix: its
+ *    catch writes `pass = false`, so "the step threw" and "the step failed"
+ *    become one indistinguishable red. A synthesized result carries
+ *    `failure.class = "UNKNOWN"` so a consumer can tell a broken CHECK from a
+ *    broken REPO — different actor (a human, not the agent holding the red),
+ *    different next step (stop and escalate, not edit files and re-run).
+ *
+ * 2. **`UNKNOWN` lives at CHECK level, not run level.** A run-level UNKNOWN
+ *    cannot say WHICH check died, and the per-check sub-ceiling in §7.2 needs
+ *    that attribution.
+ *
+ * 3. **It is RED, and it does not RE-COLOUR the check.** The synthesized result
+ *    keeps the spec's own `blocking` (`c.blocking ?? true`) rather than forcing
+ *    `true`. Promoting a warn-only check would mean one buggy warn-only check
+ *    turns the gate red for everyone — a new flake surface on a gate whose
+ *    standing disease is flake. "A warn-only check threw" is real signal, but
+ *    its home is the UNKNOWN-rate ceiling (taxonomy §7.2), not the gate colour.
+ *    In the other direction nothing here softens anything: no `pass: true`, no
+ *    `blocking: false` written by this function, no `skipped` — the three
+ *    shapes `passed()` tolerates (taxonomy R2). A check that did not declare
+ *    itself warn-only stays blocking, so the default path is RED. And no
+ *    `stats.timedOut` is fabricated, so `deriveResult` reads FAIL, never
+ *    TIMEOUT (§2.5).
+ */
+export function runCheckGuarded(c: CheckSpec, ctx: RunContext): CheckResult {
+  const startedAt = Date.now();
+  try {
+    return c.run(ctx);
+  } catch (e) {
+    const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    const message = `check \`${c.id}\` threw instead of returning a CheckResult:\n${detail}`;
+    console.error(`❌ ${message}`);
+    return {
+      check: c.id,
+      title: c.title ?? c.id,
+      pass: false,
+      // The SPEC's declared blocking-ness, not a hardcoded `true`. `CheckSpec`
+      // carries it (`blocking?: boolean` — "hard gate? false = warn-only.
+      // Default true"), `cmd()` propagates it, and the sibling synthesis for a
+      // never-run check a few lines below uses exactly this expression.
+      blocking: c.blocking ?? true,
+      durationMs: Date.now() - startedAt,
+      failure: { class: "UNKNOWN", reason: "no-check-result-produced" },
+      rawTail: message,
+      rawFull: message,
+    };
+  }
 }
 
 function cleanForEvidence(): boolean {
@@ -1022,6 +1394,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       ...meta,
     });
   const identity = config.identity?.("Verification") ?? "";
+  // Resolved once, up front: every artifact this invocation writes or reads is scoped to
+  // the place that produced it (#5339).
+  const here = evidenceLocation();
   const only = parseSelect(argv, "--only");
   const skip = parseSelect(argv, "--skip");
   const retryFailed = argv.includes("--retry-failed");
@@ -1071,7 +1446,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       printNaRefusal(refusal);
       finalExit(2, false, false);
     }
-    const report = writeNa(config.scenario, reason, sha, base, identity);
+    const report = writeNa(config.scenario, reason, sha, base, identity, here);
     console.log(`✅ N/A exemption written to .verify/${sha.slice(0, 9)}.md`);
     const na = commentArgs.post
       ? deliver(report, sha, "NA", { wallMs: gateWallMs(), checksMs: null })
@@ -1084,22 +1459,20 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   if (argv.includes("--deliver-cached")) {
     const sha = head();
     const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
-    let cached = readLocalCache(sha, config.scenario, base);
+    let cached = readLocalCache(sha, config.scenario, base, here);
     // #5067: `--deliver-cached` used to validate IDENTITY only (HEAD + scenario +
     // resolved base), which is why it could not stop a `--only` PASS from satisfying
     // the push gate. A partial record stays on disk and stays readable — it is just no
     // longer a token. Set aside, not discarded, so the refusal can name what did run.
     const partial = cached && !cached.coverage.fullScenario ? cached : undefined;
     if (partial) cached = undefined;
+    const root = sharedRoot();
+    const record = root
+      ? evidenceDir(sharedDir(root, sha, config.scenario, base), here)
+      : undefined;
     if (!cached) {
-      const root = sharedRoot();
-      const shared = root
-        ? readSharedEvidence(
-            sharedDir(root, sha, config.scenario, base),
-            sha,
-            config.scenario,
-            base,
-          )
+      const shared = record
+        ? readSharedEvidence(record, sha, config.scenario, base, here)
         : undefined;
       if (shared) {
         writeLocalCache(sha, config.scenario, base, shared);
@@ -1121,8 +1494,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       }
       process.exit(1);
     }
-    const reused = provenanceNotice(cached);
-    if (reused) console.error(reused.trimEnd());
+    const reused = provenanceNotice(cached, sha, record);
+    console.error(reused.trimEnd());
     const delivery = deliver(`${reused}${cached.report}`, sha, cached.result, {
       wallMs: gateWallMs(),
       checksMs: null,
@@ -1150,6 +1523,10 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const baseForBroker = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
   const cleanAtAdmission = cleanForEvidence();
   const brokerRoot = fullScenario ? sharedRoot() : undefined;
+  const brokerCoordination = brokerRoot
+    ? sharedDir(brokerRoot, shaForBroker, config.scenario, baseForBroker)
+    : undefined;
+  const brokerRecord = brokerCoordination ? evidenceDir(brokerCoordination, here) : undefined;
   // Full gates coordinate through one repository-global broker before deciding
   // whether this checkout may execute.  In particular, a dirty worktree must
   // never fall back to its local lease: an existence check on the shared lock
@@ -1161,6 +1538,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       shaForBroker,
       config.scenario,
       baseForBroker,
+      here,
     );
     if (!admission) process.exit(3);
     if ("report" in admission && !(retryFailed && ["FAIL", "TIMEOUT"].includes(admission.result))) {
@@ -1168,8 +1546,15 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       console.error(
         `ℹ reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}; no duplicate gate started.`,
       );
-      const reused = provenanceNotice(admission);
-      if (reused) console.error(reused.trimEnd());
+      // A cached red is a verdict, not a fact of nature: #5339 watched one flake become
+      // this sha's permanent answer because nothing on screen said the retry existed.
+      if (admission.result === "FAIL" || admission.result === "TIMEOUT") {
+        console.error(
+          `ℹ that cached verdict is ${admission.result}. It is NOT re-run automatically (single-flight, #5060) — pass --retry-failed to force one real retry here.`,
+        );
+      }
+      const reused = provenanceNotice(admission, shaForBroker, brokerRecord);
+      console.error(reused.trimEnd());
       const cached = deliver(`${reused}${admission.report}`, shaForBroker, admission.result, {
         wallMs: gateWallMs(),
         checksMs: null,
@@ -1187,6 +1572,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         shaForBroker,
         config.scenario,
         baseForBroker,
+        here,
       );
       if (!retry) process.exit(3);
       if ("report" in retry) {
@@ -1194,8 +1580,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         console.error(
           `ℹ retry target completed while waiting; reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}.`,
         );
-        const reused = provenanceNotice(retry);
-        if (reused) console.error(reused.trimEnd());
+        const reused = provenanceNotice(retry, shaForBroker, brokerRecord);
+        console.error(reused.trimEnd());
         const cached = deliver(`${reused}${retry.report}`, shaForBroker, retry.result, {
           wallMs: gateWallMs(),
           checksMs: null,
@@ -1277,7 +1663,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       console.error(`ℹ fail-fast: skipping ${c.id}`);
       continue;
     }
-    const ran = persistCheckLog(sha, c.run(ctx));
+    // Guarded, not bare: a check that throws must yield a check-level UNKNOWN
+    // rather than taking the whole run down with no CheckResult at all (#5591).
+    const ran = persistCheckLog(sha, runCheckGuarded(c, ctx));
     results.push(ran);
     if (!isSkipped(ran) && ran.blocking && !ran.pass) blockingFailed = true;
   }
@@ -1311,7 +1699,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // one failing check, and making that exit non-zero would break the workflow that
   // pushes people toward it. What changes is only that its PASS stops being a token.
   const result: VerifyResult = fullScenario || derived !== "PASS" ? derived : "PARTIAL";
-  const notice = fullScenario
+  const partialNotice = fullScenario
     ? undefined
     : `> ⚠️ **PARTIAL VERIFICATION — NOT A GATE.** ${selected.length} of ${config.checks.length} checks ran (\`${coverage.checks.join("`, `")}\`). ` +
       "The rest were never executed, so this report cannot satisfy the pre-push or merge gate. It is a diagnostic artifact.";
@@ -1322,11 +1710,18 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // did verification take" would make the number unusable for comparing rounds.
   const wallMs = gateWallMs();
   const checksMs = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
+  // Read AFTER the checks ran: a sibling location may have published while this gate was
+  // running, and this report should state what was true where and when it was produced.
+  const elsewhere = brokerCoordination
+    ? divergenceNotice(otherLocationRecords(brokerCoordination, here))
+    : undefined;
+  const notice = [partialNotice, elsewhere].filter(Boolean).join("\n\n") || undefined;
   const report = renderReport(results, {
     scenario: config.scenario,
     base,
     sha,
     identity,
+    origin: originNotice(here, config.scenario, base),
     notice,
     wallMs,
   });
@@ -1358,13 +1753,13 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     // A partial run still lands here — deliberately. It is the diagnostic artifact, and
     // deleting it to fix #5067 would re-run the real log loss of PR #3062. What stops it
     // being a gate is its `result` (PARTIAL) and its coverage metadata, not its absence.
-    writeLocalCache(sha, config.scenario, base, { report, result, coverage });
+    writeLocalCache(sha, config.scenario, base, { report, result, coverage, location: here });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
   // partial `--only` run can never satisfy the full merge gate, and a dirty
   // tree can never prove the commit named by its HEAD.
   if (fullScenario && cleanAtAdmission && cleanAtCompletion) {
-    publishSharedEvidence(lease, { report, result, coverage });
+    publishSharedEvidence(lease, { report, result, coverage, location: here });
   }
 
   finalExit(exitCode(results), commentArgs.post, delivery.posted);

@@ -1291,6 +1291,14 @@ export function runEnv(
   base: Record<string, string | undefined> = process.env,
   sh: Sh = realSh,
 ): Record<string, string> {
+  // Catalog token only — '=' / newlines would let argv or prompt text impersonate a skill
+  // (arc#5087). Throw before copying base so a rejected call cannot leak a partial env.
+  const skillLocal = run.skillLocal ?? "";
+  if (/[=\r\n]/.test(skillLocal)) {
+    throw new Error(
+      `skillLocal must be a catalog token (no '=' or newlines), got ${JSON.stringify(skillLocal)}`,
+    );
+  }
   const expand = (v: string) => v.replaceAll("{{CHECKOUT}}", run.checkoutPath);
   const merged: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) if (v !== undefined) merged[k] = v;
@@ -1308,6 +1316,10 @@ export function runEnv(
   merged.ARC_AGENT_ENGINE = run.engine.kind;
   if (run.engine.model) merged.ARC_AGENT_MODEL = run.engine.model;
   if (run.concurrency !== undefined) merged.AGENTLOOP_SKILL_CONCURRENCY = String(run.concurrency);
+  // identity.sh falls back to $AGENTLOOP_SKILL when --skill is omitted (arc#5087). Empty
+  // deletes a leftover so the next merge cannot inherit another skill's identity.
+  if (skillLocal) merged.AGENTLOOP_SKILL = skillLocal;
+  else delete merged.AGENTLOOP_SKILL;
   if (run.setupCommand) merged.AGENTLOOP_SETUP_COMMAND = run.setupCommand;
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
   merged[WORKTREE_BASE_ENV] = worktreeBase(cfg);

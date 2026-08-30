@@ -11,7 +11,11 @@
  *
  * This is I/O (not pure render), so it lives OUTSIDE report.ts.
  */
+import { claimLinkedIssues } from "./linked-issue-claim.ts";
 import { run, stripAnsi, tail, trimFullLogsSection } from "./report.ts";
+import { shQuote } from "./shell.ts";
+
+export { shQuote } from "./shell.ts";
 
 /**
  * Resolve `owner/repo` from a git remote URL. Handles GitHub SSH/HTTPS and the
@@ -92,10 +96,6 @@ export const HTML_DECODE_JQ = (
  * mode surfaced in the hermetic unit tests because they inject a mock `runner`
  * that never touches a real shell (see `gate.test.ts`'s `withComment`).
  */
-export function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Stable prefix used to find existing verification-report comments (upsert key).
  * Full marker line is dynamic: <!-- verification-report sha=<sha> result=<PASS|FAIL> -->
@@ -509,6 +509,8 @@ export interface PrShaAttribution {
   prHead?: string;
   /** the PR's head branch name */
   prBranch?: string;
+  /** PR body read in the same attribution request; issue declarations live here. */
+  prBody?: string;
   /** best-effort local branch name(s) carrying `sha` */
   shaBranch?: string;
   /** one sentence naming BOTH sides — used verbatim in the refusal message */
@@ -548,19 +550,22 @@ function branchesContaining(sha: string, runner: typeof run): string | undefined
  * comment, so a lookup that cannot run belongs to a delivery that could not have landed.
  */
 export function attributeShaToPr(pr: string, sha: string, runner = run): PrShaAttribution {
-  const view = runner(`gh pr view ${pr} --json headRefOid,headRefName 2>/dev/null`);
+  const view = runner(`gh pr view ${pr} --json headRefOid,headRefName,body 2>/dev/null`);
   let prHead: string | undefined;
   let prBranch: string | undefined;
+  let prBody: string | undefined;
   if (view.code === 0) {
     try {
       const parsed = JSON.parse(stripAnsi(view.out).trim()) as {
         headRefOid?: unknown;
         headRefName?: unknown;
+        body?: unknown;
       };
       if (typeof parsed.headRefOid === "string" && /^[0-9a-f]{7,40}$/.test(parsed.headRefOid))
         prHead = parsed.headRefOid;
       if (typeof parsed.headRefName === "string" && parsed.headRefName.trim())
         prBranch = parsed.headRefName.trim();
+      if (typeof parsed.body === "string") prBody = parsed.body;
     } catch {
       // Unparseable payload → attribution impossible; handled as `unknown` below.
     }
@@ -570,6 +575,7 @@ export function attributeShaToPr(pr: string, sha: string, runner = run): PrShaAt
     return {
       relation: "unknown",
       prBranch,
+      prBody,
       shaBranch,
       detail:
         `could not read PR #${pr}'s head commit from GitHub, so report sha ${short(sha)}` +
@@ -583,6 +589,7 @@ export function attributeShaToPr(pr: string, sha: string, runner = run): PrShaAt
     relation,
     prHead,
     prBranch,
+    prBody,
     shaBranch,
     detail: both,
   });
@@ -773,6 +780,28 @@ export function deliverComment(
       `❌ --comment: PR #${pr}'s sticky comment holds sha ${short(delivered)}, not the ${short(sha)} just posted — another runner overwrote it. Report NOT delivered.`,
     );
     return { posted: false, reason: "readback-mismatch" };
+  }
+
+  // #5471: the PR body is the declaration of work, including work folded into
+  // another implementation line. Mirror those declarations only after the PR
+  // has been attributed to this checkout, and fail loudly if any claim cannot
+  // land: a silent missing signal recreates the exact incident this closes.
+  const claims = claimLinkedIssues(pr, attribution.prBody ?? "", runner, resolveGhRepoEnv(runner));
+  if (!claims.ok) {
+    const missing = claims.issues.filter((issue) => !claims.claimed.includes(issue));
+    console.error(
+      `❌ --comment: report posted to PR #${pr}, but linked issue claim(s) failed for ${missing
+        .map((issue) => `#${issue}`)
+        .join(", ")}.`,
+    );
+    return { posted: false, reason: "linked-issue-claim-failed" };
+  }
+  if (claims.claimed.length) {
+    console.error(
+      `✅ linked issue claim(s) upserted from PR #${pr}: ${claims.claimed
+        .map((issue) => `#${issue}`)
+        .join(", ")}`,
+    );
   }
   console.error(
     `✅ report posted to PR #${pr}${attribution.relation === "behind" ? " (marked NOT-HEAD)" : ""}`,

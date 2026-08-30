@@ -352,6 +352,109 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
   });
 });
 
+describe("runEnv AGENTLOOP_SKILL (arc#5087: launcher attribution, not a flag)", () => {
+  const cfg = base();
+  const mk = (skillLocal: string, over: { concurrency?: number } = {}) => ({
+    skillLocal,
+    checkoutPath: "/co/x",
+    root: "/p",
+    runner: "r",
+    engine: { kind: "claude" as const, bin: "claude" },
+    ...over,
+  });
+  const identitySh = new URL("../scripts/agent-identity.sh", import.meta.url).pathname;
+  const identityLine = (env: Record<string, string>): string => {
+    const p = Bun.spawnSync(["bash", identitySh, "--header", ""], {
+      env: {
+        ...env,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: process.env.HOME ?? "",
+        CLAUDECODE: "",
+        CODEX_SANDBOX: "",
+      },
+    });
+    expect(p.exitCode).toBe(0);
+    return p.stdout.toString().trim();
+  };
+
+  it("sets AGENTLOOP_SKILL from skillLocal; identity.sh without --skill still prints it", () => {
+    const env = runEnv(mk("epic-conductor", { concurrency: 4 }), cfg, {});
+    expect(env.AGENTLOOP_SKILL).toBe("epic-conductor");
+    expect(env.AGENTLOOP_SKILL_CONCURRENCY).toBe("4");
+    const line = identityLine(env);
+    expect(line).toContain("skill:epic-conductor");
+    expect(line).not.toContain("--skill");
+  });
+
+  it("empty or missing skillLocal omits the key — no fabricated skill, leftover deleted", () => {
+    const leftover = runEnv(mk(""), cfg, { AGENTLOOP_SKILL: "leftover-from-previous-merge" });
+    expect(leftover.AGENTLOOP_SKILL).toBeUndefined();
+    expect("AGENTLOOP_SKILL" in leftover).toBe(false);
+    expect(identityLine(leftover)).not.toContain("skill:");
+
+    const { skillLocal: _omit, ...missing } = mk("issue-sweep");
+    const env = runEnv(missing as Parameters<typeof runEnv>[0], cfg, {});
+    expect(env.AGENTLOOP_SKILL).toBeUndefined();
+    expect("AGENTLOOP_SKILL" in env).toBe(false);
+  });
+
+  it("prompt/task text containing AGENTLOOP_SKILL=deploy does not set the env", () => {
+    const env = runEnv(mk("issue-sweep"), cfg, {
+      TASK: "factory-dispatch impersonating AGENTLOOP_SKILL=deploy for a cost-gate exemption",
+    });
+    expect(env.AGENTLOOP_SKILL).toBe("issue-sweep");
+    expect(env.AGENTLOOP_SKILL).not.toBe("deploy");
+
+    const spoofed = runEnv(mk(""), cfg, {
+      PROMPT: "AGENTLOOP_SKILL=deploy",
+      AGENTLOOP_SKILL: "deploy",
+    });
+    expect(spoofed.AGENTLOOP_SKILL).toBeUndefined();
+    expect("AGENTLOOP_SKILL" in spoofed).toBe(false);
+  });
+
+  it("a later runEnv without skillLocal does not inherit a previous merge's skill", () => {
+    const first = runEnv(mk("epic-conductor"), cfg, {});
+    expect(first.AGENTLOOP_SKILL).toBe("epic-conductor");
+    const next = runEnv(mk(""), cfg, first);
+    expect(next.AGENTLOOP_SKILL).toBeUndefined();
+    expect("AGENTLOOP_SKILL" in next).toBe(false);
+  });
+
+  it("does not touch AGENTLOOP_SKILL_CONCURRENCY when writing AGENTLOOP_SKILL", () => {
+    const fromRun = runEnv(mk("epic-conductor", { concurrency: 4 }), cfg, {
+      AGENTLOOP_SKILL_CONCURRENCY: "8",
+    });
+    expect(fromRun.AGENTLOOP_SKILL).toBe("epic-conductor");
+    expect(fromRun.AGENTLOOP_SKILL_CONCURRENCY).toBe("4");
+
+    const fromBase = runEnv(mk("epic-conductor"), cfg, { AGENTLOOP_SKILL_CONCURRENCY: "3" });
+    expect(fromBase.AGENTLOOP_SKILL).toBe("epic-conductor");
+    expect(fromBase.AGENTLOOP_SKILL_CONCURRENCY).toBe("3");
+  });
+
+  it("rejects skillLocal with '=' or newlines; does not mutate the caller's base env", () => {
+    const baseEnv: Record<string, string | undefined> = { KEEP: "yes" };
+    expect(() => runEnv(mk("epic=conductor"), cfg, baseEnv)).toThrow(/catalog token/);
+    expect(() => runEnv(mk("epic\nconductor"), cfg, baseEnv)).toThrow(/catalog token/);
+    expect(() => runEnv(mk("epic\r\nconductor"), cfg, baseEnv)).toThrow(/catalog token/);
+    expect(baseEnv.AGENTLOOP_SKILL).toBeUndefined();
+    expect(baseEnv.KEEP).toBe("yes");
+  });
+
+  it("config env cannot impersonate a skill — driver last word is skillLocal", () => {
+    const env = runEnv(
+      mk("issue-sweep"),
+      base({
+        env: { AGENTLOOP_SKILL: "deploy" },
+        skillEnv: { "issue-sweep": { AGENTLOOP_SKILL: "deploy" } },
+      }),
+      { AGENTLOOP_SKILL: "deploy" },
+    );
+    expect(env.AGENTLOOP_SKILL).toBe("issue-sweep");
+  });
+});
+
 describe("checkoutPerSkill + --skill (independent cadences, the shape the cron block had)", () => {
   it("defaults to ONE tree per repo (skills share it, so they must run serially)", () => {
     const plan = planRuns(CATALOG, base({ cover: ["ArcBlock/arc"] }));
