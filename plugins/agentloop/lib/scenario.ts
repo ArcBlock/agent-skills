@@ -72,6 +72,16 @@ export interface RunContext {
   sha: string;
   /** newline-joined `git diff --name-only base..HEAD` output */
   changedFiles: string;
+  /**
+   * Explicit PR number from `--comment <pr#>` / `--comment=<pr#>`, when given.
+   * A check that needs the PR the run is FOR (e.g. to fetch its body) must use
+   * this rather than shelling out to `gh pr view` on the current branch — that
+   * falls back to branch-name lookup, which is undefined in a detached-HEAD
+   * worktree and silently wrong when HEAD sits on a shared checkout that isn't
+   * the PR's branch (aside#1002: both cases delivered a false FAIL that
+   * overwrote a correct sticky PASS on the PR).
+   */
+  pr?: string;
 }
 
 /** One check: either an inline command (via `cmd()`) or an imported logic check. */
@@ -1231,7 +1241,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const base = baseForBroker;
   const sha = head();
   const changedFiles = run(`git diff --name-only ${base}..HEAD 2>/dev/null`).out;
-  const ctx: RunContext = { base, sha, changedFiles };
+  const ctx: RunContext = { base, sha, changedFiles, pr: commentArgs.pr };
 
   const selected: CheckSpec[] = [];
   const gatedOff: string[] = [];

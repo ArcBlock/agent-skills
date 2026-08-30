@@ -543,6 +543,44 @@ describe("runScenario — .verify cache", () => {
     expect(readFileSync(runs, "utf8").trim().split("\n")).toHaveLength(2);
   });
 
+  test("aside#1002: ctx.pr carries the explicit --comment <pr#> so a check never has to shell out to gh for the current branch", () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
+    dirs.push(scriptDir);
+    const seen = join(scriptDir, "seen-pr.txt");
+    const script = join(scriptDir, "ctx-pr.ts");
+    writeFileSync(
+      script,
+      `import { writeFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: "pre-merge", resolveBase: () => "HEAD", checks: [{ id: "only", run: (ctx) => {
+         writeFileSync(${JSON.stringify(seen)}, ctx.pr ?? "<undefined>");
+         return { check: "only", title: "Only", pass: true, blocking: true, durationMs: 1 };
+       }}] }, process.argv);`,
+    );
+
+    // Detached HEAD: exactly the aside#1002 repro shape where `gh pr view` on the
+    // current branch cannot resolve a PR at all — separate repos/shas so neither
+    // run can reuse the other's cached evidence.
+    const withPrDir = repo();
+    spawnSync("git", ["checkout", "--detach", "HEAD"], { cwd: withPrDir, encoding: "utf8" });
+    const withPr = spawnSync("bun", [script, "--comment-dry-run", "1002"], {
+      cwd: withPrDir,
+      encoding: "utf8",
+    });
+    // The check itself (and therefore ctx.pr) always runs before delivery is
+    // attempted; whether delivery itself succeeds in this offline test sandbox
+    // (no real gh/network, so PR #1002 attribution cannot be resolved) is a
+    // separate concern from what this test is pinning down.
+    expect(readFileSync(seen, "utf8")).toBe("1002");
+
+    rmSync(seen);
+    const withoutPrDir = repo();
+    spawnSync("git", ["checkout", "--detach", "HEAD"], { cwd: withoutPrDir, encoding: "utf8" });
+    const withoutPr = spawnSync("bun", [script, "--json"], { cwd: withoutPrDir, encoding: "utf8" });
+    expect(withoutPr.status).toBe(0);
+    expect(readFileSync(seen, "utf8")).toBe("<undefined>");
+  });
+
   test("#3170: a watchdog timeout with 0 observed failures caches TIMEOUT, not FAIL — but still exits non-zero (unverified)", () => {
     const dir = repo();
     const { sha, code } = runScenarioIn(dir, false, "", { timedOut: "true" });
