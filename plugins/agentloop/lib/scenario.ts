@@ -16,7 +16,11 @@
  *   --dry-run              alias of --comment-dry-run (checks run either way; the
  *                          comment is the only outward write — see README contract)
  *   --na "<reason>"        write an N/A exemption (docs/native PRs)
- *   --deliver-cached       post the cached report without re-running
+ *   --deliver-cached       post the cached report without re-running.
+ *                          Three cache-currency states (#5635): current /
+ *                          stale-identity / missing, carried in
+ *                          AGENTLOOP_CACHE_STATE= and in the exit code
+ *                          (0/1 current green/red, 5 stale-identity, 1 missing).
  *   --retry-failed         explicitly retry a cached FAIL/TIMEOUT full gate
  *   --only a,b,c           run only these check ids (unknown id → hard error)
  *   --skip x,y             run all but these check ids
@@ -709,6 +713,62 @@ interface SharedEvidence extends EvidenceCoverage {
   completedAt: string;
 }
 
+/**
+ * `--deliver-cached` cache-currency states (#5635).
+ *
+ * "File exists" is not "this record is current": a leftover `.result` from a
+ * run whose resolved base / location / capability vector has moved is a
+ * STALE identity, and broadcasting it as this host's current red is the bug.
+ * The three values are carried in `AGENTLOOP_CACHE_STATE=` (an explicit field,
+ * not prose) and in the exit code, so a consumer never has to parse stderr.
+ *
+ * `current` is not one exit code — it keeps the historical 0 (PASS/NA) / 1
+ * (FAIL/TIMEOUT/PARTIAL) split. Stale identity is 5 so it cannot be read as
+ * either current-red (1, files still on disk) or missing (1, no files).
+ */
+export const CACHE_STATE = {
+  current: "current",
+  staleIdentity: "stale-identity",
+  missing: "missing",
+} as const;
+export type CacheState = (typeof CACHE_STATE)[keyof typeof CACHE_STATE];
+
+export const DELIVER_CACHED_EXIT = {
+  currentGreen: 0,
+  currentRed: 1,
+  staleIdentity: 5,
+  missing: 1,
+} as const;
+
+/**
+ * Classify a local cache lookup into the three #5635 states.
+ *
+ * Pure: "always stale" satisfies every reject assertion on `--deliver-cached`
+ * and silently kills the broker (#5600). The accept path is "a matching
+ * record is current even if files also happen to exist".
+ *
+ * Retire is ONLY valid when `metadata.scenario` matches this scenario AND
+ * base / location / capabilities drifted. Leftover files for a *different*
+ * scenario, or a corrupt token whose identity axes still match, are a miss
+ * for THIS scenario — not "stale identity of this scenario". Destroying them
+ * livelocks local-only tokens (ENV_GAP PASS / `--na` / PARTIAL) that never
+ * published to the shared broker (#5635 review P1/P2).
+ */
+export function classifyLocalCache(args: {
+  recordPresent: boolean;
+  artifactsPresent: boolean;
+  /** metadata.scenario equals the scenario being delivered */
+  sameScenario?: boolean;
+  /** this scenario's resolved base / location / capability vector drifted */
+  identityDrifted?: boolean;
+}): CacheState {
+  if (args.recordPresent) return CACHE_STATE.current;
+  if (args.artifactsPresent && args.sameScenario && args.identityDrifted) {
+    return CACHE_STATE.staleIdentity;
+  }
+  return CACHE_STATE.missing;
+}
+
 export interface CachedEvidence {
   report: string;
   result: VerifyResult;
@@ -1358,6 +1418,67 @@ function hasPartialSharedEvidence(dir: string): boolean {
   return ["metadata.json", "report.md", "result"].some((name) => existsSync(`${dir}/${name}`));
 }
 
+/** Well-known local cache names a consumer reads as "the verdict for this sha". */
+function localCacheArtifactPaths(sha: string): string[] {
+  return [
+    `.verify/${sha}.md`,
+    `.verify/${sha}.result`,
+    `.verify/${sha}.class`,
+    `.verify/${sha}.metadata.json`,
+  ];
+}
+
+function localCacheArtifactsPresent(sha: string): boolean {
+  return localCacheArtifactPaths(sha).some((p) => existsSync(p));
+}
+
+/**
+ * Whether leftover `.verify/<sha>.*` files are THIS scenario's identity, and
+ * whether that identity has drifted. Unreadable / foreign-scenario metadata
+ * is `sameScenario: false` — a miss, not a retire.
+ */
+function inspectLocalCacheIdentity(
+  sha: string,
+  scenario: string,
+  base: string,
+  location: EvidenceLocation,
+  capabilities: CapabilitySet,
+): { sameScenario: boolean; identityDrifted: boolean } {
+  const metadataFile = `.verify/${sha}.metadata.json`;
+  if (!existsSync(metadataFile)) return { sameScenario: false, identityDrifted: false };
+  try {
+    const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Partial<SharedEvidence>;
+    if (metadata.scenario !== scenario) return { sameScenario: false, identityDrifted: false };
+    const producedAt = parseLocation(metadata.location);
+    const drifted =
+      metadata.base !== base ||
+      !sameLocation(producedAt, location) ||
+      capabilityDrift(metadata.capabilities, capabilities).length > 0;
+    return { sameScenario: true, identityDrifted: drifted };
+  } catch {
+    return { sameScenario: false, identityDrifted: false };
+  }
+}
+
+/**
+ * #5635: existence of the original names is no longer readable as currentness.
+ * Rename rather than delete so the diagnostic stays readable (same reason a
+ * PARTIAL report stays on disk, #5067 / PR #3062); fall back to unlink if the
+ * rename cannot land.
+ */
+function retireStaleLocalCache(sha: string): void {
+  for (const src of localCacheArtifactPaths(sha)) {
+    if (!existsSync(src)) continue;
+    const dest = `${src}.stale`;
+    try {
+      rmSync(dest, { force: true });
+      renameSync(src, dest);
+    } catch {
+      rmSync(src, { force: true });
+    }
+  }
+}
+
 function writeLocalCache(
   sha: string,
   scenario: string,
@@ -1962,10 +2083,31 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   }
 
   // --deliver-cached: post the cached report for HEAD without re-running.
+  //
+  // #5635: three states, not two. A leftover `.result` whose identity (resolved
+  // base / location / capability vector) no longer matches is STALE, not
+  // missing and not current. Consumers must not have to parse prose; the state
+  // is `AGENTLOOP_CACHE_STATE=` plus the exit code. Shared-broker rehydration
+  // still happens BEFORE we retire a stale local file — "refuse every local
+  // leftover" would disable the broker (#5600).
   if (argv.includes("--deliver-cached")) {
     const sha = head();
     const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
-    let cached = readLocalCache(sha, config.scenario, base, here, declaredCapabilities);
+    const localRecord = readLocalCache(sha, config.scenario, base, here, declaredCapabilities);
+    const identity = inspectLocalCacheIdentity(
+      sha,
+      config.scenario,
+      base,
+      here,
+      declaredCapabilities,
+    );
+    const localState = classifyLocalCache({
+      recordPresent: localRecord !== undefined,
+      artifactsPresent: localCacheArtifactsPresent(sha),
+      sameScenario: identity.sameScenario,
+      identityDrifted: identity.identityDrifted,
+    });
+    let cached = localState === CACHE_STATE.current ? localRecord : undefined;
     // #5067: `--deliver-cached` used to validate IDENTITY only (HEAD + scenario +
     // resolved base), which is why it could not stop a `--only` PASS from satisfying
     // the push gate. A partial record stays on disk and stays readable — it is just no
@@ -1985,34 +2127,47 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         cached = shared;
       }
     }
-    if (!cached) {
-      if (partial) {
-        console.error(
-          `--deliver-cached: the cached ${config.scenario} record for ${sha.slice(0, 9)} is a PARTIAL verification — it ran only: ${partial.coverage.checks.join(", ")}.`,
-        );
-        console.error(
-          `  It is a diagnostic artifact (still readable at .verify/${sha}.md), not a gate token. Run the full scenario: bun .claude/verify/${config.scenario}.ts`,
-        );
-      } else {
-        console.error(
-          `--deliver-cached: no current ${config.scenario} cache for ${sha.slice(0, 9)} at base ${base.slice(0, 9)}. Run the scenario first.`,
-        );
-      }
-      process.exit(1);
+    if (cached) {
+      console.error(`AGENTLOOP_CACHE_STATE=${CACHE_STATE.current}`);
+      const reused = provenanceNotice(cached, sha, record);
+      console.error(reused.trimEnd());
+      const delivery = deliver(`${reused}${cached.report}`, sha, cached.result, {
+        wallMs: gateWallMs(),
+        checksMs: null,
+        reused: true,
+      });
+      // Diagnostics are reusable, but only PASS/NA are gate tokens.
+      finalExit(
+        cached.result === "PASS" || cached.result === "NA"
+          ? DELIVER_CACHED_EXIT.currentGreen
+          : DELIVER_CACHED_EXIT.currentRed,
+        commentArgs.post,
+        delivery.posted,
+      );
     }
-    const reused = provenanceNotice(cached, sha, record);
-    console.error(reused.trimEnd());
-    const delivery = deliver(`${reused}${cached.report}`, sha, cached.result, {
-      wallMs: gateWallMs(),
-      checksMs: null,
-      reused: true,
-    });
-    // Diagnostics are reusable, but only PASS/NA are gate tokens.
-    finalExit(
-      cached.result === "PASS" || cached.result === "NA" ? 0 : 1,
-      commentArgs.post,
-      delivery.posted,
+    if (partial) {
+      console.error(`AGENTLOOP_CACHE_STATE=${CACHE_STATE.current}`);
+      console.error(
+        `--deliver-cached: the cached ${config.scenario} record for ${sha.slice(0, 9)} is a PARTIAL verification — it ran only: ${partial.coverage.checks.join(", ")}.`,
+      );
+      console.error(
+        `  It is a diagnostic artifact (still readable at .verify/${sha}.md), not a gate token. Run the full scenario: bun .claude/verify/${config.scenario}.ts`,
+      );
+      process.exit(DELIVER_CACHED_EXIT.currentRed);
+    }
+    if (localState === CACHE_STATE.staleIdentity) {
+      retireStaleLocalCache(sha);
+      console.error(`AGENTLOOP_CACHE_STATE=${CACHE_STATE.staleIdentity}`);
+      console.error(
+        `--deliver-cached: cached ${config.scenario} record for ${sha.slice(0, 9)} has a stale identity (resolved base / location / capability vector), not a current one.`,
+      );
+      process.exit(DELIVER_CACHED_EXIT.staleIdentity);
+    }
+    console.error(`AGENTLOOP_CACHE_STATE=${CACHE_STATE.missing}`);
+    console.error(
+      `--deliver-cached: no current ${config.scenario} cache for ${sha.slice(0, 9)} at base ${base.slice(0, 9)}. Run the scenario first.`,
     );
+    process.exit(DELIVER_CACHED_EXIT.missing);
   }
 
   const fullScenario = !only && !skip;

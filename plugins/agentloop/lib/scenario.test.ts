@@ -25,10 +25,12 @@ import { dirname, join } from "node:path";
 import { ENV_GAP_CAPABILITY, envGapIdentity, FAILURE_REASONS } from "./failure-class.ts";
 import { type CheckResult, deriveResult, isSkipped, passed } from "./report.ts";
 import {
+  CACHE_STATE,
   type CachedEvidence,
   type CheckSpec,
   capabilityDrift,
   checkFailuresOf,
+  classifyLocalCache,
   observedEnvGaps,
   probeCapabilities,
   provenanceNotice,
@@ -591,9 +593,10 @@ describe("runScenario — .verify cache", () => {
       env: { ...process.env, TEST_BASE: "origin-main-b" },
     });
     expect(first.status).toBe(0);
-    expect(staleDelivery.status).toBe(1);
+    // #5635: stale identity is not "missing" (1) and not current red (also 1).
+    expect(staleDelivery.status).toBe(5);
     expect(`${staleDelivery.stdout}${staleDelivery.stderr}`).toContain(
-      "no current pre-merge cache",
+      "AGENTLOOP_CACHE_STATE=stale-identity",
     );
     expect(second.status).toBe(0);
     expect(`${second.stdout}${second.stderr}`).not.toContain("reused shared pre-merge evidence");
@@ -2409,5 +2412,403 @@ describe("checkFailuresOf — denom substrate is pass=false, not the classifier 
         row({ check: "red", failure: { class: "BUDGET", reason: "budget-exhausted" } }),
       ]),
     ).toEqual([{ check: "red", class: "BUDGET" }]);
+  });
+});
+
+/**
+ * #5635 — `--deliver-cached` treated "file exists" as "this record is current".
+ * When identity (resolved base / location / capability vector) moved, it
+ * correctly exited non-zero, but left `.result` / `.md` / `.class` on disk, so
+ * `pre-push.sh` branch 2b broadcast a stale-identity FAIL as if it were this
+ * host's current red.
+ *
+ * Three states, carried in exit code + `AGENTLOOP_CACHE_STATE=` (an explicit
+ * field, not prose). "Always stale" satisfies every reject assertion here and
+ * silently kills the broker (#5600) — the ACCEPT arms are the ones that matter.
+ */
+describe("--deliver-cached three states: current / stale-identity / missing (#5635)", () => {
+  const STALE_EXIT = 5;
+
+  test("ACCEPT — the classifier DISCRIMINATES: three inputs, three states", () => {
+    // A classifier that always returns stale-identity satisfies every reject
+    // arm below and silently kills the broker (#5600). Retire is only valid
+    // when THIS scenario's identity drifted — leftover files alone are not that.
+    expect(classifyLocalCache({ recordPresent: true, artifactsPresent: true })).toBe(
+      CACHE_STATE.current,
+    );
+    expect(
+      classifyLocalCache({
+        recordPresent: false,
+        artifactsPresent: true,
+        sameScenario: true,
+        identityDrifted: true,
+      }),
+    ).toBe(CACHE_STATE.staleIdentity);
+    expect(classifyLocalCache({ recordPresent: false, artifactsPresent: false })).toBe(
+      CACHE_STATE.missing,
+    );
+    expect(
+      new Set([
+        classifyLocalCache({ recordPresent: true, artifactsPresent: true }),
+        classifyLocalCache({
+          recordPresent: false,
+          artifactsPresent: true,
+          sameScenario: true,
+          identityDrifted: true,
+        }),
+        classifyLocalCache({ recordPresent: false, artifactsPresent: false }),
+      ]).size,
+    ).toBe(3);
+  });
+
+  test("REJECT: leftover files for a different scenario are missing, not stale-identity", () => {
+    expect(classifyLocalCache({ recordPresent: false, artifactsPresent: true })).toBe(
+      CACHE_STATE.missing,
+    );
+    expect(
+      classifyLocalCache({
+        recordPresent: false,
+        artifactsPresent: true,
+        sameScenario: false,
+        identityDrifted: true,
+      }),
+    ).toBe(CACHE_STATE.missing);
+  });
+
+  test("REJECT: same scenario + matching identity + unreadable token is missing, not stale", () => {
+    // Empty/corrupt .result is not base/location/capability drift.
+    expect(
+      classifyLocalCache({
+        recordPresent: false,
+        artifactsPresent: true,
+        sameScenario: true,
+        identityDrifted: false,
+      }),
+    ).toBe(CACHE_STATE.missing);
+  });
+
+  test("ACCEPT: a matching record is current even when no files remain to look at", () => {
+    // Shared-broker rehydration: the record is in hand before writeLocalCache.
+    expect(classifyLocalCache({ recordPresent: true, artifactsPresent: false })).toBe(
+      CACHE_STATE.current,
+    );
+  });
+
+  function cacheState(out: string): string | undefined {
+    return /(?:^|\n)AGENTLOOP_CACHE_STATE=(\S+)/.exec(out)?.[1];
+  }
+
+  function artifacts(dir: string, sha: string) {
+    return {
+      md: join(dir, ".verify", `${sha}.md`),
+      result: join(dir, ".verify", `${sha}.result`),
+      classFile: join(dir, ".verify", `${sha}.class`),
+      metadata: join(dir, ".verify", `${sha}.metadata.json`),
+    };
+  }
+
+  function originalNamesPresent(dir: string, sha: string): boolean {
+    const a = artifacts(dir, sha);
+    return existsSync(a.md) || existsSync(a.result) || existsSync(a.classFile);
+  }
+
+  test("ACCEPT: unchanged identity still delivers a PASS — not an always-stale implementation", () => {
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, true);
+    expect(code).toBe(0);
+    const again = runScenarioIn(dir, true, `, "--deliver-cached"`);
+    expect(again.code).toBe(0);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PASS");
+    expect(existsSync(artifacts(dir, sha).md)).toBe(true);
+  });
+
+  test("ACCEPT: unchanged identity still delivers a current FAIL (exit 1, files remain)", () => {
+    // The same-colour trap for the red half: retiring EVERY non-PASS would
+    // make current FAIL look like missing, and pre-push would print "no
+    // report" instead of the class next step (#5626).
+    const dir = repo();
+    const { sha } = runScenarioIn(dir, false);
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("FAIL");
+    const again = runScenarioIn(dir, false, `, "--deliver-cached"`);
+    expect(again.code).toBe(1);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("FAIL");
+    expect(existsSync(artifacts(dir, sha).md)).toBe(true);
+  });
+
+  test("ACCEPT: broker rehydration still works when local is stale and shared is current", () => {
+    const dir = repo();
+    const { sha } = runScenarioIn(dir, true);
+    const metadataPath = artifacts(dir, sha).metadata;
+    const recorded = JSON.parse(readFileSync(metadataPath, "utf8"));
+    writeFileSync(metadataPath, `${JSON.stringify({ ...recorded, base: "not-this-base" })}\n`);
+    // Local identity is now stale; the shared slot is still this identity.
+    const again = runScenarioIn(dir, true, `, "--deliver-cached"`);
+    expect(again.code).toBe(0);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PASS");
+    expect(JSON.parse(readFileSync(metadataPath, "utf8")).base).toBe(recorded.base);
+    // P3: retire-BEFORE-shared keeps every prior #5635 test green (writeLocalCache
+    // restores the original names). A *.stale leftover is the fingerprint of
+    // that order flip.
+    expect(existsSync(`${artifacts(dir, sha).result}.stale`)).toBe(false);
+    expect(existsSync(`${artifacts(dir, sha).md}.stale`)).toBe(false);
+    expect(existsSync(`${metadataPath}.stale`)).toBe(false);
+  });
+
+  test("REJECT: missing is exit 1 and CACHE_STATE=missing, not stale-identity", () => {
+    const dir = repo();
+    const { sha, code, out } = runScenarioIn(dir, true, `, "--deliver-cached"`);
+    expect(code).toBe(1);
+    expect(code).not.toBe(STALE_EXIT);
+    expect(cacheState(out)).toBe("missing");
+    expect(originalNamesPresent(dir, sha)).toBe(false);
+  });
+
+  test("REJECT: resolved-base drift is stale-identity — files no longer look current", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-stale-base-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "moving-base.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: "pre-merge", resolveBase: () => process.env.TEST_BASE ?? "base-a",
+         checks: [{ id: "only", run: () => ({ check: "only", title: "Only", pass: false, blocking: true, durationMs: 1,
+           failure: { class: "CODE", reason: "observed-test-failures" } }) }] }, process.argv);`,
+    );
+    const first = spawnSync("bun", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "origin-main-a" },
+    });
+    expect(first.status).toBe(1);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("FAIL");
+    expect(readFileSync(artifacts(dir, sha).classFile, "utf8").trim()).toBe("CODE");
+
+    const stale = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "origin-main-b" },
+    });
+    expect(stale.status).toBe(STALE_EXIT);
+    expect(cacheState(`${stale.stdout}${stale.stderr}`)).toBe("stale-identity");
+    // Existence of the original names is what pre-push branch 2b reads as current.
+    expect(existsSync(artifacts(dir, sha).result)).toBe(false);
+    expect(existsSync(artifacts(dir, sha).md)).toBe(false);
+    expect(existsSync(artifacts(dir, sha).classFile)).toBe(false);
+  });
+
+  test("REJECT: capability-vector drift is stale-identity, and does not disable the matching slot", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-stale-cap-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "cap.ts");
+    const runs = join(scriptDir, "runs.log");
+    writeFileSync(runs, "");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "cap",
+         resolveBase: () => "HEAD",
+         capabilities: [{ id: "upstream-reachable", probe: () => process.env.TEST_UPSTREAM === "1" }],
+         checks: [{ id: "mirror", run: () => {
+           appendFileSync(${JSON.stringify(runs)}, "run\\n");
+           return { check: "mirror", title: "Mirror", pass: true, blocking: true, durationMs: 1 };
+         }}],
+       }, process.argv);`,
+    );
+    const first = spawnSync("bun", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_UPSTREAM: "1" },
+    });
+    expect(first.status).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    const drifted = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_UPSTREAM: "0" },
+    });
+    expect(drifted.status).toBe(STALE_EXIT);
+    expect(cacheState(`${drifted.stdout}${drifted.stderr}`)).toBe("stale-identity");
+    expect(existsSync(artifacts(dir, sha).result)).toBe(false);
+
+    // Broker still on: the matching environment can rehydrate from shared.
+    const restored = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_UPSTREAM: "1" },
+    });
+    expect(restored.status).toBe(0);
+    expect(cacheState(`${restored.stdout}${restored.stderr}`)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PASS");
+    expect(readFileSync(runs, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("REJECT: location drift is stale-identity", () => {
+    const dir = repo();
+    const { sha } = runScenarioIn(dir, false);
+    // Shared is location-keyed: the current-location slot still holds this
+    // run's record. Drop it so rehydration cannot mask a local leftover that
+    // answers for a different tree (the rehydration accept path is the test
+    // above, which corrupts `base` the same way).
+    rmSync(join(dir, ".git", "agentloop", "verification", sha), { recursive: true, force: true });
+    const metadataPath = artifacts(dir, sha).metadata;
+    const recorded = JSON.parse(readFileSync(metadataPath, "utf8"));
+    writeFileSync(
+      metadataPath,
+      `${JSON.stringify({
+        ...recorded,
+        location: { ...recorded.location, worktree: "/not/this/tree" },
+      })}\n`,
+    );
+    const again = runScenarioIn(dir, false, `, "--deliver-cached"`);
+    expect(again.code).toBe(STALE_EXIT);
+    expect(cacheState(again.out)).toBe("stale-identity");
+    expect(existsSync(artifacts(dir, sha).result)).toBe(false);
+    expect(existsSync(artifacts(dir, sha).md)).toBe(false);
+  });
+
+  test("REJECT same-colour: a file-existence consumer cannot read a stale FAIL as current", () => {
+    // This is the W1.2 production bug: `--deliver-cached` exits non-zero, but
+    // `.result`+`.md` still exist, so pre-push branch 2b prints "is FAIL" with
+    // a class next step from a run whose base has already moved.
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-stale-exist-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "fail.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: "unit", resolveBase: () => process.env.TEST_BASE ?? "HEAD",
+         checks: [{ id: "only", run: () => ({ check: "only", title: "Only", pass: false, blocking: true, durationMs: 1,
+           failure: { class: "CONTENTION", reason: "killed-by-signal" } }) }] }, process.argv);`,
+    );
+    expect(
+      spawnSync("bun", [script], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, TEST_BASE: "base-a" },
+      }).status,
+    ).toBe(1);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, TEST_BASE: "base-b" },
+    });
+    const a = artifacts(dir, sha);
+    // The consumer that only asks "do the files exist?" must not see a current red.
+    expect(existsSync(a.result) && existsSync(a.md)).toBe(false);
+  });
+
+  function namedScript(scenario: string, checkJs: string): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), `agentloop-named-${scenario}-`));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "run.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: ${JSON.stringify(scenario)},
+         resolveBase: () => "HEAD",
+         checks: [${checkJs}],
+       }, process.argv);`,
+    );
+    return script;
+  }
+
+  function runAt(script: string, dir: string, args: string[] = []): { code: number; out: string } {
+    const r = spawnSync("bun", [script, ...args], { cwd: dir, encoding: "utf8" });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  }
+
+  const DUMMY_PASS =
+    '{ id: "only", run: () => ({ check: "only", title: "Only", pass: true, blocking: true, durationMs: 1 }) }';
+  const ENV_GAP_PASS =
+    '{ id: "tests", run: () => ({ check: "tests", title: "Tests", pass: false, blocking: false, durationMs: 1, stats: { envGap: "dns-localhost-subdomain" } }) }';
+
+  test("ACCEPT: a local-only ENV_GAP PASS survives a sibling-scenario --deliver-cached", () => {
+    // Files are SHA-keyed, not scenario-keyed. Classifying a foreign scenario's
+    // miss as stale-identity retires the only copy (ENV_GAP publishes nothing
+    // shared). The next unit --deliver-cached then looks like missing.
+    const dir = repo();
+    const unit = namedScript("unit", ENV_GAP_PASS);
+    const other = namedScript("pre-merge", DUMMY_PASS);
+    expect(runAt(unit, dir).code).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PASS");
+    const sibling = runAt(other, dir, ["--deliver-cached"]);
+    expect(sibling.code).not.toBe(0);
+    expect(cacheState(sibling.out)).not.toBe("stale-identity");
+    expect(existsSync(artifacts(dir, sha).result)).toBe(true);
+    const again = runAt(unit, dir, ["--deliver-cached"]);
+    expect(again.code).toBe(0);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PASS");
+  });
+
+  test("ACCEPT: a local-only NA survives a sibling-scenario --deliver-cached", () => {
+    const dir = repo();
+    const unit = namedScript("unit", DUMMY_PASS);
+    const other = namedScript("pre-merge", DUMMY_PASS);
+    expect(runAt(unit, dir, ["--na", "docs-only change"]).code).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("NA");
+    expect(runAt(other, dir, ["--deliver-cached"]).code).not.toBe(0);
+    expect(existsSync(artifacts(dir, sha).result)).toBe(true);
+    const again = runAt(unit, dir, ["--deliver-cached"]);
+    expect(again.code).toBe(0);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("NA");
+  });
+
+  test("ACCEPT: a local-only PARTIAL survives a sibling-scenario --deliver-cached", () => {
+    const dir = repo();
+    const { sha } = runMultiIn(dir, `, "--only", "a,b"`);
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PARTIAL");
+    const other = namedScript("pre-merge", DUMMY_PASS);
+    expect(runAt(other, dir, ["--deliver-cached"]).code).not.toBe(0);
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PARTIAL");
+    const again = runMultiIn(dir, `, "--deliver-cached"`);
+    expect(again.code).toBe(1);
+    expect(cacheState(again.out)).toBe("current");
+    expect(readFileSync(artifacts(dir, sha).result, "utf8")).toBe("PARTIAL");
+  });
+
+  test("REJECT: empty .result with matching identity is not stale-identity and is not retired", () => {
+    const dir = repo();
+    const unit = namedScript("unit", ENV_GAP_PASS);
+    expect(runAt(unit, dir).code).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    writeFileSync(artifacts(dir, sha).result, "");
+    const again = runAt(unit, dir, ["--deliver-cached"]);
+    expect(again.code).not.toBe(STALE_EXIT);
+    expect(cacheState(again.out)).not.toBe("stale-identity");
+    expect(existsSync(artifacts(dir, sha).md)).toBe(true);
+    expect(existsSync(artifacts(dir, sha).metadata)).toBe(true);
   });
 });

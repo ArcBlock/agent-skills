@@ -33,15 +33,25 @@ The repo exposes a scenario entry (`<verification_entry>`). Common flags:
 --na "<reason>"     write an N/A exemption (docs-only / native-only PRs)
 --only a,b / --skip x,y   scope the check set (unknown id → hard error, exit 2)
                           → a scoped run is a DIAGNOSTIC, never a gate (see below)
---deliver-cached    post the cached PASS report without re-running
+--deliver-cached    post the cached report without re-running. Three states
+                    (#5635), carried in `AGENTLOOP_CACHE_STATE=` and the exit
+                    code — do not parse the prose:
+                      current           exit 0 (PASS/NA) or 1 (FAIL/TIMEOUT/PARTIAL)
+                      stale-identity    exit 5 (THIS scenario's base/location/
+                                        capabilities moved; `.result`/`.md`/`.class`
+                                        are retired so existence is not currentness)
+                      missing           exit 1 (no current token for this scenario —
+                                        including a leftover for a different
+                                        scenario, which is NOT retired)
 ```
 
 Run the gate with `--comment <pr#>` so "run" and "post" are one step. Exit codes:
 **0** = PASS (and, when `--comment`/`--post` was requested, the report WAS delivered);
-**1** = verify FAIL; **2** = empty check set / unknown `--only`/`--skip` id (fails
+**1** = verify FAIL (or `--deliver-cached` missing); **2** = empty check set / unknown `--only`/`--skip` id (fails
 loud, never silent-green); **4** = verified PASS but the requested report was NOT
 delivered — the remedy is to retry / fall back the comment post (e.g. paste the
-stdout sticky body via MCP), NOT to touch the diff. Do not hand-write the report or
+stdout sticky body via MCP), NOT to touch the diff; **5** = `--deliver-cached`
+stale identity. Do not hand-write the report or
 substitute a single `tsc`/`build` command for the scenario script.
 
 ## Discipline
