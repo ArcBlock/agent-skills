@@ -37,11 +37,14 @@ import {
   groupingQuestion,
   type Mode,
   revalidationReasons,
+  SYMPTOM_VERDICTS,
   shouldProcess,
   typeOf,
   type WorkType,
 } from "./classify";
 import {
+  AGE_BUCKETS,
+  ageBucketOf,
   agingBuckets,
   assess,
   backlogSlope,
@@ -67,9 +70,11 @@ import {
 } from "./source";
 import {
   bucketFlow,
+  bucketFlowByType,
   bucketsFor,
   type Granularity,
   stockSeries,
+  stockSeriesByType,
   type TimedItem,
   typeTotals,
 } from "./stats";
@@ -368,7 +373,9 @@ for (const i of all) {
   const t = typeOf(i.labels);
   const rec = { id: i.id, title: i.title, body: i.body ?? "", labels: i.labels };
   if (t === "untyped") untypedItems.push(rec);
-  else if (t !== "report")
+  // report 与 symptom 的 label 都是 skill **自己**挂上去的，不是人的判断。
+  // 拿它们去长规则等于学 agent 自己的提议——第一次猜错就会自我强化（typing.ts 的纪律）。
+  else if (t !== "report" && t !== "symptom")
     priorDecisions.push({ ...rec, type: t as Decision["type"], by: "human" });
 }
 const derivedRules = deriveRules(priorDecisions);
@@ -420,11 +427,25 @@ if (HTML) {
       const b = bucketsFor(g, new Date());
       const f = bucketFlow(timed, b);
       const st = stockSeries(timed, b);
+      // 按类型分解：一根「全部」的柱子看不出进的是什么、出的是什么。
+      // 每个出现过的类型自成一层，所以堆叠高度恒等于总量（stats.test.ts 钉住）。
+      const fT = bucketFlowByType(timed, b);
+      const sT = stockSeriesByType(timed, b);
       series[g] = {
         labels: b.map((x) => x.label),
         opened: f.map((x) => x.opened),
         closed: f.map((x) => x.closed),
         stock: st.map((x) => x.open),
+        byType: Object.fromEntries(
+          Object.keys(fT).map((t) => [
+            t,
+            {
+              opened: fT[t].map((x) => x.opened),
+              closed: fT[t].map((x) => x.closed),
+              stock: sT[t].map((x) => x.open),
+            },
+          ]),
+        ),
       };
     }
     overview = {
@@ -444,11 +465,18 @@ if (HTML) {
     console.log("⚠ 本源不提供 timeline：概览页会显示「未采集」而不是画一张空图。");
   }
 
+  /** id -> createdAt（仅 open）。给 item 算年龄桶用；源不提供 timeline 时为空。 */
+  const createdAtById = new Map<number, string>();
+  /** 柱子与 item 的年龄桶必须用同一个 now，否则边界附近两边会差一条。 */
+  const chartNow = new Date();
   // 健康判读：detector 是确定性的，agent 该读它的结构化输出而不是截图。
   let health: ReturnType<typeof assess> | undefined;
   let aging: ReturnType<typeof agingBuckets> | undefined;
   if (src.timeline) {
     const rows = await src.timeline(STATS_DAYS);
+    // 年龄柱是可点的，点开要给出**同一批** issue。所以桶只算一次（ageBucketOf），
+    // 用与柱子相同的 now，然后序列化进每条 item —— 前端不重算边界。
+    for (const r of rows) if (!r.closedAt) createdAtById.set(r.id, r.createdAt);
     const hItems: HealthItem[] = rows.map((r) => ({
       id: r.id,
       type: typeOf(r.labels),
@@ -461,7 +489,7 @@ if (HTML) {
     const net7 = day7 ? day7.opened.slice(-7).map((o, k) => o - day7.closed.slice(-7)[k]) : [];
     const stock7d = netToCumulative(net7);
     const hin = {
-      now: new Date(),
+      now: chartNow,
       items: hItems,
       stock7d,
       untyped: untypedItems.length,
@@ -545,14 +573,32 @@ if (HTML) {
           reasons: reasonsById.get(i.id) ?? [],
           epic: Number(i.labels.find((l) => /^epic:\d+$/.test(l))?.slice(5)) || null,
           selected: selected.some((x) => x.id === i.id),
+          // null = 源没给 timeline，年龄未采集。**不猜**：页面据此显示「未采集」
+          // 而不是把所有条目画进 <1d。
+          ageBucket: createdAtById.has(i.id)
+            ? ageBucketOf(
+                (chartNow.getTime() - new Date(createdAtById.get(i.id) as string).getTime()) /
+                  86_400_000,
+              )
+            : null,
           url: ghUrl(i.id),
         };
       }),
+    // 年龄刻度从 health.ts 的唯一那张表来，前端不另写一份顺序。
+    ageScale: [...AGE_BUCKETS],
     axes: Object.fromEntries(
-      (["bug", "feature", "idea", "research", "report", "untyped"] as WorkType[]).map((t) => [
-        t,
-        { axis: axisFor(t), question: groupingQuestion(t) },
-      ]),
+      (["bug", "feature", "idea", "research", "symptom", "report", "untyped"] as WorkType[]).map(
+        (t) => [
+          t,
+          {
+            axis: axisFor(t),
+            question: groupingQuestion(t),
+            // symptom 是唯一带**判决义务**的类型：闭合词表要在页面上看得见，
+            // 否则这条设计只活在代码注释里，而人看到的还是一堆没结论的条目。
+            ...(t === "symptom" ? { verdicts: SYMPTOM_VERDICTS } : {}),
+          },
+        ],
+      ),
     ),
     epics: [...liveEpicSurface].map(([id, es]) => ({
       id,

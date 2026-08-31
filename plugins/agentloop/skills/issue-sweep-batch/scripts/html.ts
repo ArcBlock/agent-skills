@@ -24,6 +24,8 @@ export interface HtmlItem {
   lanes: string[];
   files: string[];
   surfaceState: "measured" | "unproven" | "code-located";
+  /** 年龄桶（服务端算好，前端只做字符串相等）。null = 源未提供 timeline，未采集。 */
+  ageBucket?: string | null;
   reasons: string[];
   epic: number | null;
   url: string;
@@ -48,6 +50,8 @@ export interface OverviewSeries {
   opened: number[];
   closed: number[];
   stock: number[];
+  /** 按类型分解 —— 逐桶各层之和恒等于上面的总量（stats.ts 保证，测试钉住）。 */
+  byType?: Record<string, { opened: number[]; closed: number[]; stock: number[] }>;
 }
 
 export interface Overview {
@@ -89,6 +93,8 @@ export interface Model {
   health?: Health;
   aging?: Record<string, number>;
   typing?: Typing;
+  /** 年龄档的顺序 —— 来自 health.ts 的 AGE_SCALE，前端不另写一份 */
+  ageScale?: string[];
   /** 每种类型自己的分类轴与聚簇判据 —— 点类型卡时展示 */
   axes?: Record<string, { axis: string | null; question: string }>;
   generatedAt: string;
@@ -105,9 +111,17 @@ export interface Model {
 
 const CSS = `
 :root{--bg:#0f1115;--panel:#171a21;--line:#262b36;--fg:#e6e9ef;--dim:#8b93a7;
---ok:#3fb950;--warn:#d29922;--bad:#f85149;--accent:#58a6ff;--chip:#1f2430}
+--ok:#3fb950;--warn:#d29922;--bad:#f85149;--accent:#58a6ff;--chip:#1f2430;
+/* 类型色板 —— 一个颜色只表示一件事：hue = 类型。年龄的严重度走另一套（见 --a*）。 */
+--t-bug:#f85149;--t-symptom:#f0883e;--t-feature:#58a6ff;--t-research:#a371f7;
+--t-idea:#3fb950;--t-report:#2dd4bf;--t-untyped:#7d8590;--t-other:#6e7681;
+/* 年龄严重度 —— 新鲜到陈旧的单调爬升，与类型色板互不冒充 */
+--a0:#6e7681;--a1:#8b949e;--a2:#58a6ff;--a3:#d29922;--a4:#f0883e;--a5:#f85149;--a6:#b62324}
 @media(prefers-color-scheme:light){:root{--bg:#f6f7f9;--panel:#fff;--line:#e2e5ea;
---fg:#1c2128;--dim:#656d76;--chip:#eef1f5}}
+--fg:#1c2128;--dim:#656d76;--chip:#eef1f5;
+--t-bug:#cf222e;--t-symptom:#bc4c00;--t-feature:#0969da;--t-research:#8250df;
+--t-idea:#1a7f37;--t-report:#0f766e;--t-untyped:#6e7781;--t-other:#57606a;
+--a0:#8c959f;--a1:#6e7781;--a2:#0969da;--a3:#9a6700;--a4:#bc4c00;--a5:#cf222e;--a6:#82071e}}
 *{box-sizing:border-box}
 body{margin:0;font:13px/1.55 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif;
 background:var(--bg);color:var(--fg)}
@@ -173,9 +187,24 @@ border-radius:20px;padding:2px 12px}
 .vex{margin:8px 0 0;padding-left:20px;font-size:12px;opacity:.88}
 .vex li{margin:3px 0}
 .ages{display:flex;gap:18px;align-items:flex-end;padding:8px 4px 0}
-.agecol{text-align:center}
-.agebar{width:52px;background:var(--accent);border-radius:4px 4px 0 0}
-.agebar.old{background:var(--warn)}
+.agecol{text-align:center;cursor:pointer;padding:4px 2px;border-radius:6px;min-width:56px}
+/* 空档：没有柱子、数字压到最淡、不可点 —— 一根 4px 的残柱会让人以为那里还有东西。 */
+.agecol.zero{cursor:default;opacity:.45}
+.agecol.zero:hover{background:none}
+.agecol.zero .agev{font-weight:400;color:var(--dim)}
+.tchip i,.legend2 i,.stat .swatch{display:inline-block;width:9px;height:9px;border-radius:2px;
+margin-right:5px;vertical-align:baseline}
+.stat{border-top:3px solid var(--t-other)}
+.agecol:hover{background:var(--chip)}
+.agecol.on{background:var(--chip);outline:1px solid var(--accent)}
+.agecol.on .agebar{filter:brightness(1.35) saturate(1.2)}
+.recon{margin:2px 0 12px;padding:7px 10px;background:var(--chip);border-radius:6px;font-size:12px}
+.legend2 .lg{cursor:pointer;padding:1px 6px;border-radius:4px}
+.legend2 .lg:hover{background:var(--chip)}
+.fnote{margin-top:8px;font-size:12px;color:var(--dim)}
+.clr{color:var(--accent);cursor:pointer;text-decoration:underline}
+.agebar{width:44px;background:var(--accent);border-radius:4px 4px 0 0}
+
 .agev{font-size:14px;font-weight:600;margin-top:4px}
 .agek{font-size:11px;color:var(--dim)}
 .sev{border-radius:9px;padding:12px 16px;margin-bottom:14px;font-size:13px;
@@ -202,6 +231,9 @@ white-space:pre-wrap;max-height:260px;overflow:auto;margin-top:8px}
 cursor:pointer;font-size:12px;border:1px solid transparent}
 .tchip.on{background:var(--accent);color:#fff;font-weight:600}
 .tchip:hover{border-color:var(--accent)}
+.verdicts{margin-top:8px;padding:8px 10px;border-left:3px solid #b58900;background:rgba(181,131,9,.08);border-radius:0 4px 4px 0;font-size:12px;line-height:1.7}
+.verdicts>div{margin:2px 0}
+.verdicts code{font-weight:600}
 .axis{border-left:3px solid var(--accent);padding:8px 12px;background:var(--chip);
 border-radius:0 6px 6px 0;font-size:12px;margin-bottom:14px}
 .axis .dim{color:var(--dim)}
@@ -233,7 +265,7 @@ border-radius:6px;padding:5px 10px;font-size:12px;width:220px}
 
 const JS = String.raw`
 const M = window.__MODEL__;
-let view = "overview", sel = null, q = "", gran = "day", ftype = null;
+let view = "overview", sel = null, q = "", gran = "day", ftype = null, fage = null;
 const byId = new Map(M.items.map(i => [i.id, i]));
 const epicById = new Map(M.epics.map(e => [e.id, e]));
 const ov = M.overlaps;
@@ -248,6 +280,7 @@ function card(i) {
 }
 function match(i) {
   if (ftype && i.type !== ftype) return false;
+  if (fage && i.ageBucket !== fage) return false;
   if (!q) return true;
   const s = q.toLowerCase();
   return String(i.id).includes(s) || i.title.toLowerCase().includes(s) ||
@@ -255,11 +288,13 @@ function match(i) {
 }
 
 function typeBar() {
-  const order = ['bug','feature','idea','research','report','untyped'];
+  const order = ['bug','feature','idea','research','symptom','report','untyped'];
   const counts = {};
   for (const i of M.items) counts[i.type] = (counts[i.type] || 0) + 1;
   const chip = (t, l) =>
-    '<span class="tchip' + (ftype === t ? ' on' : '') + '" data-ftype="' + (t === null ? '' : t) + '">' +
+    '<span class="tchip' + (ftype === t ? ' on' : '') + '" data-ftype="' + (t === null ? '' : t) + '"' +
+    (t === null ? '' : ' style="border-color:' + tcolor(t) + '"') + '>' +
+    (t === null ? '' : swatch(t)) +
     l + (t === null ? ' ' + M.items.length : ' ' + (counts[t] || 0)) + '</span>';
   let h = '<div class="tbar">' + chip(null, '全部') + order.map(t => chip(t, t)).join('') + '</div>';
   if (ftype) {
@@ -275,7 +310,13 @@ function typeBar() {
     const a = M.axes[ftype];
     h += '<div class="axis"><b>' + esc(ftype) + '</b> 的分类轴：<code>' +
       esc(a.axis || '无轴 —— 必须先定类型') + '</code>' +
-      (a.question ? '<br><span class="dim">聚簇判据：' + esc(a.question) + '</span>' : '') + '</div>';
+      (a.question ? '<br><span class="dim">聚簇判据：' + esc(a.question) + '</span>' : '') +
+      (a.verdicts
+        ? '<div class="verdicts"><b>判决（闭合词表 —— 必须终结）</b>' +
+          Object.keys(a.verdicts).map(k =>
+            '<div><code>' + esc(k) + '</code> ' + esc(a.verdicts[k]) + '</div>').join('') +
+          '<span class="dim">开着且超期 = 判决还没做出。这是 undiagnosed-symptom detector 的前提。</span></div>'
+        : '') + '</div>';
   }
   return h;
 }
@@ -302,7 +343,7 @@ function renderTyping() {
       ' 条；选好类型后点底部导出命令</span></div>';
     h += '<table class="dt"><tr><th>覆盖</th><th>共享特征</th><th>类型</th><th>条目</th></tr>';
     for (const [n, g] of t.groups.entries()) {
-      const opts = ['', 'bug','feature','idea','research','report']
+      const opts = ['', 'bug','feature','idea','research','symptom','report']
         .map(o => '<option value="' + o + '"' + (o === g.hint ? ' selected' : '') + '>' +
           (o || '— 请选 —') + '</option>').join('');
       const hom = Math.round((g.homogeneity ?? 0) * 100);
@@ -335,7 +376,10 @@ function renderTyping() {
 
 function renderGlobal() {
   const items = M.items.filter(match);
-  const head = typeBar() + legend();
+  // 柱子按**当前类型**重算：选 bug 就看 bug 自己的年龄分布，再点 >14d 拿到最老的那些。
+  const inType = M.items.filter(i => !ftype || i.type === ftype);
+  const head = typeBar() +
+    agingRow(inType, (ftype ? ftype : '全部类型') + ' · ' + inType.length + ' 条') + legend();
   if (!items.length) return head + '<div class="empty">没有匹配项</div>';
   const lanes = new Map();
   for (const i of items) {
@@ -343,7 +387,15 @@ function renderGlobal() {
     for (const k of ks) lanes.set(k, [...(lanes.get(k) || []), i]);
   }
   const rows = [...lanes].sort((a, b) => b[1].length - a[1].length);
-  return head + rows.map(([lane, is]) =>
+  // 一条 issue 碰几个路径面就在几个车道里各出现一次，所以**卡片数 > 条数**。
+  // 不写出来的话，点年龄柱进来会看到「柱子说 101、下面铺了 172 张卡」，
+  // 而人只会以为筛选器坏了。两个数都给，并说清它们为什么不同。
+  const cardCount = rows.reduce((n, [, is]) => n + is.length, 0);
+  const recon = '<div class="recon"><b>' + items.length + '</b> 条工作项' +
+    (fage ? '（年龄 ' + esc(fage) + '）' : '') +
+    ' · 铺成 <b>' + cardCount + '</b> 张卡片，分布在 ' + rows.length + ' 个路径面 —— ' +
+    '<span class="dim">同一条碰几个面就出现几次，这不是重复</span></div>';
+  return head + recon + rows.map(([lane, is]) =>
     '<div class="lane"><h3>' + esc(lane) + ' <span class="badge">' + is.length + '</span></h3>' +
     '<div class="grid">' + is.map(card).join('') + '</div></div>').join('');
 }
@@ -407,36 +459,78 @@ function healthBanner() {
       : '') + '</div>';
 }
 
-function agingRow() {
-  const a = M.aging;
-  if (!a) return '';
-  const order = ['<1d','1-3d','3-7d','7-14d','>14d'];
-  const max = Math.max(1, ...order.map(k => a[k] || 0));
+// 档序来自 health.ts 的 AGE_SCALE（经模型下发），前端不另写一份——两份清单会漂移。
+const TYPE_ORDER = ['bug','symptom','feature','research','idea','report','untyped'];
+const KNOWN_T = new Set(TYPE_ORDER);
+// hue = 类型。一个颜色只表示一件事：年龄的严重度走 --a0..--a6，不与这套互冒充。
+const tcolor = t => 'var(--t-' + (KNOWN_T.has(t) ? t : 'other') + ')';
+// 图上要堆的层：已知类型按固定顺序，未知类型追加在后面（**不丢**，否则堆起来矮一截）。
+const stackTypes = s => {
+  const present = s && s.byType ? Object.keys(s.byType) : [];
+  return TYPE_ORDER.filter(t => present.includes(t))
+    .concat(present.filter(t => !KNOWN_T.has(t)).sort());
+};
+const swatch = t => '<i style="background:' + tcolor(t) + '"></i>';
+const AGE_ORDER = M.ageScale || ['<1d','1-3d','3-7d','7-14d','>14d'];
+
+/**
+ * 年龄柱 —— 可点。点一个桶就把下面的列表筛成那一批。
+ *
+ * 柱子的数**只能**从 items 数出来，绝不能读服务端的 M.aging：后者统计的是全部
+ * open（含 18 条 epic 自身），而列表里没有 epic —— 用它画柱子会得到「柱子说 108、
+ * 点开给出 101」，而没有人会去数。桶的归属也不在这里重算，服务端 ageBucketOf
+ * 已经算好写进每条 item（health.ts）。
+ *
+ * scope 说明这批是谁，写在标题上：不写清楚的话，全局页按 type 筛过之后
+ * 柱子会「莫名其妙变矮」，看起来像页面坏了。
+ */
+function agingRow(items, scope) {
+  const counted = items.filter(i => i.ageBucket);
+  if (!counted.length) {
+    return '<div class="chartbox"><div class="chead"><b>年龄分布</b></div>' +
+      '<div class="note">未采集 —— 本源不提供 timeline，年龄无从算起。' +
+      '不画一张全在 &lt;1d 的图冒充它。</div></div>';
+  }
+  const c = {};
+  for (const i of counted) c[i.ageBucket] = (c[i.ageBucket] || 0) + 1;
+  const max = Math.max(1, ...AGE_ORDER.map(k => c[k] || 0));
   return '<div class="chartbox"><div class="chead"><b>年龄分布</b>' +
-    '<span class="dim">总量不重要，年龄重要：>7d 持续变厚 = 工厂开始遗忘工作</span></div>' +
-    '<div class="ages">' + order.map(k => {
-      const v = a[k] || 0, old = k === '7-14d' || k === '>14d';
-      return '<div class="agecol"><div class="agebar' + (old ? ' old' : '') +
-        '" style="height:' + Math.round(v / max * 70 + 4) + 'px"></div>' +
+    '<span class="dim">' + esc(scope) + ' · 点柱子筛出那一批 —— ' +
+    '总量不重要，年龄重要：&gt;7d 持续变厚 = 工厂开始遗忘工作</span></div>' +
+    '<div class="ages">' + AGE_ORDER.map((k, idx) => {
+      const v = c[k] || 0;
+      // 空档不给柱子、不可点：一根 4px 的残柱会让人以为那里还有东西。
+      // 数字 0 仍然写出来 —— 「数出来是 0」与「这里没有档」必须不同色。
+      if (!v) return '<div class="agecol zero" data-empty="1"><div class="agebar" ' +
+        'style="height:0;background:none"></div>' +
+        '<div class="agev">0</div><div class="agek">' + k + '</div></div>';
+      return '<div class="agecol' + (fage === k ? ' on' : '') + '" data-age="' + k + '">' +
+        '<div class="agebar" style="height:' + Math.round(v / max * 70 + 4) + 'px;' +
+        'background:var(--a' + Math.min(idx, 6) + ')"></div>' +
         '<div class="agev">' + v + '</div><div class="agek">' + k + '</div></div>';
-    }).join('') + '</div></div>';
+    }).join('') + '</div>' +
+    (fage ? '<div class="fnote">已筛 <b>' + esc(fage) + '</b> · ' +
+      (c[fage] || 0) + ' 条 —— <span class="clr" data-age="' + esc(fage) + '">再点一次取消</span></div>' : '') +
+    '</div>';
 }
 
 function renderOverview() {
   const o = M.overview;
   if (!o) return '<div class="empty">本轮未采集概览数据（加 --stats 重跑）。</div>';
-  const order = ['bug','feature','idea','research','report','untyped'];
+  const order = ['bug','feature','idea','research','symptom','report','untyped'];
   const cards = ['<div class="stat big"><div class="k">全部 open</div><div class="v">' + o.total + '</div></div>']
     .concat(order.map(t => {
       const c = o.byType[t] || {open:0, closed:0};
-      return '<div class="stat" data-type="' + t + '"><div class="k">' + t + '</div>' +
+      return '<div class="stat" data-type="' + t + '" style="border-top-color:' + tcolor(t) + '">' +
+        '<div class="k">' + swatch(t) + t + '</div>' +
         '<div class="v">' + c.open + '</div>' +
         '<div class="sub">已关 ' + c.closed + '</div></div>';
     })).join('');
   const s2 = o.series[gran];
   const gtabs = [['hour','小时'],['day','天'],['week','周'],['month','30 天']]
     .map(([k,l]) => '<span class="gtab' + (gran===k?' on':'') + '" data-g="' + k + '">' + l + '</span>').join('');
-  return healthBanner() + '<div class="stats">' + cards + '</div>' + agingRow() +
+  return healthBanner() + '<div class="stats">' + cards + '</div>' +
+    agingRow(M.items, M.items.length + ' 条工作项（不含 ' + (M.totals.all - M.items.length) + ' 条 epic 自身 —— 容器不是工作项）') +
     (o.unknownTypes.length ? '<div class="note">未归入已知类型：' + o.unknownTypes.map(esc).join(', ') + '</div>' : '') +
     '<div class="chartbox"><div class="chead"><b>流量 · 开 vs 关</b>' +
     '<span class="dim">进货比出货快，存量就涨——这是「修了这么多为什么总数不降」的直接答案</span>' +
@@ -447,36 +541,92 @@ function renderOverview() {
     '<div class="note">' + esc(o.windowNote) + '</div>';
 }
 
+/**
+ * 流量 —— 每桶两根柱（开 / 关），**各自按类型堆叠**。
+ *
+ * 一根「全部」的柱子回答不了真正的问题：进的是什么、出的是什么。实测 arc 的
+ * 存量主体是 feature 而不是 bug，而聚合柱把这件事完全藏住了。
+ *
+ * 堆叠的高度恒等于总量——每个出现过的类型都自成一层（含未知类型），
+ * 这条由 stats.ts 保证、stats.test.ts 钉住。少一层就是「堆起来比总数矮一截」，
+ * 而没有人会去加。
+ */
 function bars(s) {
+  const ts = stackTypes(s);
   const max = Math.max(1, ...s.opened, ...s.closed);
-  const W = 1000, H = 190, n = s.labels.length, bw = W / n;
+  const W = 1000, H = 200, n = s.labels.length, bw = W / n, PLOT = H - 46;
   let g = '';
+  const stack = (x, w, key, i) => {
+    let y = H - 20, out = '';
+    for (const t of ts) {
+      const v = s.byType[t][key][i];
+      if (!v) continue;
+      const h = (v / max) * PLOT;
+      y -= h;
+      out += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+        '" fill="' + tcolor(t) + '" opacity="' + (key === 'closed' ? '.55' : '.95') + '">' +
+        '<title>' + s.labels[i] + ' · ' + t + ' · ' + (key === 'opened' ? '开' : '关') + ' ' + v +
+        '</title></rect>';
+    }
+    return out;
+  };
   for (let i = 0; i < n; i++) {
-    const ho = (s.opened[i] / max) * (H - 46), hc = (s.closed[i] / max) * (H - 46);
     const x = i * bw, net = s.opened[i] - s.closed[i];
-    g += '<rect x="' + (x + bw*0.12) + '" y="' + (H - 20 - ho) + '" width="' + bw*0.34 + '" height="' + ho + '" fill="#f85149" opacity=".85"><title>' + s.labels[i] + ' 开 ' + s.opened[i] + '</title></rect>';
-    g += '<rect x="' + (x + bw*0.52) + '" y="' + (H - 20 - hc) + '" width="' + bw*0.34 + '" height="' + hc + '" fill="#3fb950" opacity=".85"><title>' + s.labels[i] + ' 关 ' + s.closed[i] + '</title></rect>';
+    if (s.byType) {
+      g += stack(x + bw * 0.12, bw * 0.34, 'opened', i);
+      g += stack(x + bw * 0.52, bw * 0.34, 'closed', i);
+    } else {
+      const ho = (s.opened[i] / max) * PLOT, hc = (s.closed[i] / max) * PLOT;
+      g += '<rect x="' + (x + bw*0.12) + '" y="' + (H - 20 - ho) + '" width="' + bw*0.34 + '" height="' + ho + '" fill="var(--a5)"/>';
+      g += '<rect x="' + (x + bw*0.52) + '" y="' + (H - 20 - hc) + '" width="' + bw*0.34 + '" height="' + hc + '" fill="var(--a2)"/>';
+    }
     if (n <= 32) g += '<text x="' + (x + bw/2) + '" y="' + (H - 6) + '" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">' + s.labels[i] + '</text>';
-    if (net !== 0 && n <= 32) g += '<text x="' + (x + bw/2) + '" y="12" font-size="9" text-anchor="middle" fill="' + (net>0?'#f85149':'#3fb950') + '">' + (net>0?'+':'') + net + '</text>';
+    // 净值用箭头而不是红/绿：红已经是 bug 的颜色，再拿它表示「涨」就有两个意思。
+    if (net !== 0 && n <= 32) g += '<text x="' + (x + bw/2) + '" y="12" font-size="9" text-anchor="middle" fill="currentColor" opacity="' + (net > 0 ? '.9' : '.45') + '">' + (net>0?'▲+':'▼') + net + '</text>';
   }
+  const tot = s.opened.reduce((a,b)=>a+b,0), totc = s.closed.reduce((a,b)=>a+b,0);
   return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' + g + '</svg>' +
-    '<div class="legend2"><span><i style="background:#f85149"></i>开</span><span><i style="background:#3fb950"></i>关</span>' +
-    '<span class="dim">柱顶数字 = 净值（红 = 存量在涨）</span></div>';
+    '<div class="legend2">' + (s.byType ? ts.map(t =>
+      '<span class="lg" data-type="' + t + '">' + swatch(t) + t + '</span>').join('') : '') +
+    '<span class="dim">左柱 = 开（实），右柱 = 关（淡）· 窗口内共 开 ' + tot + ' / 关 ' + totc +
+    ' / 净 ' + (tot-totc>0?'+':'') + (tot-totc) + ' · 柱顶 ▲ = 当桶净增</span></div>';
 }
 
+/**
+ * 存量 —— **按类型堆叠的面积**，不是一条总线。
+ *
+ * 「总数为什么不降」这个问题，一条总线只能说「没降」；分层才能说出是哪一层在涨。
+ */
 function line(s) {
-  const max = Math.max(1, ...s.stock), min = Math.min(...s.stock);
-  const W = 1000, H = 150, n = s.stock.length;
-  const x = i => (i / Math.max(1, n - 1)) * (W - 20) + 10;
-  const y = v => H - 22 - ((v - min) / Math.max(1, max - min)) * (H - 42);
-  const pts = s.stock.map((v, i) => x(i) + ',' + y(v)).join(' ');
-  let dots = '';
-  for (let i = 0; i < n; i++)
-    dots += '<circle cx="' + x(i) + '" cy="' + y(s.stock[i]) + '" r="2.5" fill="#58a6ff"><title>' + s.labels[i] + ' 存量 ' + s.stock[i] + '</title></circle>';
-  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' +
-    '<polyline points="' + pts + '" fill="none" stroke="#58a6ff" stroke-width="2"/>' + dots +
-    '<text x="10" y="12" font-size="10" fill="currentColor" opacity=".5">最高 ' + max + '</text>' +
-    '<text x="10" y="' + (H - 6) + '" font-size="10" fill="currentColor" opacity=".5">最低 ' + min + '</text></svg>';
+  const ts = stackTypes(s);
+  const max = Math.max(1, ...s.stock);
+  const W = 1000, H = 170, n = s.stock.length, PLOT = H - 26;
+  const X = i => n === 1 ? 0 : (i / (n - 1)) * W;
+  const Y = v => H - 14 - (v / max) * PLOT;
+  let g = '';
+  if (s.byType) {
+    // 自底向上累加，每层画成一条带 —— 顶边恒等于总存量。
+    const acc = new Array(n).fill(0);
+    for (const t of ts) {
+      const lo = acc.slice();
+      for (let i = 0; i < n; i++) acc[i] += s.byType[t].stock[i];
+      const up = acc.map((v, i) => X(i) + ',' + Y(v)).join(' ');
+      const dn = lo.map((v, i) => X(i) + ',' + Y(v)).reverse().join(' ');
+      g += '<polygon points="' + up + ' ' + dn + '" fill="' + tcolor(t) + '" opacity=".75">' +
+        '<title>' + t + '</title></polygon>';
+    }
+  } else {
+    g += '<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="' +
+      s.stock.map((v, i) => X(i) + ',' + Y(v)).join(' ') + '"/>';
+  }
+  const last = s.stock[s.stock.length - 1];
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' + g +
+    '<text x="6" y="12" font-size="10" fill="currentColor" opacity=".55">峰值 ' + max + '</text>' +
+    '<text x="' + (W - 6) + '" y="12" font-size="10" text-anchor="end" fill="currentColor" opacity=".55">当前 ' + last + '</text>' +
+    '</svg>' +
+    '<div class="legend2">' + (s.byType ? ts.map(t =>
+      '<span class="lg" data-type="' + t + '">' + swatch(t) + t + '</span>').join('') : '') +
+    '<span class="dim">堆叠面积，顶边 = 总存量 —— 一条总线只能说「没降」，分层才说得出是哪一层在涨</span></div>';
 }
 
 function section(t, b) { return '<div class="epic"><h3>' + esc(t) + '</h3>' + b + '</div>'; }
@@ -516,9 +666,15 @@ function render() {
 }
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-id],[data-epic],[data-trace],[data-type],[data-ftype],.tab,.gtab');
+  const t = e.target.closest('[data-id],[data-epic],[data-trace],[data-type],[data-ftype],[data-age],.tab,.gtab');
   if (!t) return;
   if (t.classList.contains('gtab')) { gran = t.dataset.g; render(); return; }
+  if (t.dataset.age) {
+    // 再点一次取消 —— 一个筛不掉的筛选器会把人困在一个子集里而不自知。
+    e.preventDefault();
+    fage = fage === t.dataset.age ? null : t.dataset.age;
+    view = 'global'; render(); return;
+  }
   if (t.dataset.type) { ftype = t.dataset.type; view = 'global'; q = ''; render(); return; }
   if (t.dataset.ftype !== undefined) {
     e.preventDefault(); ftype = t.dataset.ftype || null; render(); return;

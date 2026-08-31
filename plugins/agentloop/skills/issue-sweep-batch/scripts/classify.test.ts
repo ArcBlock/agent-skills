@@ -5,7 +5,10 @@ import {
   groupingQuestion,
   type Neighborhood,
   revalidationReasons,
+  SYMPTOM_VERDICTS,
+  type SymptomVerdict,
   typeOf,
+  VERDICT_KEEPS_OPEN,
 } from "./classify";
 
 describe("typeOf —— 从 label 判类型", () => {
@@ -146,5 +149,54 @@ describe("revalidationReasons —— 分类什么时候需要重做", () => {
     // 若 revalidationReasons 退化成总是返回非空，增量就没了 —— 本条钉住那个方向。
     const r = revalidationReasons(rec, "fp-old", quiet, 14, now);
     expect(r.length).toBe(0);
+  });
+});
+
+describe("★ symptom —— 未诊断的观察既不是缺陷也不是报告", () => {
+  // 走查报出的单条失败意味着「出现了预期外的东西」，但它是不是缺陷、修复方向在哪，
+  // 都还没有答案。塞进 bug 会让「已确认缺陷」与「待定项」同色，而 bug 的轴
+  // （defectLayer = 能否被同一个修复方向覆盖）在方向未知时根本没法赋。
+  // 塞进 report 则让「诊断完发现不是缺陷」与「根本没人看」同色。
+  test("test-sweep-failure / nightly-test-failure → symptom", () => {
+    expect(typeOf(["test-sweep-failure"])).toBe("symptom");
+    expect(typeOf(["nightly-test-failure"])).toBe("symptom");
+    expect(typeOf(["P2", "test-sweep-failure"])).toBe("symptom");
+  });
+
+  test("★ 判决一旦做出就离开本桶：同时挂 bug 时按 bug", () => {
+    // symptom 的产物是一个判决。人（或 agent）诊断完加上 bug label，
+    // 就是这条判决本身——此时它是缺陷，不再是待诊断观察。
+    expect(typeOf(["test-sweep-failure", "bug"])).toBe("bug");
+  });
+
+  test("★ 运行汇总优先于单条失败：同时挂 report label 时按 report", () => {
+    // 「检测到 N 处失败（timestamp）」是一次运行的汇总，不是一条症状。
+    expect(typeOf(["test-sweep-failure", "test-sweep-report"])).toBe("report");
+    expect(typeOf(["test-sweep-failure", "nightly-test-report"])).toBe("report");
+  });
+
+  test("symptom 与 research 同轴（都是待答问题）", () => {
+    expect(axisFor("symptom")).toBe("openQuestion");
+  });
+
+  test("★ 同轴不等于同问题：symptom 的聚簇问题必须与 research 不同", () => {
+    // 用同一句话套两个类型就等于没有分它们。symptom 问的是「同一次诊断」，
+    // research 问的是「同一次调查」——前者必须终结成判决，后者产出知识。
+    expect(groupingQuestion("symptom")).not.toBe("");
+    expect(groupingQuestion("symptom")).not.toBe(groupingQuestion("research"));
+    expect(groupingQuestion("symptom")).toContain("诊断");
+  });
+
+  test("★ 判决是闭合词表，且只有 bug 一种是「改类型继续开着」", () => {
+    // 这条钉住的是 undiagnosed-symptom detector 的前提：
+    // 「open 且超期 = 判决未做出」只有在其余判决**一律关闭**时才成立。
+    expect(Object.keys(SYMPTOM_VERDICTS).sort()).toEqual(
+      ["bug", "env", "normal", "stale", "test-defect"].sort(),
+    );
+    expect(VERDICT_KEEPS_OPEN).toEqual(["bug"]);
+    for (const v of Object.keys(SYMPTOM_VERDICTS) as SymptomVerdict[]) {
+      if (v === "bug") continue;
+      expect(VERDICT_KEEPS_OPEN).not.toContain(v);
+    }
   });
 });

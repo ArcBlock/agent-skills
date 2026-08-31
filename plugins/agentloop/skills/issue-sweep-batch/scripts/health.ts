@@ -108,18 +108,58 @@ export function netToCumulative(net: number[]): number[] {
   return out;
 }
 
-export const AGE_BUCKETS = ["<1d", "1-3d", "3-7d", "7-14d", ">14d"] as const;
-export type AgeBucket = (typeof AGE_BUCKETS)[number];
+/**
+ * 年龄刻度 —— **唯一一张表**，别处（桶名、归属、陈货门槛、页面上的顺序）都从它派生。
+ *
+ * 加一档时最容易漏的是陈货判据：detector 里手写 `ages["7-14d"] + ages[">14d"]` 的话，
+ * 新加的 `30-90d` / `>90d` 会**悄悄不算进陈货**，于是「陈货变少了」与「新档没接线」
+ * 完全同色。所以 `STALE_BUCKETS` 也从这张表算，不手写。
+ *
+ * 为什么切到 30 / 90：14 天以上曾经是一个桶，而 arc 上它一个人就占 open 的 40%——
+ * 一个装了 40% 的桶不区分「两周」和「半年」，等于没有分档。
+ */
+export const AGE_SCALE = [
+  { key: "<1d", from: 0 },
+  { key: "1-3d", from: 1 },
+  { key: "3-7d", from: 3 },
+  { key: "7-14d", from: 7 },
+  { key: "14-30d", from: 14 },
+  { key: "30-90d", from: 30 },
+  { key: ">90d", from: 90 },
+] as const;
+
+export const AGE_BUCKETS = AGE_SCALE.map((x) => x.key) as readonly AgeBucket[];
+export type AgeBucket = (typeof AGE_SCALE)[number]["key"];
+
+/** 超过这个天数算「陈货」。档位边界必须与它对齐，否则这条线会落在某一档中间。 */
+export const STALE_FROM_DAYS = 7;
+
+/** 计入陈货的档 —— 从表里算，不手写。 */
+export const STALE_BUCKETS = AGE_SCALE.filter((x) => x.from >= STALE_FROM_DAYS).map(
+  (x) => x.key,
+) as AgeBucket[];
+
+/**
+ * 年龄 → 桶。**唯一实现**（左闭右开）。
+ *
+ * 页面上的年龄柱是可点的：点一个桶就按它过滤 issue 列表。若柱子的计数与过滤器
+ * 各自实现一遍边界，两边会悄悄漂移——**「柱子说 108」与「点开给出 97」在页面上
+ * 完全同色**，而没有人会去数。所以桶的归属只算一次，序列化进每条 item，
+ * 前端只做字符串相等（`html.ts` 的 `ageBucket`）。
+ */
+export function ageBucketOf(days: number): AgeBucket {
+  // 从最老一档往回找：加档时只改 AGE_SCALE，这个函数不用动。
+  for (let i = AGE_SCALE.length - 1; i > 0; i--)
+    if (days >= AGE_SCALE[i].from) return AGE_SCALE[i].key;
+  return AGE_SCALE[0].key;
+}
 
 export function agingBuckets(items: HealthItem[], now: Date): Record<AgeBucket, number> {
   // 预置五个桶：缺桶会让图少一根柱子，而不是显示一根零高的柱子。
   const out = Object.fromEntries(AGE_BUCKETS.map((b) => [b, 0])) as Record<AgeBucket, number>;
   for (const i of items) {
     if (i.closedAt) continue;
-    const d = (now.getTime() - new Date(i.createdAt).getTime()) / 86_400_000;
-    const b: AgeBucket =
-      d < 1 ? "<1d" : d < 3 ? "1-3d" : d < 7 ? "3-7d" : d < 14 ? "7-14d" : ">14d";
-    out[b]++;
+    out[ageBucketOf((now.getTime() - new Date(i.createdAt).getTime()) / 86_400_000)]++;
   }
   return out;
 }
@@ -136,6 +176,21 @@ export const T = {
   untypedBad: 0.25,
   /** >7d 陈货占 open 的比例 */
   staleWarn: 0.4,
+  /**
+   * symptom 的诊断 TTL（天）。
+   *
+   * **标定自实测，不是拍的**：arc 上已判决关闭的 test-sweep-failure，全部在
+   * **0–5 天**内关闭（抽样 20 条，最长 4365 的 5 天，中位约 2 天）。7 天因此落在
+   * 观测分布之外——超过它的那条，是相对这个工厂**自己的**基线的偏离，
+   * 不是一个从外面拍下来的数字。
+   *
+   * 这条也是「基线偏离优于固定阈值」（oversight-discipline）在本 detector 上的落点。
+   */
+  symptomTtlDays: 7,
+  /** 超期几条才叫。1 条不叫——可能只是刚好跨过，那种噪声会把这个 detector 变成常亮。 */
+  symptomOverdueMin: 2,
+  /** 超期占 open symptom 的比例到这个数，说明积压的是判决本身，不是个别条目 */
+  symptomOverdueBadRatio: 0.5,
 } as const;
 
 /* ===== detector ===== */
@@ -167,15 +222,39 @@ export function detectors(i: HealthInput): Signal[] {
     });
   }
 
+  // symptom = 走查报出的、尚未给出判决的观察。判成 bug 会改类型离开本桶，
+  // 其余判决（test-defect / env / stale / normal）一律关闭（classify.ts 的
+  // SYMPTOM_VERDICTS 钉住了这条）。所以「仍然 open 且超期」= 还没有人判决。
+  //
+  // 为什么必须单独有这个 detector：symptom 停在桶里不动时，「诊断完发现不是缺陷」
+  // 与「根本没人看」在存量上完全同色。stale-work 看不出它——那条看的是笼统的年龄，
+  // 一条 20 天的 feature 和一条 8 天未判决的 symptom 在它眼里一样。
+  const openSymptoms = i.items.filter((x) => !x.closedAt && x.type === "symptom");
+  const overdue = openSymptoms.filter(
+    (x) => (i.now.getTime() - new Date(x.createdAt).getTime()) / 86_400_000 > T.symptomTtlDays,
+  );
+  if (overdue.length >= T.symptomOverdueMin) {
+    const r = overdue.length / openSymptoms.length;
+    out.push({
+      id: "undiagnosed-symptom",
+      severity: r >= T.symptomOverdueBadRatio ? "bad" : "warn",
+      title: "症状未判决",
+      evidence: `${overdue.length}/${openSymptoms.length} 条 symptom 开着超过 ${T.symptomTtlDays} 天仍无判决（#${overdue
+        .map((x) => x.id)
+        .join(" #")}）—— 实测诊断周期是 0–5 天，这几条已在基线之外`,
+    });
+  }
+
   const ages = agingBuckets(i.items, i.now);
   const open = Object.values(ages).reduce((a, b) => a + b, 0);
-  const stale = ages["7-14d"] + ages[">14d"];
+  // 从 STALE_BUCKETS 求和，不手写档名——手写的话新加的档会悄悄不计入。
+  const stale = STALE_BUCKETS.reduce((n, b) => n + ages[b], 0);
   if (open > 0 && stale / open >= T.staleWarn) {
     out.push({
       id: "stale-work",
       severity: "warn",
       title: "陈货堆积",
-      evidence: `${stale}/${open}（${((stale / open) * 100).toFixed(0)}%）已开着超过 7 天 —— 总量不重要，年龄重要`,
+      evidence: `${stale}/${open}（${((stale / open) * 100).toFixed(0)}%）已开着超过 ${STALE_FROM_DAYS} 天 —— 总量不重要，年龄重要`,
     });
   }
 

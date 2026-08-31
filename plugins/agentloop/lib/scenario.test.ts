@@ -31,6 +31,7 @@ import {
   capabilityDrift,
   checkFailuresOf,
   classifyLocalCache,
+  dirtyPorcelainFiles,
   observedEnvGaps,
   probeCapabilities,
   provenanceNotice,
@@ -445,6 +446,133 @@ describe("runScenario — .verify cache", () => {
     const { sha, code } = runScenarioIn(dir, true);
     expect(code).toBe(0);
     expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(false);
+  });
+
+  /**
+   * #5669 / taxonomy W1.3 leftover: dirty refusal must name the files. A gate
+   * that only rejects (and never says who is dirty) cannot be told from a gate
+   * that always refuses — accept-path iron law.
+   */
+  function inspectCleanForEvidence(dir: string): { clean: boolean; files: string[] } {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-clean-for-evidence-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "inspect.ts");
+    writeFileSync(
+      script,
+      `import { cleanForEvidence } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const value = cleanForEvidence();
+       console.log(JSON.stringify(value));`,
+    );
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const parsed: unknown = JSON.parse(r.stdout);
+    expect(parsed).toBeTypeOf("object");
+    expect(parsed).not.toBeNull();
+    expect(Array.isArray(parsed)).toBe(false);
+    const record = parsed as { clean?: unknown; files?: unknown };
+    expect(typeof record.clean).toBe("boolean");
+    expect(Array.isArray(record.files)).toBe(true);
+    expect((record.files as unknown[]).every((f) => typeof f === "string")).toBe(true);
+    return { clean: record.clean as boolean, files: record.files as string[] };
+  }
+
+  describe("dirty-refusal names files (#5669)", () => {
+    test("cleanForEvidence returns the dirty file list, not only a boolean", () => {
+      const dir = repo();
+      writeFileSync(join(dir, "named-dirty.txt"), "leak\n");
+      writeFileSync(join(dir, "FACTORY_TASK.md"), "brief\n");
+      mkdirSync(join(dir, ".verify"), { recursive: true });
+      writeFileSync(join(dir, ".verify", "scratch.md"), "runner artifact\n");
+      const value = inspectCleanForEvidence(dir);
+      expect(value.clean).toBe(false);
+      expect(value.files).toContain("named-dirty.txt");
+      expect(value.files.some((f) => f.includes("FACTORY_TASK.md"))).toBe(false);
+      expect(value.files.some((f) => f.startsWith(".verify/"))).toBe(false);
+      expect(value.files.length).toBeGreaterThan(0);
+    });
+
+    test("ACCEPT: a known-dirty tree's refusal names the file", () => {
+      const dir = repo();
+      writeFileSync(join(dir, "named-dirty.txt"), "leak\n");
+      const { sha, code, out } = runScenarioIn(dir, true);
+      expect(code).toBe(0);
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(false);
+      expect(out).toContain("named-dirty.txt");
+      expect(out).toMatch(/is dirty \([^)]*named-dirty\.txt[^)]*\)/);
+    });
+
+    test("REJECT: a clean tree still publishes evidence", () => {
+      // Accept-path iron law: a check that only refuses is unverified. The clean
+      // tree must still write the PASS cache and must not claim it is dirty.
+      const dir = repo();
+      const { sha, code, out } = runScenarioIn(dir, true);
+      expect(code).toBe(0);
+      expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
+      expect(out).not.toMatch(/\bis dirty\b/);
+      const value = inspectCleanForEvidence(dir);
+      expect(value.clean).toBe(true);
+      expect(value.files).toEqual([]);
+    });
+
+    test("REJECT: rename out of .verify/ is dirty and names the destination (#5669 P1)", () => {
+      // Measured false-clean: `R  .verify/tracked.txt -> src/escaped.ts` used to
+      // match startsWith(".verify/") on the SOURCE and publish as if clean.
+      const dir = repo();
+      commitFiles(dir, { ".verify/tracked.txt": "was-verify\n" });
+      mkdirSync(join(dir, "src"), { recursive: true });
+      const moved = spawnSync("git", ["mv", ".verify/tracked.txt", "src/escaped.ts"], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      expect(moved.status).toBe(0);
+      const porcelain = spawnSync("git", ["status", "--porcelain"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).stdout;
+      expect(porcelain).toContain(".verify/tracked.txt -> src/escaped.ts");
+
+      const value = inspectCleanForEvidence(dir);
+      expect(value.clean).toBe(false);
+      expect(value.files).toContain("src/escaped.ts");
+      expect(value.files.length).toBeGreaterThan(0);
+
+      const { sha, code, out } = runScenarioIn(dir, true);
+      expect(code).toBe(0);
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(false);
+      expect(out).toContain("src/escaped.ts");
+      expect(out).toMatch(/is dirty \([^)]*src\/escaped\.ts[^)]*\)/);
+    });
+
+    test("dirtyPorcelainFiles names dest of a rename out of .verify/, not the source", () => {
+      expect(dirtyPorcelainFiles("R  .verify/tracked.txt -> src/escaped.ts")).toEqual([
+        "src/escaped.ts",
+      ]);
+      expect(dirtyPorcelainFiles("C  .verify/tracked.txt -> src/escaped.ts")).toEqual([
+        "src/escaped.ts",
+      ]);
+      expect(dirtyPorcelainFiles("R  .verify/a.txt -> .verify/b.txt")).toEqual([]);
+      expect(dirtyPorcelainFiles("R  src/foo.ts -> .verify/foo.ts")).toEqual(["src/foo.ts"]);
+      expect(dirtyPorcelainFiles("R  f.txt -> g.txt")).toEqual(["g.txt", "f.txt"]);
+      expect(dirtyPorcelainFiles("UU conflict.txt")).toEqual(["conflict.txt"]);
+      expect(dirtyPorcelainFiles("?? .verify/scratch.md")).toEqual([]);
+      expect(dirtyPorcelainFiles("?? FACTORY_TASK.md")).toEqual([]);
+      expect(dirtyPorcelainFiles(" M f.txt")).toEqual(["f.txt"]);
+    });
+
+    test("ACCEPT: a genuine .verify/-only dirty line still does not block publish", () => {
+      const dir = repo();
+      mkdirSync(join(dir, ".verify"), { recursive: true });
+      writeFileSync(join(dir, ".verify", "scratch.md"), "runner artifact\n");
+      const value = inspectCleanForEvidence(dir);
+      expect(value.clean).toBe(true);
+      expect(value.files).toEqual([]);
+      const { sha, code, out } = runScenarioIn(dir, true);
+      expect(code).toBe(0);
+      expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
+      expect(out).not.toMatch(/\bis dirty\b/);
+    });
   });
 
   test("a dirty admission cannot become a reusable PASS by turning clean during checks", () => {

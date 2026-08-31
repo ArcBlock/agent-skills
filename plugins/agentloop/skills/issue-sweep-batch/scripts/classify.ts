@@ -24,7 +24,7 @@
  * 相对 label 的不可比优势。
  */
 
-export type WorkType = "bug" | "feature" | "idea" | "research" | "report" | "untyped";
+export type WorkType = "bug" | "feature" | "idea" | "research" | "symptom" | "report" | "untyped";
 
 /** 每种类型的分类轴。untyped 没有轴——必须先定类型。 */
 export type Axis = "defectLayer" | "capabilityArea" | "openQuestion";
@@ -33,8 +33,13 @@ const TYPE_LABELS: [WorkType, string[]][] = [
   // report 最优先：自动生成的 QA 报告不是「有人开的工作项」，有自己的处理通道。
   // 实测回归——#5625 同时挂 bug + nightly-test-report，若让 bug 赢就会混进分类。
   ["report", ["nightly-test-report", "test-sweep-report"]],
-  // 其次 bug：一条同时挂 bug 和 idea 时按 bug 处理（缺陷的判据更硬）
+  // 其次 bug：一条同时挂 bug 和 idea 时按 bug 处理（缺陷的判据更硬）。
+  // bug 也必须排在 symptom 之前——挂上 bug 就是**判决已做出**，它不再是待诊断观察。
   ["bug", ["bug"]],
+  // symptom：走查/夜测报出的**单条**失败。它说的是「出现了预期外的东西」，
+  // 而不是「这里有一个缺陷」——是不是缺陷、修复方向在哪，都还没有答案。
+  // 详见下面 SYMPTOM_VERDICTS。
+  ["symptom", ["test-sweep-failure", "nightly-test-failure"]],
   ["research", ["research"]],
   ["feature", ["feature", "enhancement"]],
   ["idea", ["idea"]],
@@ -56,6 +61,9 @@ export function axisFor(t: WorkType): Axis | null {
     case "idea":
       return "capabilityArea";
     case "research":
+    // symptom 与 research 同轴：两者都是「待答问题」，因为未诊断的失败**方向未知**，
+    // 按 bug 的 defectLayer 赋层就是编。差别不在轴，在 disposition（见 SYMPTOM_VERDICTS）。
+    case "symptom":
       return "openQuestion";
     // report 与 untyped 都没有轴：前者不是工作项，后者必须先定类型。
     default:
@@ -76,10 +84,40 @@ export function groupingQuestion(t: WorkType): string {
       return "这几条会不会被同一次设计决定一起决定掉？不会就不是同一个能力面。";
     case "research":
       return "这几条会不会被同一次调查一起回答？不会就不是同一个待答问题。";
+    case "symptom":
+      // 同轴**不等于**同问题。research 问的是调查，symptom 问的是诊断——
+      // 后者必须终结成一个判决，前者产出知识。用同一句话套两个类型就等于没有分它们。
+      return "这几条会不会被同一次诊断一起回答？不会就不是同一个待诊断观察。";
     default:
       return "";
   }
 }
+
+/* ===== symptom 的判决 ===== */
+
+/**
+ * 一条 symptom 的产物是一个**判决**，不是知识——它必须终结。
+ *
+ * 为什么需要这张闭合词表：**「诊断完发现不是缺陷」与「根本没人看」在存量上完全同色**，
+ * 除非每一种结局都留下可复核的痕迹。这是 accept-path 铁律在处置面的同构体
+ * （只测 reject 等于没测：一个从不给出「不是缺陷」判决的通道，与一个没人用的通道同色）。
+ *
+ * **只有 `bug` 这一种判决让它继续 open**——它改了类型，离开 symptom 桶，此时才赋
+ * defectLayer 并参与 epic 聚簇。其余一律关闭。`health.ts` 的 `undiagnosed-symptom`
+ * detector 正是靠这条才能把「仍然 open 且超期」读成「还没有人判决」。
+ */
+export const SYMPTOM_VERDICTS = {
+  bug: "确认缺陷 —— 改类型为 bug，此时才赋 defectLayer 并参与 epic 聚簇（唯一继续 open 的判决）",
+  "test-defect": "走查机具 / fixture 自己错了 —— 关闭，修在测试侧",
+  env: "环境或部署态，不是产品缺陷 —— 关闭",
+  stale: "已被别的改动修掉，复现不了 —— 关闭",
+  normal: "是正常态（对应 cost-gate 的 normal-state 一问）—— 关闭",
+} as const;
+
+export type SymptomVerdict = keyof typeof SYMPTOM_VERDICTS;
+
+/** 判决后仍然 open 的唯一一种。其余判决一律以关闭收尾。 */
+export const VERDICT_KEEPS_OPEN: SymptomVerdict[] = ["bug"];
 
 /* ===== 失效判定 ===== */
 

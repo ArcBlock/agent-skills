@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   bucketFlow,
+  bucketFlowByType,
   bucketsFor,
   severityOf,
   shareSeries,
   stockSeries,
+  stockSeriesByType,
   type TimedItem,
   typeTotals,
   untypedShare,
@@ -190,5 +192,56 @@ describe("untyped 是健康信号，不只是一个计数", () => {
     const s = shareSeries([], bucketsFor("day", now), "untyped");
     expect(s.every((x) => x === 0)).toBe(true);
     expect(s.every((x) => Number.isFinite(x))).toBe(true);
+  });
+});
+
+describe("★ 按类型分解的序列 —— 一根「全部」的柱子看不出进的是什么、出的是什么", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const d = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
+  const items = [
+    { id: 1, type: "bug", createdAt: d(1), closedAt: null },
+    { id: 2, type: "bug", createdAt: d(2), closedAt: d(1) },
+    { id: 3, type: "feature", createdAt: d(1), closedAt: null },
+    { id: 4, type: "feature", createdAt: d(3), closedAt: null },
+    { id: 5, type: "idea", createdAt: d(2), closedAt: d(2) },
+    // 未知类型：**不能从堆叠里消失**，否则堆起来的高度小于总量而没人看得出来
+    { id: 6, type: "chore", createdAt: d(1), closedAt: null },
+  ];
+  const b = bucketsFor("day", now);
+
+  test("★ 逐桶：各类型之和必须等于总量（堆叠图的高度不能少一截）", () => {
+    const agg = bucketFlow(items, b);
+    const byType = bucketFlowByType(items, b);
+    for (let i = 0; i < b.length; i++) {
+      let o = 0;
+      let c = 0;
+      for (const t of Object.keys(byType)) {
+        o += byType[t][i].opened;
+        c += byType[t][i].closed;
+      }
+      expect(o).toBe(agg[i].opened);
+      expect(c).toBe(agg[i].closed);
+    }
+  });
+
+  test("★ 未知类型自成一层，不被静默丢弃", () => {
+    expect(Object.keys(bucketFlowByType(items, b))).toContain("chore");
+  });
+
+  test("★ 存量同理：各类型之和 == 总存量", () => {
+    const agg = stockSeries(items, b);
+    const byType = stockSeriesByType(items, b);
+    for (let i = 0; i < b.length; i++) {
+      const sum = Object.keys(byType).reduce((a, t) => a + byType[t][i].open, 0);
+      expect(sum).toBe(agg[i].open);
+    }
+  });
+
+  test("ACCEPT：空输入 → 每个类型都是全零桶而不是空数组", () => {
+    const empty = bucketFlowByType([], b);
+    expect(Object.keys(empty).length).toBe(0);
+    // 有一条就得有一整条全零的桶序列，长度与 buckets 对齐
+    const one = bucketFlowByType([items[0]], b);
+    expect(one.bug.length).toBe(b.length);
   });
 });

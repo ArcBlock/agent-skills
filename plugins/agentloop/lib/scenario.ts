@@ -1961,15 +1961,84 @@ export function runCheckGuarded(c: CheckSpec, ctx: RunContext): CheckResult {
   }
 }
 
-function cleanForEvidence(): boolean {
-  const dirty = run("git status --porcelain")
-    .out.split("\n")
-    .filter(
-      (line) => !line.slice(3).startsWith(".verify/") && !/^\?\? FACTORY_TASK\.md$/.test(line),
-    )
-    .join("\n")
-    .trim();
-  return !dirty;
+/** Porcelain paths that make this checkout ineligible to publish HEAD evidence. */
+export type EvidenceDirtiness = {
+  clean: boolean;
+  files: string[];
+};
+
+const DIRTY_FILE_LIST_LIMIT = 5;
+
+/** Comma-join a dirty-file list for a refusal line. Empty in, empty out. */
+export function formatDirtyFileList(
+  files: readonly string[],
+  limit = DIRTY_FILE_LIST_LIMIT,
+): string {
+  if (files.length === 0) return "";
+  const shown = files.slice(0, limit);
+  return files.length > limit ? `${shown.join(", ")}, …` : shown.join(", ");
+}
+
+function isVerifyPath(path: string): boolean {
+  return path === ".verify" || path.startsWith(".verify/");
+}
+
+function unquotePorcelainPath(path: string): string {
+  if (path.length >= 2 && path.startsWith('"') && path.endsWith('"')) {
+    return path.slice(1, -1).replace(/\\(.)/g, "$1");
+  }
+  return path;
+}
+
+/**
+ * Paths on one porcelain line that make HEAD evidence unpublishable.
+ * Empty = this line is exempt (`.verify/` artifact or untracked FACTORY_TASK.md).
+ *
+ * Rename/copy (`R`/`C`) must inspect BOTH source and destination: a rename
+ * *out of* `.verify/` into the tree is dirty and names the destination.
+ * Matching `slice(3).startsWith(".verify/")` on the raw remainder treats
+ * `R  .verify/tracked.txt -> src/escaped.ts` as clean — same colour as a
+ * real clean tree (#5669 P1).
+ */
+export function dirtyPorcelainFiles(line: string): string[] {
+  if (line.length === 0) return [];
+  if (/^\?\? FACTORY_TASK\.md$/.test(line)) return [];
+  const xy = line.slice(0, 2);
+  const rest = line.length > 3 ? line.slice(3) : "";
+  const renameOrCopy = xy.includes("R") || xy.includes("C");
+  const sep = " -> ";
+  const sepAt = renameOrCopy ? rest.indexOf(sep) : -1;
+  const parsed =
+    sepAt >= 0
+      ? [
+          unquotePorcelainPath(rest.slice(0, sepAt).trim()),
+          unquotePorcelainPath(rest.slice(sepAt + sep.length).trim()),
+        ]
+      : [unquotePorcelainPath(rest.trim())];
+  const dirty = parsed.filter((p) => p.length > 0 && !isVerifyPath(p));
+  if (dirty.length > 0) {
+    // Destination first — that is the path now in the tree.
+    return sepAt >= 0 && dirty.length === 2 ? [dirty[1], dirty[0]] : dirty;
+  }
+  // Fail closed: an R/C line we could not split must not vanish into
+  // `{clean:true, files:[]}` the way the source-prefix filter did.
+  if (renameOrCopy && sepAt < 0) {
+    const fallback = unquotePorcelainPath(rest.trim());
+    return fallback.length > 0 && !isVerifyPath(fallback) ? [fallback] : [];
+  }
+  return [];
+}
+
+/**
+ * Working-tree dirtiness that blocks publishing reusable evidence for HEAD.
+ * `.verify/` and untracked `FACTORY_TASK.md` are exempt (runner artifacts /
+ * factory brief) only when every parsed path is still under `.verify/`.
+ * Returns the file list, not only a boolean — a dirty refusal that cannot
+ * name the files is indistinguishable from a gate that always refuses (#5669).
+ */
+export function cleanForEvidence(): EvidenceDirtiness {
+  const files = run("git status --porcelain").out.split("\n").flatMap(dirtyPorcelainFiles);
+  return { clean: files.length === 0, files };
 }
 
 /**
@@ -2182,7 +2251,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // pre-merge resolves origin/main at execution time, so a sibling merge must
   // create a new verification identity even while the PR head stays unchanged.
   const baseForBroker = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
-  const cleanAtAdmission = cleanForEvidence();
+  const dirtyAtAdmission = cleanForEvidence();
+  const cleanAtAdmission = dirtyAtAdmission.clean;
   const brokerRoot = fullScenario ? sharedRoot() : undefined;
   const brokerCoordination = brokerRoot
     ? sharedDir(brokerRoot, shaForBroker, config.scenario, baseForBroker)
@@ -2270,8 +2340,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     // preserves the established dirty-worktree workflow without reopening the
     // TOCTOU path to a private, concurrent local lease.
     if (!cleanAtAdmission) {
+      const named = formatDirtyFileList(dirtyAtAdmission.files);
       console.error(
-        `ℹ ${config.scenario}@${shaForBroker.slice(0, 9)} is dirty; running under the shared coordination lease without publishing reusable evidence.`,
+        `ℹ ${config.scenario}@${shaForBroker.slice(0, 9)} is dirty (${named}); running under the shared coordination lease without publishing reusable evidence.`,
       );
     }
   } else {
@@ -2444,7 +2515,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // on the one run that needed it. Real loss, arc PR #3062.
   // The runner's own lease/report artifacts live under `.verify/`; they must
   // not make an otherwise clean commit ineligible for a same-SHA PASS cache.
-  const cleanAtCompletion = cleanForEvidence();
+  const cleanAtCompletion = cleanForEvidence().clean;
   if (ok ? cleanAtAdmission && cleanAtCompletion : true) {
     mkdirSync(".verify", { recursive: true });
     // A partial run still lands here — deliberately. It is the diagnostic artifact, and

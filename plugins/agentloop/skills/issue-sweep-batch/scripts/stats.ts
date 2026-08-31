@@ -22,7 +22,15 @@ export interface TimedItem {
   closedAt: string | null;
 }
 
-export const KNOWN_TYPES = ["bug", "feature", "idea", "research", "report", "untyped"] as const;
+export const KNOWN_TYPES = [
+  "bug",
+  "feature",
+  "idea",
+  "research",
+  "symptom",
+  "report",
+  "untyped",
+] as const;
 export type KnownType = (typeof KNOWN_TYPES)[number];
 
 export interface Totals {
@@ -112,6 +120,24 @@ export function bucketFlow(items: TimedItem[], buckets: Bucket[]): FlowPoint[] {
   return out;
 }
 
+/**
+ * 按类型分解的流量。**每个出现过的类型都自成一层**（包括不在 KNOWN_TYPES 里的），
+ * 这样堆叠图的高度恒等于总量——少一层就等于「堆起来比总数矮一截」，而没有人会去加。
+ */
+export function bucketFlowByType(
+  items: TimedItem[],
+  buckets: Bucket[],
+): Record<string, FlowPoint[]> {
+  const out: Record<string, FlowPoint[]> = {};
+  for (const t of new Set(items.map((i) => i.type))) {
+    out[t] = bucketFlow(
+      items.filter((i) => i.type === t),
+      buckets,
+    );
+  }
+  return out;
+}
+
 /* ===== 存量 ===== */
 
 export interface StockPoint {
@@ -133,6 +159,21 @@ export function stockSeries(items: TimedItem[], buckets: Bucket[]): StockPoint[]
     }
     return { label: b.label, open: Math.max(0, n) };
   });
+}
+
+/** 按类型分解的存量。同 bucketFlowByType：逐桶各层之和 == 总存量。 */
+export function stockSeriesByType(
+  items: TimedItem[],
+  buckets: Bucket[],
+): Record<string, StockPoint[]> {
+  const out: Record<string, StockPoint[]> = {};
+  for (const t of new Set(items.map((i) => i.type))) {
+    out[t] = stockSeries(
+      items.filter((i) => i.type === t),
+      buckets,
+    );
+  }
+  return out;
 }
 
 /* ===== untyped 作为健康信号 ===== */

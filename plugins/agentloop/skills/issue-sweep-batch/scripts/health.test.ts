@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AGE_BUCKETS,
+  AGE_SCALE,
+  ageBucketOf,
   agingBuckets,
   assess,
   backlogSlope,
@@ -9,6 +12,9 @@ import {
   type HealthInput,
   MAX_EXPLANATIONS,
   netToCumulative,
+  STALE_BUCKETS,
+  STALE_FROM_DAYS,
+  T,
 } from "./health";
 
 const now = new Date("2026-08-30T12:00:00Z");
@@ -29,6 +35,10 @@ const healthy: HealthInput = {
     // 再关两条更早开的：窗口内 created 4 / closed 4，比值 1
     { id: 5, type: "bug", createdAt: day(10), closedAt: day(2) },
     { id: 6, type: "bug", createdAt: day(11), closedAt: day(3) },
+    // ★ 正控：基线里**必须**有 symptom，否则 undiagnosed-symptom 的 accept 臂是空的——
+    // 「仪器看过了、没事」与「压根没东西可看」同色。这条在 TTL 内，那条已判决关闭。
+    { id: 7, type: "symptom", createdAt: day(2), closedAt: null },
+    { id: 8, type: "symptom", createdAt: day(9), closedAt: day(6) },
   ],
   stock7d: [10, 10, 9, 10, 9, 10, 9],
 };
@@ -64,19 +74,29 @@ describe("flowRatio / backlogSlope", () => {
 describe("agingBuckets —— 总量不重要，年龄重要", () => {
   test("按年龄分桶，只算还开着的", () => {
     const b = agingBuckets(healthy.items, now);
-    expect(b["<1d"] + b["1-3d"] + b["3-7d"] + b["7-14d"] + b[">14d"]).toBe(2);
-    expect(b[">14d"]).toBe(0); // 基线里没有陈货
+    // 3 = id1(1d) + id2(2d) + id7(2d 的 symptom 正控)。其余都已关闭。
+    // 逐档相加而不是写死档名：加档时这条不该需要改。
+    expect(AGE_BUCKETS.reduce((n, k) => n + b[k], 0)).toBe(3);
+    // 基线里没有陈货：所有计入陈货的档都得是 0
+    for (const k of STALE_BUCKETS) expect(b[k]).toBe(0);
   });
 
-  test("★ 空输入返回全零的**五个**桶，不是空对象（缺桶会让图少一根柱子）", () => {
+  test("★ 空输入返回全零的**每一个**桶，不是空对象（缺桶会让图少一根柱子）", () => {
     const b = agingBuckets([], now);
-    expect(Object.keys(b).length).toBe(5);
+    expect(Object.keys(b).length).toBe(AGE_SCALE.length);
     expect(Object.values(b).every((v) => v === 0)).toBe(true);
   });
 
-  test("陈货落进 >14d", () => {
-    const b = agingBuckets([{ id: 1, type: "bug", createdAt: day(30), closedAt: null }], now);
-    expect(b[">14d"]).toBe(1);
+  test("陈货按档落位：30 天 → 30-90d，200 天 → >90d", () => {
+    const b = agingBuckets(
+      [
+        { id: 1, type: "bug", createdAt: day(30), closedAt: null },
+        { id: 2, type: "bug", createdAt: day(200), closedAt: null },
+      ],
+      now,
+    );
+    expect(b["30-90d"]).toBe(1);
+    expect(b[">90d"]).toBe(1);
   });
 });
 
@@ -236,5 +256,177 @@ describe("★ 斜率必须算自无偏输入", () => {
   test("空输入 → 空序列，斜率 0", () => {
     expect(netToCumulative([])).toEqual([]);
     expect(backlogSlope(netToCumulative([]))).toBe(0);
+  });
+});
+
+describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」不许同色", () => {
+  // symptom 的产物是一个**判决**，不是知识。判成 bug 会改类型离开本桶，其余判决
+  // （test-defect / env / stale / normal）一律关闭。所以「仍然 open 且超期」
+  // 就是「还没有人给出判决」——这个推断的前提钉在 classify.test.ts 的闭合词表那条。
+  const sym = (id: number, ageDays: number, closed: number | null = null) => ({
+    id,
+    type: "symptom",
+    createdAt: day(ageDays),
+    closedAt: closed === null ? null : day(closed),
+  });
+
+  test("★ 正控：健康基线里**确实有** symptom，accept 臂才不是空的", () => {
+    // 一个「什么都没看到」的 detector 满足每一条「它没报警」的断言。
+    expect(healthy.items.filter((x) => x.type === "symptom").length).toBeGreaterThan(0);
+    expect(healthy.items.some((x) => x.type === "symptom" && !x.closedAt)).toBe(true);
+  });
+
+  test("★ ACCEPT：symptom 都在 TTL 内 → 不触发", () => {
+    expect(detectors(healthy).map((s) => s.id)).not.toContain("undiagnosed-symptom");
+  });
+
+  test("超期 ≥ 门槛条数 → warn，证据里给得出数字", () => {
+    const i: HealthInput = {
+      ...healthy,
+      // 2 条超期 / 6 条 open symptom = 33%，在 bad 门槛之下：积压的是个别条目，
+      // 不是判决通道本身停了。
+      items: [
+        ...healthy.items,
+        sym(20, T.symptomTtlDays + 1),
+        sym(21, T.symptomTtlDays + 3),
+        sym(22, 1),
+        sym(23, 1),
+        sym(24, 2),
+      ],
+    };
+    const s = detectors(i).find((x) => x.id === "undiagnosed-symptom");
+    expect(s).toBeDefined();
+    expect(s?.severity).toBe("warn");
+    expect(s?.evidence).toContain("2");
+  });
+
+  test("超期占比过半 → bad（叫人）", () => {
+    const i: HealthInput = {
+      ...healthy,
+      // 3 条超期 / 4 条 open symptom（含基线那条新鲜的）= 75%
+      items: [
+        ...healthy.items,
+        sym(20, T.symptomTtlDays + 1),
+        sym(21, T.symptomTtlDays + 2),
+        sym(22, T.symptomTtlDays + 5),
+      ],
+    };
+    const s = detectors(i).find((x) => x.id === "undiagnosed-symptom");
+    expect(s?.severity).toBe("bad");
+  });
+
+  test("★ ACCEPT：只有一条超期不叫人（可能只是刚好跨过）", () => {
+    const i: HealthInput = { ...healthy, items: [...healthy.items, sym(20, T.symptomTtlDays + 1)] };
+    expect(detectors(i).map((s) => s.id)).not.toContain("undiagnosed-symptom");
+  });
+
+  test("★ 已关闭的超期 symptom 不计入 —— 关闭就是判决已做出", () => {
+    const i: HealthInput = {
+      ...healthy,
+      items: [
+        ...healthy.items,
+        sym(20, T.symptomTtlDays + 9, 1),
+        sym(21, T.symptomTtlDays + 8, 1),
+        sym(22, T.symptomTtlDays + 7, 2),
+      ],
+    };
+    expect(detectors(i).map((s) => s.id)).not.toContain("undiagnosed-symptom");
+  });
+
+  test("★ 判别力：它看的是「未判决的 symptom」，不是笼统的年龄", () => {
+    // 同一批陈旧项，类型换成 bug 就不该触发这个 detector（那是 stale-work 的面）。
+    const aged = [sym(20, T.symptomTtlDays + 1), sym(21, T.symptomTtlDays + 3)];
+    const asBug = aged.map((x) => ({ ...x, type: "bug" }));
+    expect(
+      detectors({ ...healthy, items: [...healthy.items, ...aged] }).map((s) => s.id),
+    ).toContain("undiagnosed-symptom");
+    expect(
+      detectors({ ...healthy, items: [...healthy.items, ...asBug] }).map((s) => s.id),
+    ).not.toContain("undiagnosed-symptom");
+  });
+});
+
+describe("★ ageBucketOf —— 柱子的数与点开的那批必须出自同一个函数", () => {
+  // 页面上的年龄柱可以点，点了就按那个桶过滤 issue 列表。如果柱子的计数和过滤器
+  // 各自实现一遍边界，两边会悄悄漂移——**柱子说 108、点开给出 97** 与
+  // 「柱子是对的」在页面上完全同色。所以桶的归属只有这一个实现，
+  // 序列化进每条 item，前端只做字符串相等。
+  test("边界逐个钉死（左闭右开）", () => {
+    expect(ageBucketOf(0)).toBe("<1d");
+    expect(ageBucketOf(0.99)).toBe("<1d");
+    expect(ageBucketOf(1)).toBe("1-3d");
+    expect(ageBucketOf(2.99)).toBe("1-3d");
+    expect(ageBucketOf(3)).toBe("3-7d");
+    expect(ageBucketOf(6.99)).toBe("3-7d");
+    expect(ageBucketOf(7)).toBe("7-14d");
+    expect(ageBucketOf(13.99)).toBe("7-14d");
+    expect(ageBucketOf(14)).toBe("14-30d");
+    expect(ageBucketOf(29.99)).toBe("14-30d");
+    expect(ageBucketOf(30)).toBe("30-90d");
+    expect(ageBucketOf(89.99)).toBe("30-90d");
+    expect(ageBucketOf(90)).toBe(">90d");
+    expect(ageBucketOf(999)).toBe(">90d");
+  });
+
+  test("★ 反漂移：agingBuckets 的计数必须与逐条 ageBucketOf 完全一致", () => {
+    const items = [0.2, 1.5, 4, 8, 20, 6.99, 7.01].map((d, k) => ({
+      id: k,
+      type: "bug",
+      createdAt: day(d),
+      closedAt: null,
+    }));
+    const byChart = agingBuckets(items, now);
+    const byItem: Record<string, number> = {};
+    for (const i of items) {
+      const b = ageBucketOf((now.getTime() - new Date(i.createdAt).getTime()) / 86_400_000);
+      byItem[b] = (byItem[b] ?? 0) + 1;
+    }
+    for (const b of Object.keys(byChart)) expect(byChart[b]).toBe(byItem[b] ?? 0);
+  });
+
+  test("★ 已关闭的不进柱子 —— 点开也不该出现它们", () => {
+    const items = [
+      { id: 1, type: "bug", createdAt: day(20), closedAt: day(1) },
+      { id: 2, type: "bug", createdAt: day(20), closedAt: null },
+    ];
+    expect(agingBuckets(items, now)["14-30d"]).toBe(1);
+  });
+});
+
+describe("★ 年龄刻度 —— 一个表，别处都从它派生", () => {
+  test("AGE_SCALE 的下界严格递增，且第一档从 0 起", () => {
+    expect(AGE_SCALE[0].from).toBe(0);
+    for (let i = 1; i < AGE_SCALE.length; i++)
+      expect(AGE_SCALE[i].from).toBeGreaterThan(AGE_SCALE[i - 1].from);
+  });
+
+  test("★ AGE_BUCKETS 与 AGE_SCALE 同源 —— 两份清单会漂移", () => {
+    expect([...AGE_BUCKETS]).toEqual(AGE_SCALE.map((x) => x.key));
+  });
+
+  test("★ 陈货门槛也从这张表派生：>=7d 的档全部计入 stale", () => {
+    // 加档（14-30d / 30-90d / >90d）时最容易漏的就是这里：detector 里手写
+    // ages["7-14d"] + ages[">14d"] 的话，新加的档会**悄悄不算进陈货**，
+    // 于是「陈货变少了」与「新档没接线」同色。
+    expect(STALE_BUCKETS).toEqual(
+      AGE_SCALE.filter((x) => x.from >= STALE_FROM_DAYS).map((x) => x.key),
+    );
+    expect(STALE_BUCKETS).toContain(">90d");
+    expect(STALE_BUCKETS).not.toContain("3-7d");
+  });
+
+  test("★ 新档真的计入 stale-work：一条 200 天的必须被数进去", () => {
+    const i: HealthInput = {
+      ...healthy,
+      items: [
+        { id: 90, type: "bug", createdAt: day(200), closedAt: null },
+        { id: 91, type: "bug", createdAt: day(150), closedAt: null },
+        { id: 92, type: "bug", createdAt: day(100), closedAt: null },
+      ],
+      stock7d: [10, 10, 10, 10, 10, 10, 10],
+    };
+    const s = detectors(i).find((x) => x.id === "stale-work");
+    expect(s).toBeDefined();
+    expect(s?.evidence).toContain("3/3");
   });
 });

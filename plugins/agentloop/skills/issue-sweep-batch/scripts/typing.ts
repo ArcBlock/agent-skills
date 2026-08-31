@@ -23,7 +23,7 @@
  *   这是 accept 臂，钉住「全部拒绝」那个方向（全拒满足每一条 reject 断言）。
  */
 
-export type WorkTypeName = "bug" | "feature" | "idea" | "research" | "report";
+export type WorkTypeName = "bug" | "feature" | "idea" | "research" | "symptom" | "report";
 
 export interface Untyped {
   id: number;
