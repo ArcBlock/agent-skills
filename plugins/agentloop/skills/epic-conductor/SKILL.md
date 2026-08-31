@@ -26,7 +26,7 @@ You are the **conductor**: a single resident session that turns one epic into a 
 
 Hired factory/worker children still `status=running` (pid alive) make it **forbidden** to `end_turn` / close the session. Allowed: true closeout after each hire has GitHub evidence (PR URL or skip-comment) **or** the child was explicitly `stop`ped. Watch pid + `runs/*.json` + cwd, not `lastTurn` alone. Before treating yourself as done:
 ```bash
-bun .claude/plugins/agentloop/skills/epic-conductor/scripts/assert-no-live-children.ts \
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/assert-no-live-children.ts" \
   --runs-dir "$(arc service status --print home 2>/dev/null || printf '%s' "$HOME")/.afs/code-agents/runs" \
   --ids <hired-id>,<hired-id>
 ```
@@ -195,7 +195,7 @@ a sandbox boundary, or payment/billing:
 (independent-review findings + bot P1/High + any still-open inline comments) through
 [`compact-findings.ts`](./scripts/compact-findings.ts):
 ```bash
-bun .claude/plugins/agentloop/skills/epic-conductor/scripts/compact-findings.ts <raw-findings.json>
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/compact-findings.ts" <raw-findings.json>
 ```
 It judges each finding against the **current PR HEAD** (not the commit it was originally posted
 against — GitHub reassociates stale `commit_id`s onto new HEADs) and returns `still-valid` /

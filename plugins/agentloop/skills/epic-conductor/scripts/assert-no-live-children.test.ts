@@ -339,6 +339,47 @@ describe("epic-conductor SKILL.md residency rule", () => {
   });
 });
 
+/**
+ * #5620: runtime-script bun invocations must resolve via AGENTLOOP_ROOT +
+ * marketplace fallback, matching fleet-report/SKILL.md:24. A hardcoded
+ * `.claude/plugins/agentloop/...` path is the consuming-repo checkout, not
+ * the plugin — bun fails there. Reject-only (no hardcoded path) is the
+ * same colour as a SKILL.md that never invokes the scripts, so ACCEPT pins
+ * the target form and a positive-control counts the bun lines first.
+ */
+describe("epic-conductor SKILL.md bun invocations resolve via AGENTLOOP_ROOT (#5620)", () => {
+  const text = readFileSync(SKILL, "utf8");
+  const PLUGIN =
+    "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}";
+  const bunLines = [...text.matchAll(/bun\s+\S+/g)].map((m) => m[0]);
+  const conductorBun = bunLines.filter((l) => /epic-conductor\/scripts\//.test(l));
+
+  test("positive control: SKILL.md has bun invocations of the three conductor scripts", () => {
+    // Vacuous REJECT (zero bun lines) would look exactly like "no hardcoded
+    // path". Count first; a broken scan reporting 0 is not a skip.
+    expect(conductorBun.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("ACCEPT: live-children and compact-findings bun commands use AGENTLOOP_ROOT + marketplace fallback", () => {
+    expect(text).toContain(
+      `bun "${PLUGIN}/skills/epic-conductor/scripts/assert-no-live-children.ts"`,
+    );
+    expect(text).toContain(`bun "${PLUGIN}/skills/epic-conductor/scripts/compact-findings.ts"`);
+  });
+
+  test("ACCEPT: §9 closeout bun command stays AGENTLOOP_ROOT (do not regress #5615)", () => {
+    expect(text).toContain(
+      `bun "${PLUGIN}/skills/epic-conductor/scripts/assert-no-blocked-prs.ts"`,
+    );
+  });
+
+  test("REJECT: no bun invocation uses the vendored-in-arc relative plugin path", () => {
+    for (const line of conductorBun) {
+      expect(line).not.toMatch(/bun\s+\.claude\/plugins\/agentloop\//);
+    }
+  });
+});
+
 describe("factory-dispatch SKILL.md one-line hard rule", () => {
   test("end_turn ban extends to live hired children and points at epic-conductor", () => {
     const text = readFileSync(FACTORY_SKILL, "utf8");
