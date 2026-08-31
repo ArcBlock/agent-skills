@@ -28,6 +28,7 @@ import {
   type CachedEvidence,
   type CheckSpec,
   capabilityDrift,
+  checkFailuresOf,
   observedEnvGaps,
   probeCapabilities,
   provenanceNotice,
@@ -151,6 +152,37 @@ function runMultiIn(
 
 const meta = (dir: string, sha: string) =>
   JSON.parse(readFileSync(join(dir, ".verify", `${sha}.metadata.json`), "utf8"));
+
+/**
+ * The SharedEvidence file the UNKNOWN-rate walker opens (#5573 P2): basename
+ * `metadata.json` under the git-common-dir broker, NEVER the local
+ * `.verify/${sha}.metadata.json` the rate face does not read. Dropping
+ * `checkFailures` from `publishSharedEvidence` must turn these tests red.
+ */
+function brokerMeta(dir: string): { path: string; body: Record<string, unknown> } {
+  const root = join(dir, ".git", "agentloop", "verification");
+  const found: string[] = [];
+  const walk = (p: string): void => {
+    try {
+      for (const e of readdirSync(p, { withFileTypes: true })) {
+        const n = join(p, e.name);
+        if (e.isDirectory()) walk(n);
+        else if (e.name === "metadata.json") found.push(n);
+      }
+    } catch {
+      return;
+    }
+  };
+  walk(root);
+  expect(found).toHaveLength(1);
+  const path = found[0] as string;
+  // The rate walker only opens basename `metadata.json` under the broker.
+  // `.verify/<sha>.metadata.json` is a different file and a different name.
+  expect(path).toContain("/agentloop/verification/");
+  expect(path.endsWith("/metadata.json")).toBe(true);
+  expect(path).not.toMatch(/\.verify\/[^/]+\.metadata\.json$/);
+  return { path, body: JSON.parse(readFileSync(path, "utf8")) };
+}
 
 /**
  * #5067: a partial verification wrote a PASS cache that satisfied the push gate.
@@ -2324,5 +2356,58 @@ describe("runScenario — the run's class lands beside its result (#5626)", () =
     expect(na.code).toBe(0);
     expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("NA");
     expect(existsSync(classFile(dir, sha))).toBe(false);
+  });
+
+  test("#5573 ACCEPT: a classified red writes checkFailures naming that check", () => {
+    const dir = repo();
+    runClassedIn(dir, {
+      pass: false,
+      failure: { class: "CONTENTION", reason: "killed-by-signal" },
+    });
+    expect(brokerMeta(dir).body.checkFailures).toEqual([{ check: "only", class: "CONTENTION" }]);
+  });
+
+  test("#5573 ACCEPT: a clean green writes checkFailures: [] — counted zero, not omitted", () => {
+    const dir = repo();
+    runClassedIn(dir, { pass: true });
+    const { body } = brokerMeta(dir);
+    expect(Object.hasOwn(body, "checkFailures")).toBe(true);
+    expect(body.checkFailures).toEqual([]);
+  });
+
+  test("#5573 ACCEPT: a warn-only UNKNOWN still lands in checkFailures on a PASS run", () => {
+    const dir = repo();
+    const { sha, code } = runClassedIn(dir, {
+      pass: false,
+      blocking: false,
+      failure: { class: "UNKNOWN", reason: "no-check-result-produced" },
+    });
+    expect(code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+    expect(brokerMeta(dir).body.checkFailures).toEqual([{ check: "only", class: "UNKNOWN" }]);
+  });
+});
+
+describe("checkFailuresOf — denom substrate is pass=false, not the classifier (#5573)", () => {
+  const row = (over: Partial<CheckResult>): CheckResult => ({
+    check: "x",
+    title: "x",
+    pass: false,
+    blocking: true,
+    ...over,
+  });
+
+  test("ACCEPT: an unlabeled red is CODE (R0) and still produces an entry", () => {
+    expect(checkFailuresOf([row({})])).toEqual([{ check: "x", class: "CODE" }]);
+  });
+
+  test("skipped and passing checks are not denom", () => {
+    expect(
+      checkFailuresOf([
+        row({ pass: true }),
+        row({ check: "s", skipped: "not this time" }),
+        row({ check: "red", failure: { class: "BUDGET", reason: "budget-exhausted" } }),
+      ]),
+    ).toEqual([{ check: "red", class: "BUDGET" }]);
   });
 });

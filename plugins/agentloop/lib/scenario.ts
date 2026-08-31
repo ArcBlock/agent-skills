@@ -696,6 +696,14 @@ interface SharedEvidence extends EvidenceCoverage {
   envGaps: string[];
   /** taxonomy class of the run's failure (#5626). Disclosure, never keyed. */
   failureClass?: FailureClass;
+  /**
+   * Per-check non-PASS outcomes (#5573 / taxonomy §7.2). Disclosure, never keyed.
+   * Always written (including `[]`) so "counted zero failing checks" and "old
+   * record that never counted" stay different colours. The rate ceiling's
+   * per-check 1% cap needs to know WHICH check died; a run-level class cannot
+   * say.
+   */
+  checkFailures?: Array<{ check: string; class: FailureClass }>;
   sourceHead: string;
   sourceClean: true;
   completedAt: string;
@@ -722,6 +730,11 @@ export interface CachedEvidence {
    * reader unable to find its own record.
    */
   failureClass?: FailureClass;
+  /**
+   * Per-check non-PASS outcomes (#5573). Same disclosure rules as `failureClass`:
+   * never keyed. Always an array (possibly empty) on records this version writes.
+   */
+  checkFailures?: Array<{ check: string; class: FailureClass }>;
 }
 
 /** An unscoped run of every check the config declares. */
@@ -753,7 +766,7 @@ function gitCommonDir(): string | undefined {
  * common directory.  The override makes isolated tests possible without
  * writing state into the real checkout's `.git` directory.
  */
-function sharedRoot(): string | undefined {
+export function sharedRoot(): string | undefined {
   const override = process.env.AGENTLOOP_VERIFICATION_STATE_DIR?.trim();
   if (override) return resolve(override);
   const common = gitCommonDir();
@@ -893,6 +906,25 @@ function parseEnvGaps(value: unknown, where: string): string[] | undefined {
  */
 function parseFailureClass(value: unknown): FailureClass | undefined {
   return typeof value === "string" && isFailureClass(value) ? value : undefined;
+}
+
+/**
+ * Non-PASS, non-skip checks and the class each one carries. R0: a red with no
+ * named class is CODE. The ENTRY exists because `pass === false`, not because
+ * the classifier spoke — that is the rate ceiling's denominator substrate.
+ */
+export function checkFailuresOf(
+  results: readonly CheckResult[],
+): Array<{ check: string; class: FailureClass }> {
+  const out: Array<{ check: string; class: FailureClass }> = [];
+  for (const r of results) {
+    if (isSkipped(r) || r.pass) continue;
+    out.push({
+      check: r.check,
+      class: r.failure?.class && isFailureClass(r.failure.class) ? r.failure.class : "CODE",
+    });
+  }
+  return out;
 }
 
 const CAPABILITY_STATES: readonly string[] = ["yes", "no", "unknown"];
@@ -1315,6 +1347,7 @@ function readSharedEvidence(
       capabilities: parseCapabilities(metadata.capabilities) as CapabilitySet,
       envGaps: disclosed,
       failureClass: parseFailureClass(metadata.failureClass),
+      checkFailures: metadata.checkFailures,
     };
   } catch {
     return undefined;
@@ -1362,6 +1395,9 @@ function writeLocalCache(
       // #5626: …and WHAT KIND of red, so a reused record still knows its next step.
       // `undefined` drops out of JSON, which is exactly the "no class" encoding.
       failureClass: cached.failureClass,
+      // #5573: per-check non-PASS outcomes. Always an array so [] (counted
+      // zero) and a missing field (never counted) stay distinguishable.
+      checkFailures: cached.checkFailures ?? [],
     })}\n`,
   );
 }
@@ -1412,6 +1448,7 @@ function readLocalCache(
       capabilities: parseCapabilities(metadata.capabilities) as CapabilitySet,
       envGaps: disclosed,
       failureClass: parseFailureClass(metadata.failureClass),
+      checkFailures: metadata.checkFailures,
     };
   } catch {
     return undefined;
@@ -1616,6 +1653,8 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
     // #5626: travels with the record so a reader in another tree inherits the
     // next step, not just the colour. Never keyed — see `CachedEvidence`.
     failureClass: cached.failureClass,
+    // #5573: per-check non-PASS list. Always written, including `[]`.
+    checkFailures: cached.checkFailures ?? [],
     sourceHead: sha,
     sourceClean: true,
     completedAt: new Date().toISOString(),
@@ -2153,6 +2192,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // about the checks, not about the verdict the run ended up with — which is exactly
   // what makes the `ENV_GAP` + `PASS` pair expressible at all (§2.5).
   const failureClass = deriveRunClass(results);
+  const checkFailures = checkFailuresOf(results);
   // arc#5534 / #5593 — ATTRIBUTION, not exemption. A red that is provably not
   // this change's own never made this change unverified, so the aggregate
   // verdict it should have had all along is PASS. `results` is NOT modified:
@@ -2263,6 +2303,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       capabilities: declaredCapabilities,
       envGaps,
       failureClass,
+      checkFailures,
     });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
@@ -2302,6 +2343,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       capabilities: declaredCapabilities,
       envGaps,
       failureClass,
+      checkFailures,
     });
   }
 
