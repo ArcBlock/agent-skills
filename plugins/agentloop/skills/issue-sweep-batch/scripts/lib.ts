@@ -41,8 +41,39 @@ export interface PathSurface {
 /** 命令引用，不是编辑目标。 */
 const COMMAND_QUOTE = /(^|\/)(pre-pr|pre-merge)\.ts$/;
 
-const FILE_RE =
-  /((?:scripts|\.claude|providers|runtimes|packages|tools|blocklets)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|mjs|cjs|js|jsx|sh|json|jsonc|py|md|ya?ml|toml))/g;
+/**
+ * 缺省根目录 —— **arc 自己的布局**，不是普适清单。
+ *
+ * 这是本抽取器唯一与仓库耦合的地方，所以它可注入（见 {@link pathSurface} 的 `roots`）。
+ * 消费仓库在自己的 `.claude/repo-profile.md` 里声明 `source_roots`；
+ * `sweep-batch.ts` 读出来传进去，与 `repo_slug` / `symptom_ttl_days` 同一个模式。
+ *
+ * ⚠ **不要往这里加 `.github`。** `lib.test.ts` 的 `MIXED` fixture 正是靠
+ * `.github/workflows/verify.yml` 落在白名单外，来验证 `partial` 那条臂；
+ * 收进来会让那条 accept 臂恒真。这条脆弱性本身就是「白名单该配置化」的论据。
+ */
+export const DEFAULT_SOURCE_ROOTS = [
+  "scripts",
+  ".claude",
+  "providers",
+  "runtimes",
+  "packages",
+  "tools",
+  "blocklets",
+] as const;
+
+const EXT = "(?:ts|tsx|mjs|cjs|js|jsx|sh|json|jsonc|py|md|ya?ml|toml)";
+
+/** 根目录清单 → FILE_RE。根名里的 `.` 必须转义（`.claude` 否则会匹配任意字符）。 */
+function fileReFor(roots: readonly string[]): RegExp {
+  const alt = roots
+    .filter((r) => r.length > 0)
+    .map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  return new RegExp(`((?:${alt})\\/[A-Za-z0-9_./-]+\\.${EXT})`, "g");
+}
+
+const DEFAULT_FILE_RE = fileReFor(DEFAULT_SOURCE_ROOTS);
 
 /**
  * 宽口径的「像路径」：任意 `<段>/<段>...<扩展名>`。用来发现 FILE_RE 漏掉的东西，
@@ -60,10 +91,21 @@ function laneOf(file: string): string {
   return s.slice(0, Math.min(3, s.length)).join("/");
 }
 
-export function pathSurface(body: string | null | undefined): PathSurface {
+/**
+ * @param roots 该仓库的源码根目录清单。缺省是 arc 的布局（{@link DEFAULT_SOURCE_ROOTS}）。
+ *
+ * **根目录配错 / 没配时，返回值是 `unproven` 且 `unrecognized` 非空** —— 调用方必须把
+ * 这个组合与「正文里真的一个路径都没有」区分开（后者两者皆空），否则就重演本函数
+ * 顶上第 1 条要消灭的那种同色。`sweep-batch.ts` 据此报警。
+ */
+export function pathSurface(
+  body: string | null | undefined,
+  roots?: readonly string[],
+): PathSurface {
   const text = typeof body === "string" ? body : "";
+  const fileRe = roots && roots.length > 0 ? fileReFor(roots) : DEFAULT_FILE_RE;
   const seen = new Set<string>();
-  for (const m of text.matchAll(FILE_RE)) {
+  for (const m of text.matchAll(fileRe)) {
     const f = m[1].replace(/[.,:;)`]+$/, "");
     if (COMMAND_QUOTE.test(f)) continue;
     seen.add(f);
@@ -88,6 +130,22 @@ export function pathSurface(body: string | null | undefined): PathSurface {
     // 抽到了但还有未识别的 = partial（不足以证明不相交）。
     state: files.length === 0 ? "unproven" : unrecognized.length > 0 ? "partial" : "measured",
   };
+}
+
+/**
+ * 「抽不到落点」有两个来源，它们**必须不同色**：
+ *
+ * | 来源 | files | unrecognized |
+ * |---|---|---|
+ * | 正文里真的没有路径 | 空 | 空 |
+ * | **根目录白名单没覆盖本仓库** | 空 | **非空** |
+ *
+ * 后者是量具没配好，不是关于这条 issue 的事实。判定上两者都只能得 `unproven`（保守，
+ * 正确），但**报给人看的时候不能同色**——否则「本仓库的 source_roots 没配」会永远
+ * 伪装成「这些 issue 都没写落点」。
+ */
+export function looksLikeMissingRoots(s: PathSurface): boolean {
+  return s.state === "unproven" && s.unrecognized.length > 0;
 }
 
 /** Step 3 读代码补出的落点：与 measured 同等参与判定。 */

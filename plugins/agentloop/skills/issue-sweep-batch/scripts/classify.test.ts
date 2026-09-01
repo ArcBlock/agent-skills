@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   axisFor,
   type ClassificationRecord,
+  canonicalLabelFor,
   groupingQuestion,
   type Neighborhood,
   revalidationReasons,
@@ -198,5 +199,34 @@ describe("★ symptom —— 未诊断的观察既不是缺陷也不是报告", 
       if (v === "bug") continue;
       expect(VERDICT_KEEPS_OPEN).not.toContain(v);
     }
+  });
+});
+
+describe("★ 每个类型必须有一个「加上去就能被认回来」的规范 label", () => {
+  // 本地 codex 审 #5685 时报的 P2：批量判断单导出的是
+  // `gh issue edit N --add-label <类型名>`，而 symptom / report 的类型名**不是**
+  // 任何一个 label —— 加上去下一轮仍然是 untyped。「分类做了」与「分类没生效」同色。
+  test("★ 往返：canonicalLabelFor(t) 加回去必须还是 t", () => {
+    for (const t of ["bug", "feature", "idea", "research", "symptom", "report"] as WorkType[]) {
+      const label = canonicalLabelFor(t);
+      expect(label).toBeTruthy();
+      expect(typeOf([label as string])).toBe(t);
+    }
+  });
+
+  test("★ untyped 没有规范 label（它不是一个可以「加上」的类型）", () => {
+    expect(canonicalLabelFor("untyped")).toBeUndefined();
+  });
+
+  test("provenance label 仍然认得出 —— 规范 label 是新增的一条，不是替换", () => {
+    // test-sweep-failure 说的是「这条从哪来」，不是「它是什么」。两者都要认。
+    expect(typeOf(["test-sweep-failure"])).toBe("symptom");
+    expect(typeOf(["nightly-test-report"])).toBe("report");
+  });
+
+  test("★ 规范 label 排在最前 —— 它是「类型」，provenance 只是也能推出类型", () => {
+    expect(canonicalLabelFor("symptom")).toBe("symptom");
+    expect(canonicalLabelFor("report")).toBe("report");
+    expect(canonicalLabelFor("bug")).toBe("bug");
   });
 });

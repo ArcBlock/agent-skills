@@ -34,6 +34,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   axisFor,
+  canonicalLabelFor,
   groupingQuestion,
   type Mode,
   revalidationReasons,
@@ -58,6 +59,7 @@ import {
   fingerprint,
   isSelfMember,
   type LedgerRecord,
+  looksLikeMissingRoots,
   type PathSurface,
   pathSurface,
 } from "./lib";
@@ -125,6 +127,54 @@ function repoSlug(): string {
   return m[1];
 }
 
+/**
+ * 从消费仓库的 profile 读 symptom 门槛。**插件出机制与默认值，数字住消费仓库**——
+ * 缺键就用默认（arc 的标定），不报错。
+ */
+function symptomThresholds(): { symptomTtlDays?: number } {
+  try {
+    const prof = readFileSync(".claude/repo-profile.md", "utf8");
+    const m = prof.match(/symptom_ttl_days[`*\s:|]+(\d+)/);
+    if (m) return { symptomTtlDays: Number(m[1]) };
+  } catch {
+    /* 没有 profile 就用默认 */
+  }
+  return {};
+}
+
+/**
+ * 该仓库的源码根目录。**插件出机制，清单住消费仓库**——与 `symptom_ttl_days` 同一个模式。
+ *
+ * profile 里写成一行（顺序无关，逗号或空格分隔）：
+ *
+ * ```
+ * | `source_roots` | `core did statedb indexdb ledger rollup apps examples tools scripts .claude` |
+ * ```
+ *
+ * 缺键返回 `undefined` → `pathSurface` 回退到 arc 的缺省列表（零行为变化）。
+ */
+function sourceRoots(): string[] | undefined {
+  try {
+    const prof = readFileSync(".claude/repo-profile.md", "utf8");
+    // 值必须在反引号里，且只取到闭合反引号为止 —— 否则会把后面那段散文描述
+    // 一起当成根目录（profile 的表格行是 `| key | \`value\` — 说明… |`）。
+    // `?  —— 先吃掉 key 自己的闭合反引号（profile 里 key 也是反引号包的）。
+    const m = prof.match(/source_roots`?[^`\n]*`([^`\n]+)`/);
+    if (m) {
+      const roots = m[1]
+        .split(/[,\s]+/)
+        .map((r) => r.trim())
+        .filter(Boolean);
+      if (roots.length) return roots;
+    }
+  } catch {
+    /* 没有 profile 就用默认 */
+  }
+  return undefined;
+}
+
+const ROOTS = sourceRoots();
+
 function makeSource(): { src: WorkItemSource; label: string } {
   if (SOURCE === "work-object") return { src: new WorkObjectSource(), label: "work-object" };
   const repo = repoSlug();
@@ -133,19 +183,6 @@ function makeSource(): { src: WorkItemSource; label: string } {
 
 /* ===== 候选集 ===== */
 
-const NON_BUG = [
-  "idea",
-  "research",
-  "feature",
-  "enhancement",
-  "documentation",
-  "planning",
-  "design",
-  "nightly-test-report",
-  "test-sweep-report",
-  "reference",
-  "ux",
-];
 const HUMAN_BLOCKED = ["needs-human-confirm", "needs-decision", "agent:hold"];
 
 const FACTORY_TREE =
@@ -202,7 +239,7 @@ for (const i of all) {
   // --scope 必须作用在**候选集**上，不能只影响显示：
   // 否则出范围的项照样参与 ledger delta，非 dry-run 还会被写进 ledger。
   // （Codex 在 #5628 的评审里指出，成立。）
-  if (!inScope(pathSurface(i.body))) {
+  if (!inScope(pathSurface(i.body, ROOTS))) {
     rejected[`不在 --scope ${SCOPE}`] = [...(rejected[`不在 --scope ${SCOPE}`] ?? []), i.id];
     continue;
   }
@@ -257,13 +294,13 @@ const byId = new Map(all.map((i) => [i.id, i]));
 const liveEpicSurface = new Map<number, PathSurface>();
 for (const [epic, members] of epicMembers) {
   const bodies = members.map((m) => byId.get(m)?.body ?? "").join("\n");
-  liveEpicSurface.set(epic, pathSurface(bodies));
+  liveEpicSurface.set(epic, pathSurface(bodies, ROOTS));
 }
 
 /* ===== 报告 ===== */
 
 const surf = new Map<number, PathSurface>();
-for (const i of selected) surf.set(i.id, pathSurface(i.body));
+for (const i of selected) surf.set(i.id, pathSurface(i.body, ROOTS));
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 console.log(
@@ -280,6 +317,25 @@ if (!caps.neighborhood) {
 }
 if (!caps.pushdown) {
   console.log("  ⚠ 本源不支持下推：每轮取全量再本地过滤。work object 落地后这一步会便宜很多。");
+}
+{
+  // 「根目录没配」必须与「这些 issue 真的没写落点」不同色。前者是量具没配好，
+  // 后者是关于这批 issue 的事实；不报出来的话，一个配错的仓库会永远看到
+  // 「全是 unproven」并以为那是它自己的 issue 质量问题。
+  const blind = [...surf.values()].filter(looksLikeMissingRoots).length;
+  if (blind > 0) {
+    const pct = Math.round((blind / Math.max(1, surf.size)) * 100);
+    console.log(
+      `  ⚠ ${blind}/${surf.size}（${pct}%）候选抽不到落点，但正文里**有**路径样 token —— ` +
+        "疑似 source_roots 没覆盖本仓库的目录布局。",
+    );
+    console.log(
+      ROOTS
+        ? `    当前 source_roots（来自 repo-profile）：${ROOTS.join(" ")}`
+        : "    repo-profile 未声明 source_roots，正在用 arc 的缺省列表。" +
+            "在 profile 里加一行 `source_roots` 声明本仓库的源码根目录。",
+    );
+  }
 }
 console.log(
   `  存量 ${all.length} · 候选 ${candidates.length} · 本模式选中 ${selected.length}（模式跳过 ${skippedByMode}） · 在飞 epic ${liveEpicSurface.size}`,
@@ -413,8 +469,21 @@ if (untypedItems.length > 0) {
 let overview: Overview | undefined;
 if (HTML) {
   // 概览需要**已关闭**的项才能画流量/存量。GitHub 下这是额外一次昂贵拉取。
+  /**
+   * timeline 一轮只拉一次。
+   *
+   * GitHub 源下每次调用是**两趟分页 `gh issue list`** —— sweep 里最贵的一段。拉两次
+   * 不只是慢一倍：两次之间 issue 会变，概览与健康/年龄会落在**不同的快照**上，
+   * 而两张图会被当成同一份事实来读。
+   */
+  let timelineRows: Awaited<ReturnType<NonNullable<typeof src.timeline>>> | undefined;
+  const timelineOnce = async () => {
+    if (!timelineRows)
+      timelineRows = await (src.timeline as NonNullable<typeof src.timeline>)(STATS_DAYS);
+    return timelineRows;
+  };
   if (src.timeline) {
-    const rows = await src.timeline(STATS_DAYS);
+    const rows = await timelineOnce();
     const timed: TimedItem[] = rows.map((r) => ({
       id: r.id,
       type: typeOf(r.labels),
@@ -465,6 +534,34 @@ if (HTML) {
     console.log("⚠ 本源不提供 timeline：概览页会显示「未采集」而不是画一张空图。");
   }
 
+  /**
+   * 这个仓库真实存在的 label 集合 —— 导出命令只用它里面的。
+   * 取不到就当**空集**：宁可不给命令，也不给一条会失败的命令。
+   */
+  const existingLabels = new Set<string>(
+    (() => {
+      try {
+        const out = Bun.spawnSync(
+          [
+            "gh",
+            "label",
+            "list",
+            "-R",
+            label.replace(/^github:/, ""),
+            "--limit",
+            "300",
+            "--json",
+            "name",
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        if (out.exitCode !== 0) return [];
+        return (JSON.parse(out.stdout.toString()) as { name: string }[]).map((l) => l.name);
+      } catch {
+        return [];
+      }
+    })(),
+  );
   /** id -> createdAt（仅 open）。给 item 算年龄桶用；源不提供 timeline 时为空。 */
   const createdAtById = new Map<number, string>();
   /** 柱子与 item 的年龄桶必须用同一个 now，否则边界附近两边会差一条。 */
@@ -473,7 +570,7 @@ if (HTML) {
   let health: ReturnType<typeof assess> | undefined;
   let aging: ReturnType<typeof agingBuckets> | undefined;
   if (src.timeline) {
-    const rows = await src.timeline(STATS_DAYS);
+    const rows = await timelineOnce();
     // 年龄柱是可点的，点开要给出**同一批** issue。所以桶只算一次（ageBucketOf），
     // 用与柱子相同的 now，然后序列化进每条 item —— 前端不重算边界。
     for (const r of rows) if (!r.closedAt) createdAtById.set(r.id, r.createdAt);
@@ -494,6 +591,7 @@ if (HTML) {
       stock7d,
       untyped: untypedItems.length,
       total: hItems.filter((x) => !x.closedAt).length,
+      thresholds: symptomThresholds(),
     };
     health = assess(hin);
     aging = agingBuckets(hItems, hin.now);
@@ -562,7 +660,7 @@ if (HTML) {
     items: all
       .filter((i) => !i.title.startsWith("[epic]") && !i.labels.includes("epic"))
       .map((i) => {
-        const s2 = surf.get(i.id) ?? pathSurface(i.body);
+        const s2 = surf.get(i.id) ?? pathSurface(i.body, ROOTS);
         return {
           id: i.id,
           title: i.title,
@@ -586,6 +684,16 @@ if (HTML) {
       }),
     // 年龄刻度从 health.ts 的唯一那张表来，前端不另写一份顺序。
     ageScale: [...AGE_BUCKETS],
+    // 「加上去就能被认回来」的规范 label —— 导出命令用它，不用类型名（#5685 的 P2）。
+    //
+    // **只导出这个仓库真的有的 label**：本插件是分发出去的，不得假设 arc 的 label
+    // 集合存在（插件 CLAUDE.md 第一原则）。缺的那个类型不给命令，页面会写明为什么，
+    // 而不是发一条注定 `gh: Validation Failed` 的命令。
+    typeLabels: Object.fromEntries(
+      (["bug", "feature", "idea", "research", "symptom", "report"] as WorkType[])
+        .map((t) => [t, canonicalLabelFor(t)])
+        .filter(([, l]) => l && existingLabels.has(l as string)),
+    ),
     axes: Object.fromEntries(
       (["bug", "feature", "idea", "research", "symptom", "report", "untyped"] as WorkType[]).map(
         (t) => [

@@ -60,7 +60,7 @@ describe("flowRatio / backlogSlope", () => {
   });
 
   test("空输入 → 比值 0、斜率 0，不抛不 NaN", () => {
-    const f = flowRatio({ now, items: [], stock7d: [] });
+    const f = flowRatio({ now, items: [] });
     expect(f.ratio).toBe(0);
     expect(backlogSlope([])).toBe(0);
   });
@@ -263,6 +263,8 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
   // symptom 的产物是一个**判决**，不是知识。判成 bug 会改类型离开本桶，其余判决
   // （test-defect / env / stale / normal）一律关闭。所以「仍然 open 且超期」
   // 就是「还没有人给出判决」——这个推断的前提钉在 classify.test.ts 的闭合词表那条。
+  /** 新契约：没配 TTL 这个 detector 整个不跑，所以这一组显式配上。 */
+  const TTL = { thresholds: { symptomTtlDays: 7 } };
   const sym = (id: number, ageDays: number, closed: number | null = null) => ({
     id,
     type: "symptom",
@@ -283,6 +285,7 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
   test("超期 ≥ 门槛条数 → warn，证据里给得出数字", () => {
     const i: HealthInput = {
       ...healthy,
+      ...TTL,
       // 2 条超期 / 6 条 open symptom = 33%，在 bad 门槛之下：积压的是个别条目，
       // 不是判决通道本身停了。
       items: [
@@ -303,6 +306,7 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
   test("超期占比过半 → bad（叫人）", () => {
     const i: HealthInput = {
       ...healthy,
+      ...TTL,
       // 3 条超期 / 4 条 open symptom（含基线那条新鲜的）= 75%
       items: [
         ...healthy.items,
@@ -316,13 +320,18 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
   });
 
   test("★ ACCEPT：只有一条超期不叫人（可能只是刚好跨过）", () => {
-    const i: HealthInput = { ...healthy, items: [...healthy.items, sym(20, T.symptomTtlDays + 1)] };
+    const i: HealthInput = {
+      ...healthy,
+      ...TTL,
+      items: [...healthy.items, sym(20, T.symptomTtlDays + 1)],
+    };
     expect(detectors(i).map((s) => s.id)).not.toContain("undiagnosed-symptom");
   });
 
   test("★ 已关闭的超期 symptom 不计入 —— 关闭就是判决已做出", () => {
     const i: HealthInput = {
       ...healthy,
+      ...TTL,
       items: [
         ...healthy.items,
         sym(20, T.symptomTtlDays + 9, 1),
@@ -338,10 +347,10 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
     const aged = [sym(20, T.symptomTtlDays + 1), sym(21, T.symptomTtlDays + 3)];
     const asBug = aged.map((x) => ({ ...x, type: "bug" }));
     expect(
-      detectors({ ...healthy, items: [...healthy.items, ...aged] }).map((s) => s.id),
+      detectors({ ...healthy, ...TTL, items: [...healthy.items, ...aged] }).map((s) => s.id),
     ).toContain("undiagnosed-symptom");
     expect(
-      detectors({ ...healthy, items: [...healthy.items, ...asBug] }).map((s) => s.id),
+      detectors({ ...healthy, ...TTL, items: [...healthy.items, ...asBug] }).map((s) => s.id),
     ).not.toContain("undiagnosed-symptom");
   });
 });
@@ -381,7 +390,7 @@ describe("★ ageBucketOf —— 柱子的数与点开的那批必须出自同�
       const b = ageBucketOf((now.getTime() - new Date(i.createdAt).getTime()) / 86_400_000);
       byItem[b] = (byItem[b] ?? 0) + 1;
     }
-    for (const b of Object.keys(byChart)) expect(byChart[b]).toBe(byItem[b] ?? 0);
+    for (const b of AGE_BUCKETS) expect(byChart[b]).toBe(byItem[b] ?? 0);
   });
 
   test("★ 已关闭的不进柱子 —— 点开也不该出现它们", () => {
@@ -428,5 +437,52 @@ describe("★ 年龄刻度 —— 一个表，别处都从它派生", () => {
     const s = detectors(i).find((x) => x.id === "stale-work");
     expect(s).toBeDefined();
     expect(s?.evidence).toContain("3/3");
+  });
+});
+
+describe("★ 门槛可按仓库覆盖 —— arc 的标定不该硬编码进分发出去的插件", () => {
+  // 本地跨引擎 review 报的 P2：symptom 的 7 天 TTL 是从 **arc 自己**的 test-sweep
+  // 历史标出来的，把它随插件发给每个消费仓库，会让诊断节奏更慢的仓库天天收到
+  // action-required。插件出**机制与默认值**，具体数字住消费仓库的 profile。
+  const overdue = (days: number, id: number) => ({
+    id,
+    type: "symptom",
+    createdAt: day(days),
+    closedAt: null,
+  });
+
+  test("★ 抬高 TTL 后，原本超期的那批不再触发（默认值不是唯一可能）", () => {
+    const items = [...healthy.items, overdue(8, 60), overdue(9, 61)];
+    expect(
+      detectors({ ...healthy, items, thresholds: { symptomTtlDays: 7 } }).map((s) => s.id),
+    ).toContain("undiagnosed-symptom");
+    expect(
+      detectors({ ...healthy, items, thresholds: { symptomTtlDays: 30 } }).map((s) => s.id),
+    ).not.toContain("undiagnosed-symptom");
+  });
+
+  test("★ 只覆盖给到的那一项，其余仍用默认（部分覆盖不得清空整张表）", () => {
+    const items = [...healthy.items, overdue(40, 62), overdue(41, 63)];
+    const s = detectors({ ...healthy, items, thresholds: { symptomTtlDays: 30 } });
+    expect(s.map((x) => x.id)).toContain("undiagnosed-symptom");
+    // untyped / stale 的门槛没被这次覆盖动到
+    expect(T.untypedBad).toBe(0.25);
+  });
+
+  test("★ 没在 profile 里配 TTL → 这个 detector 整个不跑（不拿 arc 的节奏判别人）", () => {
+    // fail-closed 的方向是**不告警**：一个用别人标定得出的 action-required
+    // 比没有这个信号更糟——它会让人停下来查一件根本不存在的事。
+    const items = [...healthy.items, overdue(40, 64), overdue(41, 65)];
+    expect(detectors({ ...healthy, items }).map((s) => s.id)).not.toContain("undiagnosed-symptom");
+    expect(detectors({ ...healthy, items, thresholds: {} }).map((s) => s.id)).not.toContain(
+      "undiagnosed-symptom",
+    );
+  });
+
+  test("★ ACCEPT：配上就跑（否则「永不触发」满足上一条）", () => {
+    const items = [...healthy.items, overdue(40, 66), overdue(41, 67)];
+    expect(
+      detectors({ ...healthy, items, thresholds: { symptomTtlDays: 7 } }).map((s) => s.id),
+    ).toContain("undiagnosed-symptom");
   });
 });

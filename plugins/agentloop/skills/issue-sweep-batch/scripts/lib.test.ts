@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_SOURCE_ROOTS,
   disjointness,
   fingerprint,
   isSelfMember,
   ledgerDelta,
+  looksLikeMissingRoots,
   pathSurface,
   sameLayer,
 } from "./lib";
@@ -212,6 +214,63 @@ describe("★ 部分抽取必须被说出来（Codex P1，#5628 评审）", () =
 
   test("无任何路径样 token → 仍是 unproven（不是 partial）", () => {
     expect(pathSurface("完全没有路径的正文").state).toBe("unproven");
+  });
+
+  // ── 根目录白名单可注入（#5723）──
+  //
+  // 缺的那一臂：`partial` 只在 FILE_RE **至少命中一条**时出现。一条都没命中时直接
+  // `unproven`，于是「一个根目录都不认识」这种最坏情况**反而不触发**保护。
+  // 实测（ArcBlock/blockchain）：100 条 unproven 里 44 条是量具产物。
+  describe("★ 根目录白名单写死 = 量具对非 arc 仓库失明", () => {
+    // 该仓库的真实正文形状：带完整 path:line 证据，根目录是 core/ 而不是 arc 的任何一个。
+    const OCAP = "现状证据 `core/mcrypto/src/crypter/aes.ts:15` 与 `core/message/src/x.ts:579`";
+
+    test("★ 缺省白名单下：unproven，但 unrecognized 非空 —— 与「真的没路径」必须可区分", () => {
+      const s = pathSurface(OCAP);
+      expect(s.state).toBe("unproven");
+      expect(s.files).toEqual([]);
+      // 这一条是关键：两种 unproven 在 state 上同色，只有 unrecognized 能把它们分开。
+      expect(s.unrecognized.length).toBeGreaterThan(0);
+      expect(looksLikeMissingRoots(s)).toBe(true);
+    });
+
+    test("★ 正控：正文真的没有路径时，looksLikeMissingRoots 必须是 false（否则它恒真=没用）", () => {
+      const s = pathSurface("完全没有路径的正文");
+      expect(s.state).toBe("unproven");
+      expect(looksLikeMissingRoots(s)).toBe(false);
+    });
+
+    test("★ 配上该仓库的 source_roots → measured，落点全部抽到", () => {
+      const s = pathSurface(OCAP, ["core", "did", "statedb"]);
+      expect(s.state).toBe("measured");
+      expect(s.files).toEqual(["core/mcrypto/src/crypter/aes.ts", "core/message/src/x.ts"]);
+      expect(looksLikeMissingRoots(s)).toBe(false);
+    });
+
+    test("★ 判别力：配错的 roots 不得蒙对 —— 仍是 unproven 且报警", () => {
+      const s = pathSurface(OCAP, ["packages", "apps"]);
+      expect(s.state).toBe("unproven");
+      expect(looksLikeMissingRoots(s)).toBe(true);
+    });
+
+    test("ACCEPT：不传 roots 时逐字等于传缺省列表（arc 零行为变化）", () => {
+      const body = "`scripts/a.ts` 与 `.claude/verify/b.ts` 和 `.github/x.yml`";
+      expect(pathSurface(body)).toEqual(pathSurface(body, DEFAULT_SOURCE_ROOTS));
+    });
+
+    test("★ 根名里的 `.` 必须转义 —— `.claude` 不得匹配成任意字符", () => {
+      // 未转义时 `.claude` 会匹配 `xclaude`，把不存在的根目录判成命中。
+      const s = pathSurface("`xclaude/verify/b.ts`", [".claude"]);
+      expect(s.files).toEqual([]);
+      expect(pathSurface("`.claude/verify/b.ts`", [".claude"]).files).toEqual([
+        ".claude/verify/b.ts",
+      ]);
+    });
+
+    test("空 roots 数组回退到缺省，不产生一个匹配一切的空正则", () => {
+      const body = "`scripts/a.ts`";
+      expect(pathSurface(body, []).files).toEqual(["scripts/a.ts"]);
+    });
   });
 });
 

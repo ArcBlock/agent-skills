@@ -95,6 +95,8 @@ export interface Model {
   typing?: Typing;
   /** 年龄档的顺序 —— 来自 health.ts 的 AGE_SCALE，前端不另写一份 */
   ageScale?: string[];
+  /** 类型 -> 规范 label。导出命令加的是它，不是类型名 */
+  typeLabels?: Record<string, string>;
   /** 每种类型自己的分类轴与聚簇判据 —— 点类型卡时展示 */
   axes?: Record<string, { axis: string | null; question: string }>;
   generatedAt: string;
@@ -486,6 +488,17 @@ const AGE_ORDER = M.ageScale || ['<1d','1-3d','3-7d','7-14d','>14d'];
  */
 function agingRow(items, scope) {
   const counted = items.filter(i => i.ageBucket);
+  // ★「年龄没采集」与「这个筛选下一条都没有」**不是一回事**，不能共用一个分支。
+  //   前者是仪器没数据，后者是数出来就是 0 —— 后者要画七根零高的柱子，
+  //   把「这一档是空的」明白显示出来。（跨引擎 review 抓到的同色。）
+  if (!items.length) {
+    return '<div class="chartbox"><div class="chead"><b>年龄分布</b>' +
+      '<span class="dim">' + esc(scope) + ' —— 这个筛选下没有工作项</span></div>' +
+      '<div class="ages">' + AGE_ORDER.map(k =>
+        '<div class="agecol zero" data-empty="1"><div class="agebar" style="height:0;background:none"></div>' +
+        '<div class="agev">0</div><div class="agek">' + k + '</div></div>').join('') +
+      '</div></div>';
+  }
   if (!counted.length) {
     return '<div class="chartbox"><div class="chead"><b>年龄分布</b></div>' +
       '<div class="note">未采集 —— 本源不提供 timeline，年龄无从算起。' +
@@ -690,10 +703,14 @@ document.addEventListener('click', e => {
   const lines = [];
   document.querySelectorAll('select.pick').forEach(sel => {
     const v = sel.value; if (!v) return;
+    const label = (M.typeLabels || {})[v];
+    if (!label) { lines.push('# ⚠ 类型 ' + v + ' 没有规范 label，跳过（不发一条加不上的命令）'); return; }
     const g = M.typing.groups[+sel.dataset.g];
     lines.push('# ' + g.feature + '  (' + g.ids.length + ' 条)');
     for (const id of g.ids)
-      lines.push('gh issue edit ' + id + ' -R ' + M.repo + ' --add-label ' + v);
+      // 加的是**规范 label**，不是类型名：symptom / report 的类型名不是任何一个
+      // label，加上去下一轮仍然 untyped——「分类做了」与「分类没生效」同色。
+      lines.push('gh issue edit ' + id + ' -R ' + M.repo + ' --add-label ' + label);
   });
   document.getElementById('cmd').textContent = lines.length
     ? lines.join('\n') : '（还没选任何类型）';

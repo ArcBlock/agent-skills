@@ -43,6 +43,13 @@ export interface HealthInput {
   stock7d: number[];
   untyped?: number;
   total?: number;
+  /**
+   * 按仓库覆盖门槛。**插件出机制与默认值，具体数字住消费仓库的 profile**——
+   * `T` 里的 symptom TTL 是从 arc 自己的 test-sweep 历史标出来的，直接发给每个
+   * 消费仓库会让诊断节奏更慢的仓库天天收到 action-required（插件 CLAUDE.md 第一原则）。
+   * 只覆盖给到的那几项，其余仍用默认。
+   */
+  thresholds?: Partial<Thresholds>;
 }
 
 export interface Signal {
@@ -166,7 +173,35 @@ export function agingBuckets(items: HealthItem[], now: Date): Record<AgeBucket, 
 
 /* ===== 门槛（集中放，便于审阅与调参） ===== */
 
-export const T = {
+/**
+ * 默认门槛。**这些数字是 arc 的标定**，随插件发出去只是默认值——消费仓库通过
+ * `HealthInput.thresholds` 覆盖（值住它自己的 `.claude/repo-profile.md`）。
+ */
+/**
+ * 门槛的**类型**是通用的（都是 number），值才是每个仓库自己的。
+ *
+ * 不写这个接口、直接 `Partial<typeof DEFAULT_T>` 的话，`as const` 会把字段钉成
+ * **字面量类型**（`symptomTtlDays: 7`），于是「按仓库覆盖」这个能力在类型上根本不存在
+ * ——`{ symptomTtlDays: 30 }` 通不过 tsc。单测发现不了它（bun test 不做类型检查），
+ * 是跨引擎 review 抓到的。
+ */
+export interface Thresholds {
+  flowRatio: number;
+  slope: number;
+  untypedWarn: number;
+  untypedBad: number;
+  staleWarn: number;
+  /**
+   * **未配置就不跑这个 detector。** 拿 arc 的标定去警告别的仓库，等于用别人的节奏
+   * 判它有病。默认表里给了值是给 arc 用的；消费仓库没在 profile 里配之前，
+   * 宁可没有这个信号，也不要一个假的。
+   */
+  symptomTtlDays: number;
+  symptomOverdueMin: number;
+  symptomOverdueBadRatio: number;
+}
+
+export const DEFAULT_T: Thresholds = {
   /** 进出比：进货超过出货这么多倍才算异常 */
   flowRatio: 1.25,
   /** 存量斜率：每桶净增超过这个数才算在涨 */
@@ -191,11 +226,15 @@ export const T = {
   symptomOverdueMin: 2,
   /** 超期占 open symptom 的比例到这个数，说明积压的是判决本身，不是个别条目 */
   symptomOverdueBadRatio: 0.5,
-} as const;
+};
+
+/** 向后兼容的默认表别名 —— 直接读 `T.x` 的调用方拿到的是默认值。 */
+export const T = DEFAULT_T;
 
 /* ===== detector ===== */
 
 export function detectors(i: HealthInput): Signal[] {
+  const T = { ...DEFAULT_T, ...(i.thresholds ?? {}) };
   const out: Signal[] = [];
   const f = flowRatio(i);
   const slope = backlogSlope(i.stock7d);
@@ -229,7 +268,10 @@ export function detectors(i: HealthInput): Signal[] {
   // 为什么必须单独有这个 detector：symptom 停在桶里不动时，「诊断完发现不是缺陷」
   // 与「根本没人看」在存量上完全同色。stale-work 看不出它——那条看的是笼统的年龄，
   // 一条 20 天的 feature 和一条 8 天未判决的 symptom 在它眼里一样。
-  const openSymptoms = i.items.filter((x) => !x.closedAt && x.type === "symptom");
+  // 门槛没被显式配置时，这个 detector 整个不跑（见 Thresholds.symptomTtlDays）。
+  const symptomTtl = i.thresholds?.symptomTtlDays;
+  const openSymptoms =
+    symptomTtl === undefined ? [] : i.items.filter((x) => !x.closedAt && x.type === "symptom");
   const overdue = openSymptoms.filter(
     (x) => (i.now.getTime() - new Date(x.createdAt).getTime()) / 86_400_000 > T.symptomTtlDays,
   );
@@ -239,9 +281,12 @@ export function detectors(i: HealthInput): Signal[] {
       id: "undiagnosed-symptom",
       severity: r >= T.symptomOverdueBadRatio ? "bad" : "warn",
       title: "症状未判决",
-      evidence: `${overdue.length}/${openSymptoms.length} 条 symptom 开着超过 ${T.symptomTtlDays} 天仍无判决（#${overdue
+      // 证据只说**这个仓库这一轮**测到的事实。写死「实测诊断周期 0–5 天」是 arc 的
+      // 标定，别的仓库覆盖了 TTL 之后那句话就是假的（跨引擎 review 抓到的）。
+      // 标定的来历住消费仓库的 profile（`symptom_ttl_days`），不住证据文案。
+      evidence: `${overdue.length}/${openSymptoms.length} 条 symptom 开着超过 ${symptomTtl} 天仍无判决（#${overdue
         .map((x) => x.id)
-        .join(" #")}）—— 实测诊断周期是 0–5 天，这几条已在基线之外`,
+        .join(" #")}）—— 判决未做出，不是「审过了没事」`,
     });
   }
 

@@ -43,6 +43,7 @@ reference implementation to copy patterns from.
 | \`cli_setup_command\` | <FILL: how to build/relink cli_binary when it's missing/stale — e.g. a \`/setup-local-cli\` command or a curl installer; remove if no CLI> |
 | \`dev_server_node\` | <FILL: local server + port for dynamic / e2e verification, e.g. \`arc service\` on :4900; remove if none> |
 | \`dev_server_edge\` | <FILL: local edge / second runtime for parity verification, e.g. \`arc worker dev\` miniflare; remove if single-runtime> |
+| \`symptom_ttl_days\` | \`7\` — <FILL: 一条未诊断观察（symptom）开着多久仍无判决就告警。**按你自己的仓库重标**：看已判决关闭的那批实际用了多久，取分布之外的那个数。7 是 arc 的标定，不是通用常量> |
 | \`plugin_root\` | \`.claude/plugins/agentloop\` — where the plugin is vendored (recommended: a submodule / vendored clone kept fresh with \`publish-agentloop.sh\`). Resolved at runtime as \`\$AGENTLOOP_ROOT\` (central / fleet clone) → this vendored path — **no machine-specific absolute path is committed**. Skills reference runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. |
 
 ## Gate & Verification

@@ -32,14 +32,18 @@ export type Axis = "defectLayer" | "capabilityArea" | "openQuestion";
 const TYPE_LABELS: [WorkType, string[]][] = [
   // report 最优先：自动生成的 QA 报告不是「有人开的工作项」，有自己的处理通道。
   // 实测回归——#5625 同时挂 bug + nightly-test-report，若让 bug 赢就会混进分类。
-  ["report", ["nightly-test-report", "test-sweep-report"]],
+  // 每个类型的**第一个** label 是它的规范 label —— 「加上去就能被认回来」的那个。
+  // 其余是 provenance label：它们说的是「这条从哪来」，也能推出类型，但把
+  // `test-sweep-failure` 加到一条不是走查报出来的 issue 上是在撒谎，所以导出用
+  // 的是规范 label（`canonicalLabelFor`）。
+  ["report", ["report", "nightly-test-report", "test-sweep-report"]],
   // 其次 bug：一条同时挂 bug 和 idea 时按 bug 处理（缺陷的判据更硬）。
   // bug 也必须排在 symptom 之前——挂上 bug 就是**判决已做出**，它不再是待诊断观察。
   ["bug", ["bug"]],
   // symptom：走查/夜测报出的**单条**失败。它说的是「出现了预期外的东西」，
   // 而不是「这里有一个缺陷」——是不是缺陷、修复方向在哪，都还没有答案。
   // 详见下面 SYMPTOM_VERDICTS。
-  ["symptom", ["test-sweep-failure", "nightly-test-failure"]],
+  ["symptom", ["symptom", "test-sweep-failure", "nightly-test-failure"]],
   ["research", ["research"]],
   ["feature", ["feature", "enhancement"]],
   ["idea", ["idea"]],
@@ -51,6 +55,17 @@ export function typeOf(labels: string[]): WorkType {
   // 无类型标签不得默默当成 bug——arc 实测近 14 天新建的 34% 属于这一类，
   // 把它们塞进 bug 的轴会污染缺陷层的聚簇。
   return "untyped";
+}
+
+/**
+ * 「加上这个 label，下一轮就会被认成这个类型」——批量判断单导出的就是它。
+ *
+ * 缺了这层，导出的是**类型名**，而 symptom / report 的类型名不是任何一个 label：
+ * 命令跑完下一轮仍然 untyped，**「分类做了」与「分类没生效」完全同色**
+ * （本地 codex 审 #5685 时报的 P2）。
+ */
+export function canonicalLabelFor(t: WorkType): string | undefined {
+  return TYPE_LABELS.find(([type]) => type === t)?.[1][0];
 }
 
 export function axisFor(t: WorkType): Axis | null {

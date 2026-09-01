@@ -168,22 +168,37 @@ show("symptom:");
     z.every((c) => !c.clickable),
     true,
   );
+  // 全零分布是**合法产出**（这个仓库这一轮可能一条 symptom 都没有）。
+  // 直接取 bars()[0] 会在那种情况下崩掉——把「没东西可点」变成假红。
   const nz = bars()[0];
-  click(nz.el);
-  check(`symptom × ${nz.key}`, cards(), nz.n);
-  click(at(nz.key).el);
+  if (!nz) {
+    console.log("  ⊘ 这一轮 symptom 全零：没有可点的档，跳过这一臂（不是失败）");
+  } else {
+    click(nz.el);
+    check(`symptom × ${nz.key}`, cards(), nz.n);
+    click(at(nz.key).el);
+  }
 }
 
 console.log("\n=== 对抗 2：年龄筛 + 搜索框叠加，两个条件必须同时生效 ===");
 click(chip(""));
 const oldest = bars()[bars().length - 1];
+if (!oldest) {
+  console.log("\n⊘ 没有任何非空年龄档，叠加搜索这一臂无从跑起（不是失败）");
+  console.log(fails === 0 ? "\n✅ 全部通过" : `\n❌ ${fails} 项失败`);
+  process.exit(fails === 0 ? 0 : 1);
+}
 click(oldest.el);
 const before = cards();
+// 搜索词从**当前结果里真实存在的一条**上取（它的 id），不写死 arc 特有内容——
+// 写死 `did-space` 会让「这个仓库这一轮恰好没有那条」变成假红（本地 codex 报的 P2）。
+const seed = document.querySelector("#view .card")?.getAttribute("data-id") ?? "";
 const inp = document.getElementById("q");
-inp.value = "did-space";
+inp.value = seed;
 inp.dispatchEvent(new window.Event("input", { bubbles: true }));
 const after = cards();
-check(`${oldest.key} 叠 did-space 后条数变少`, after < before && after > 0, true);
+check(`★ 正控：拿到了一个真实存在的搜索种子`, seed.length > 0, true);
+check(`${oldest.key} 叠 #${seed} 后条数变少但非空`, after < before && after > 0, true);
 check(
   "结果仍是合法卡片（每张都挂着 data-id）",
   [...document.querySelectorAll("#view .card")].every((c) =>
@@ -191,7 +206,7 @@ check(
   ),
   true,
 );
-console.log(`  ${oldest.key} 全部 ${before} 条 → 叠 "did-space" 后 ${after} 条`);
+console.log(`  ${oldest.key} 全部 ${before} 条 → 叠 "${seed}" 后 ${after} 条`);
 
 console.log("\n=== 类型色：每个类型一个色，且互不重复 ===");
 {
