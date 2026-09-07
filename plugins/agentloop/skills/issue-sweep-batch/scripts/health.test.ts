@@ -28,17 +28,17 @@ const day = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString(
 const healthy: HealthInput = {
   now,
   items: [
-    { id: 1, type: "bug", createdAt: day(1), closedAt: null },
-    { id: 2, type: "feature", createdAt: day(2), closedAt: null },
-    { id: 3, type: "bug", createdAt: day(3), closedAt: day(1) },
-    { id: 4, type: "bug", createdAt: day(4), closedAt: day(2) },
+    { id: "1", type: "bug", createdAt: day(1), closedAt: null },
+    { id: "2", type: "feature", createdAt: day(2), closedAt: null },
+    { id: "3", type: "bug", createdAt: day(3), closedAt: day(1) },
+    { id: "4", type: "bug", createdAt: day(4), closedAt: day(2) },
     // 再关两条更早开的：窗口内 created 4 / closed 4，比值 1
-    { id: 5, type: "bug", createdAt: day(10), closedAt: day(2) },
-    { id: 6, type: "bug", createdAt: day(11), closedAt: day(3) },
+    { id: "5", type: "bug", createdAt: day(10), closedAt: day(2) },
+    { id: "6", type: "bug", createdAt: day(11), closedAt: day(3) },
     // ★ 正控：基线里**必须**有 symptom，否则 undiagnosed-symptom 的 accept 臂是空的——
     // 「仪器看过了、没事」与「压根没东西可看」同色。这条在 TTL 内，那条已判决关闭。
-    { id: 7, type: "symptom", createdAt: day(2), closedAt: null },
-    { id: 8, type: "symptom", createdAt: day(9), closedAt: day(6) },
+    { id: "7", type: "symptom", createdAt: day(2), closedAt: null },
+    { id: "8", type: "symptom", createdAt: day(9), closedAt: day(6) },
   ],
   stock7d: [10, 10, 9, 10, 9, 10, 9],
 };
@@ -54,7 +54,7 @@ describe("flowRatio / backlogSlope", () => {
   test("★ 没有关闭时比值不得是 Infinity（会让判据整块失效）", () => {
     const f = flowRatio({
       ...healthy,
-      items: [{ id: 1, type: "bug", createdAt: day(1), closedAt: null }],
+      items: [{ id: "1", type: "bug", createdAt: day(1), closedAt: null }],
     });
     expect(Number.isFinite(f.ratio)).toBe(true);
   });
@@ -90,8 +90,8 @@ describe("agingBuckets —— 总量不重要，年龄重要", () => {
   test("陈货按档落位：30 天 → 30-90d，200 天 → >90d", () => {
     const b = agingBuckets(
       [
-        { id: 1, type: "bug", createdAt: day(30), closedAt: null },
-        { id: 2, type: "bug", createdAt: day(200), closedAt: null },
+        { id: "1", type: "bug", createdAt: day(30), closedAt: null },
+        { id: "2", type: "bug", createdAt: day(200), closedAt: null },
       ],
       now,
     );
@@ -115,12 +115,12 @@ describe("★ detectors —— 每个都要有 accept 臂", () => {
       stock7d: [10, 20, 30, 40, 50, 60, 70],
       items: [
         ...Array.from({ length: 9 }, (_, i) => ({
-          id: i,
+          id: String(i),
           type: "bug",
           createdAt: day(1),
           closedAt: null,
         })),
-        { id: 99, type: "bug", createdAt: day(5), closedAt: day(1) },
+        { id: "99", type: "bug", createdAt: day(5), closedAt: day(1) },
       ],
     };
     expect(detectors(bad).map((d) => d.id)).toContain("backlog-expansion");
@@ -135,12 +135,12 @@ describe("★ detectors —— 每个都要有 accept 臂", () => {
       stock7d: [70, 60, 50, 40, 30, 20, 10],
       items: [
         ...Array.from({ length: 9 }, (_, i) => ({
-          id: i,
+          id: String(i),
           type: "bug",
           createdAt: day(1),
           closedAt: null,
         })),
-        { id: 99, type: "bug", createdAt: day(5), closedAt: day(1) },
+        { id: "99", type: "bug", createdAt: day(5), closedAt: day(1) },
       ],
     };
     expect(recovering.stock7d && backlogSlope(recovering.stock7d)).toBeLessThan(0);
@@ -165,7 +165,7 @@ describe("★ detectors —— 每个都要有 accept 臂", () => {
       total: 4,
       stock7d: [10, 10, 10, 10, 10, 10, 10],
       items: Array.from({ length: 4 }, (_, i) => ({
-        id: i,
+        id: String(i),
         type: "bug",
         createdAt: day(20),
         closedAt: null,
@@ -210,7 +210,7 @@ describe("★ assess —— 必须能说「不用管」", () => {
       total: 100,
       stock7d: [10, 20, 30, 40, 50, 60, 70],
       items: Array.from({ length: 20 }, (_, i) => ({
-        id: i,
+        id: String(i),
         type: "bug",
         createdAt: day(20),
         closedAt: null,
@@ -225,7 +225,7 @@ describe("★ assess —— 必须能说「不用管」", () => {
       untyped: 0,
       total: 10,
       stock7d: [70, 60, 50, 40, 30, 20, 10],
-      items: [{ id: 1, type: "bug", createdAt: day(1), closedAt: null }],
+      items: [{ id: "1", type: "bug", createdAt: day(1), closedAt: null }],
     });
     expect(a.headline + a.explanations.join()).toMatch(/恢复|下降|burn/);
   });
@@ -265,8 +265,8 @@ describe("★ undiagnosed-symptom —— 「判完了没事」与「没人判」
   // 就是「还没有人给出判决」——这个推断的前提钉在 classify.test.ts 的闭合词表那条。
   /** 新契约：没配 TTL 这个 detector 整个不跑，所以这一组显式配上。 */
   const TTL = { thresholds: { symptomTtlDays: 7 } };
-  const sym = (id: number, ageDays: number, closed: number | null = null) => ({
-    id,
+  const sym = (id: number | string, ageDays: number, closed: number | null = null) => ({
+    id: String(id),
     type: "symptom",
     createdAt: day(ageDays),
     closedAt: closed === null ? null : day(closed),
@@ -379,7 +379,7 @@ describe("★ ageBucketOf —— 柱子的数与点开的那批必须出自同�
 
   test("★ 反漂移：agingBuckets 的计数必须与逐条 ageBucketOf 完全一致", () => {
     const items = [0.2, 1.5, 4, 8, 20, 6.99, 7.01].map((d, k) => ({
-      id: k,
+      id: String(k),
       type: "bug",
       createdAt: day(d),
       closedAt: null,
@@ -395,8 +395,8 @@ describe("★ ageBucketOf —— 柱子的数与点开的那批必须出自同�
 
   test("★ 已关闭的不进柱子 —— 点开也不该出现它们", () => {
     const items = [
-      { id: 1, type: "bug", createdAt: day(20), closedAt: day(1) },
-      { id: 2, type: "bug", createdAt: day(20), closedAt: null },
+      { id: "1", type: "bug", createdAt: day(20), closedAt: day(1) },
+      { id: "2", type: "bug", createdAt: day(20), closedAt: null },
     ];
     expect(agingBuckets(items, now)["14-30d"]).toBe(1);
   });
@@ -428,9 +428,9 @@ describe("★ 年龄刻度 —— 一个表，别处都从它派生", () => {
     const i: HealthInput = {
       ...healthy,
       items: [
-        { id: 90, type: "bug", createdAt: day(200), closedAt: null },
-        { id: 91, type: "bug", createdAt: day(150), closedAt: null },
-        { id: 92, type: "bug", createdAt: day(100), closedAt: null },
+        { id: "90", type: "bug", createdAt: day(200), closedAt: null },
+        { id: "91", type: "bug", createdAt: day(150), closedAt: null },
+        { id: "92", type: "bug", createdAt: day(100), closedAt: null },
       ],
       stock7d: [10, 10, 10, 10, 10, 10, 10],
     };
@@ -444,8 +444,8 @@ describe("★ 门槛可按仓库覆盖 —— arc 的标定不该硬编码进分
   // 本地跨引擎 review 报的 P2：symptom 的 7 天 TTL 是从 **arc 自己**的 test-sweep
   // 历史标出来的，把它随插件发给每个消费仓库，会让诊断节奏更慢的仓库天天收到
   // action-required。插件出**机制与默认值**，具体数字住消费仓库的 profile。
-  const overdue = (days: number, id: number) => ({
-    id,
+  const overdue = (days: number, id: number | string) => ({
+    id: String(id),
     type: "symptom",
     createdAt: day(days),
     closedAt: null,

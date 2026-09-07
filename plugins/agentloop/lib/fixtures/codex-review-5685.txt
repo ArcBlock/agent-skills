@@ -1,0 +1,9 @@
+The new symptom classification UI emits a label that the classifier cannot consume, and the added UI verification script produces data-dependent false failures. The targeted unit tests pass, but they do not cover these integration defects.
+
+Full review comments:
+
+- [P2] Remove the unusable `symptom` classification option — /Users/robmao/work/arcblock/arc/.claude/plugins/agentloop/skills/issue-sweep-batch/scripts/html.ts:346-348
+  When a user selects `symptom`, the generated command adds a literal `symptom` label, but `typeOf()` recognizes symptoms only through `test-sweep-failure` or `nightly-test-failure`. On the next run the issue is therefore still `untyped`, so the classification does not persist or contribute to learned rules. Either recognize the emitted label or omit this option.
+
+- [P2] Make the UI verifier independent of Arc-specific content — /Users/robmao/work/arcblock/arc/.claude/plugins/agentloop/skills/issue-sweep-batch/scripts/ui-verify.mjs:183-186
+  For any valid generated report whose oldest bucket has no item matching `did-space`, this assertion fails even though search and age-filter composition work correctly. The verifier is intended to validate arbitrary output, so it should derive a narrowing query from an existing item or use a deterministic fixture instead of repository-specific live content.

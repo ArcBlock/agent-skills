@@ -535,8 +535,8 @@ function detectCronPath(bunPath: string): string {
  *  preserves those from an existing repos.json, or pass --repos-json for full control. */
 /**
  * Empty by design: per-skill daemon isolation comes from a named instance
- * (`arc service start fleet-issue-sweep` / `fleet-pr-sweep` — kernel-allocated
- * port, `arc service url NAME` to read it back), which needs no env var.
+ * (`arc service start --instance fleet-issue-sweep` / `arc service start --instance fleet-pr-sweep` — kernel-allocated
+ * port, `arc service url --instance NAME` to read it back), which needs no env var.
  * `skillEnv` stays a preserve-on-reconcile slot for hand-tuned extras.
  */
 export const defaultSkillEnv = (): DeploymentConfig["skillEnv"] => ({});

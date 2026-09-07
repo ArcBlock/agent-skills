@@ -71,6 +71,23 @@ Corollary you enforce on every worker and reviewer: **the accept-path iron law**
 - **Isolated worktree per worker** (`isolation: "worktree"` on the Agent call) so parallel workers never collide on files.
 - **Every worker DOES NOT MERGE.** Merging is the conductor's gated act, always.
 
+### Identity (Wave 4 / #6000)
+
+Dispatch and report by **work DID**. GitHub issue/PR numbers are an outbound projection (`sourceUrl`), not scheduling identity.
+
+Resolve a sub-issue (executable; do not start at `gh issue view`):
+```bash
+arc --json afs exec /.actions/query --args '{"path":"/work","where":{"field":"meta.objectId","eq":"<DID>"},"limit":8}'
+```
+A Change Set is `workType=change-set` with `meta.head` a 40-char git sha. Merge-gate keys off that `head`. The documented command **must** carry `--cs-head` when the CS exists — dropping it and running `merge-gate.ts <PR#>` is GitHub-as-truth, forbidden:
+
+```bash
+bun .claude/verify/merge-gate.ts --cs-head <40-char-sha> <PR#>
+# --cs-head is the 40-char PR/CS head, must be current HEAD.
+# add --source-url <url> only when the CS has sourceUrl (headRefOid cross-check).
+# --data-file still requires an explicit PR#.
+```
+
 ## The loop
 
 ### 0. (Optional) Design hand-off — when the epic has a visual/UX surface
@@ -96,7 +113,7 @@ This repo may have `issue-sweep`/`pr-sweep` cron runners that will otherwise gra
 
 ### 3. Dispatch a worker per ready sub-issue
 Launch an Agent (isolated worktree, model by weight) with a precise brief. Every worker brief MUST include:
-- **Spec = the issue** (`gh issue view <n> --comments`) + the epic's scope-decision comment.
+- **Spec = the work DID** (`arc --json afs read /work/<id>.json` + `/work` query). GitHub `gh issue view <n> --comments` is the projection alias **after** a `/work` miss (or to read human comments on `sourceUrl`). Plus the epic's scope-decision comment.
 - **Invariants**: strict TDD; the repo's I/O / architecture rules; reuse existing primitives (name them + their files) rather than re-inventing; no new error classes unless the repo lacks one; the accept-path iron law.
 - **Verify before push**: run the repo's verification gate to PASS; never `--no-verify`; never skip.
 - **Open a PR, DO NOT merge — and label it atomically at create time** (Codex P1 on arc#3558: the window between `gh pr create` and the conductor learning the PR# is when hourly `pr-sweep` can still grab an unlabeled PR). PR title = Conventional Commits; body starts with the repo's identity line (`scripts/agent-identity.sh …`), then summary / design decisions / acceptance evidence / `Closes #<n>` / the repo's footer. **Create command MUST carry all three labels in one shot** (do not open bare then label later as the primary path):
@@ -109,7 +126,7 @@ Launch an Agent (isolated worktree, model by weight) with a precise brief. Every
   If create without labels somehow happens (tooling gap), the **first** action after create is `gh pr edit <PR#> --add-label epic-managed --add-label "epic:<epic#>" --add-label agent:hold` before any long verify wait.
 - **Post the verification report** to the PR (`… --comment <PR#>` or equivalent).
 - **Bot review self-handling is NON-BLOCKING** (see §6). The worker brief MUST require: reply **in-thread** (not a new top-level comment); after any fix commit, re-run verification `--comment` **and** every SHA-matched sticky this diff needs (e2e-gate / ui-verify); do not merge.
-- **Report back**: PR#/URL, decisions made, gate results, bot P1/High status (fixed sha / REJECT thread / OPEN), deviations/concerns — raw facts, no marketing.
+- **Report back**: work DID, Change Set `head` (40-char), projection PR#/URL if `sourceUrl` exists, decisions made, gate results, bot P1/High status (fixed sha / REJECT thread / OPEN), deviations/concerns — raw facts, no marketing. GH PR# is projection, not identity.
 When a worker returns, the conductor **re-asserts** `agent:hold` + `epic-managed` + `epic:<n>` (idempotent) — that is a safety net, **not** the first time those labels appear.
 
 ### 3.5 Pre-PR adversarial review (left-shift, before `gh pr create`)
@@ -165,10 +182,11 @@ a sandbox boundary, or payment/billing:
   **Synthesis** (one agent; the rules below apply in order):
   1. **Neither role has a blocking finding** → synthesize `MERGE` (or `COMMENT` with
      non-blocking notes). This does not replace §7's gate — the repo's `pre-merge`
-     verification, e2e-gate, and ui-verify still run exactly as for a normal PR. Every role
-     invokes the verification entrypoint when it needs the fact; a shared broker may make one
-     actual run only for the same `{HEAD SHA, scenario, resolved base}`. That efficiency never
-     substitutes for the independent code-review roles.
+     verification, e2e-gate, and ui-verify still *apply* exactly as for a normal PR. Reviewer /
+     fixer / conductor do **not** re-invoke the gate when a current sticky or sibling-location
+     PASS already matches `{HEAD SHA, scenario, resolved base, capabilities}`; they read that
+     fact. Independent code review of the diff stays. That efficiency never substitutes for
+     the independent code-review roles.
   2. **Only one role produced findings** → pass them through directly as the verdict basis;
      do not spend an agent on synthesis just for symmetry.
   3. **Both roles have findings** → read-only merge: dedupe, order by severity, keep every
@@ -266,7 +284,7 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 Merge a PR only when ALL hold, **in this order** (do not skip to squash):
 
 1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
-2. Repo **merge gate** exits 0 on the SHA you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Every applicable sticky comment's `sha=` **must equal HEAD** — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. Re-invoke the gate entrypoint before this step; the broker may reuse only the exact current identity.
+2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. If the verification sticky (or sibling-location shared evidence) is already PASS at `sha=HEAD` with matching base+capabilities, **read that fact** — do not re-invoke `pre-merge.ts`. Re-invoke only when identity does not match.
 3. **Every actionable inline review thread is addressed** per §6 (fixed with SHA/change/verification or REJECTed with reasoning; only P2/Medium/Low may defer with tracking/owner/re-entry condition). Any P1/High that is not fixed or REJECTed is a hard blocker; lower severity is not a risk blocker but is still never mergeable without its in-thread conclusion.
 4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
 

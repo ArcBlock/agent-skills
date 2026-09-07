@@ -27,6 +27,11 @@ export interface GateFail {
   detail?: string;
 }
 
+export interface StickyGateOpts {
+  /** Default `{PASS, NA}`. A door that cannot take the docs/native exemption passes `{PASS}`. */
+  accept?: readonly string[];
+}
+
 /**
  * Enforce ONE sticky-comment gate: find the latest comment whose body starts with
  * `prefix`, parse `sha=`/`result=` off its marker line, and require sha==prHead
@@ -48,6 +53,7 @@ export function requireStickyGate(
   label: string,
   rerunHint: string,
   runner: Runner = run,
+  opts?: StickyGateOpts,
 ): GatePass | GateFail {
   // Decode HTML entities before the startswith test — a sticky comment posted via the
   // MCP fallback (blocked `gh`, #4283) arrives with its marker escaped to `&lt;!-- ...`,
@@ -111,11 +117,12 @@ export function requireStickyGate(
 
   const commentSha = shaMatch[1];
   const commentResult = resultMatch[1];
+  const accept = opts?.accept ?? ["PASS", "NA"];
 
-  if (commentResult !== "PASS" && commentResult !== "NA") {
+  if (!accept.includes(commentResult)) {
     return {
       ok: false,
-      reason: `${label} result is ${commentResult} — must be PASS or NA before merging`,
+      reason: `${label} result is ${commentResult} — must be ${accept.join(" or ")} before merging`,
       detail: `Re-run: ${rerunHint}`,
     };
   }

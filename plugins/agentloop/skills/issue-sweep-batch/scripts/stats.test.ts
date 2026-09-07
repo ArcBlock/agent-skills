@@ -12,8 +12,8 @@ import {
   untypedShare,
 } from "./stats";
 
-const T = (id: number, type: string, created: string, closed?: string): TimedItem => ({
-  id,
+const T = (id: number | string, type: string, created: string, closed?: string): TimedItem => ({
+  id: String(id),
   type,
   createdAt: created,
   closedAt: closed ?? null,
@@ -199,13 +199,13 @@ describe("★ 按类型分解的序列 —— 一根「全部」的柱子看不�
   const now = new Date("2026-08-30T12:00:00Z");
   const d = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
   const items = [
-    { id: 1, type: "bug", createdAt: d(1), closedAt: null },
-    { id: 2, type: "bug", createdAt: d(2), closedAt: d(1) },
-    { id: 3, type: "feature", createdAt: d(1), closedAt: null },
-    { id: 4, type: "feature", createdAt: d(3), closedAt: null },
-    { id: 5, type: "idea", createdAt: d(2), closedAt: d(2) },
+    { id: "1", type: "bug", createdAt: d(1), closedAt: null },
+    { id: "2", type: "bug", createdAt: d(2), closedAt: d(1) },
+    { id: "3", type: "feature", createdAt: d(1), closedAt: null },
+    { id: "4", type: "feature", createdAt: d(3), closedAt: null },
+    { id: "5", type: "idea", createdAt: d(2), closedAt: d(2) },
     // 未知类型：**不能从堆叠里消失**，否则堆起来的高度小于总量而没人看得出来
-    { id: 6, type: "chore", createdAt: d(1), closedAt: null },
+    { id: "6", type: "chore", createdAt: d(1), closedAt: null },
   ];
   const b = bucketsFor("day", now);
 
@@ -241,7 +241,7 @@ describe("★ 按类型分解的序列 —— 一根「全部」的柱子看不�
     const empty = bucketFlowByType([], b);
     expect(Object.keys(empty).length).toBe(0);
     // 有一条就得有一整条全零的桶序列，长度与 buckets 对齐
-    const one = bucketFlowByType([items[0]], b);
+    const one = bucketFlowByType([items[0]!], b);
     expect(one.bug.length).toBe(b.length);
   });
 });

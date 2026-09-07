@@ -58,6 +58,13 @@ import {
 } from "./comment.ts";
 import { deriveRunClass, envGapIdentity, isFailureClass } from "./failure-class.ts";
 import {
+  evaluateOwnerLiveness,
+  type LivenessVerdict,
+  memoizedStartTimeReader,
+  type OwnerRecord,
+  ownerIdentity,
+} from "./pid-liveness.ts";
+import {
   type CheckResult,
   deriveResult,
   type FailureClass,
@@ -773,7 +780,8 @@ export interface CachedEvidence {
   report: string;
   result: VerifyResult;
   coverage: EvidenceCoverage;
-  /** the location that produced it — part of the key, not decoration (#5339). */
+  /** the location that produced it — on the artifact (`📍 Produced at`). Not a
+   *  refuse-to-reuse key for PASS/NA (#5875); FAIL/TIMEOUT stay location-scoped. */
   location: EvidenceLocation;
   /** the probed environment vector it answers for — part of the key too (#5386). */
   capabilities: CapabilitySet;
@@ -821,13 +829,21 @@ function gitCommonDir(): string | undefined {
 }
 
 /**
+ * Override for {@link sharedRoot}. Tests inject a throwaway directory so they
+ * never read or write the process-default store at
+ * `<git-common-dir>/agentloop/verification` (arc#5776). Nothing in production
+ * sets this.
+ */
+export const VERIFICATION_STATE_DIR_ENV = "AGENTLOOP_VERIFICATION_STATE_DIR";
+
+/**
  * Verification is a repository resource, not a worktree resource.  A linked
  * worktree has its own `.verify/`, but all linked worktrees share this git
  * common directory.  The override makes isolated tests possible without
  * writing state into the real checkout's `.git` directory.
  */
 export function sharedRoot(): string | undefined {
-  const override = process.env.AGENTLOOP_VERIFICATION_STATE_DIR?.trim();
+  const override = process.env[VERIFICATION_STATE_DIR_ENV]?.trim();
   if (override) return resolve(override);
   const common = gitCommonDir();
   return common ? resolve(common, "agentloop", "verification") : undefined;
@@ -850,11 +866,13 @@ function sharedDir(root: string, sha: string, scenario: string, base: string): s
  * poisoned or flaky red stuck to the commit everywhere, and the one honest response —
  * re-verify from a different, clean location — was exactly what the cache made impossible.
  *
- * So location is part of the KEY and part of the ARTIFACT, written by the side that knows
- * the answer (the producer) rather than inferred by a consumer from its environment
- * (epic #5328). The distinction that matters is same-location vs cross-location reuse, not
- * cache vs no cache: same location still reuses (#5223's benefit), a different location
- * gets its own slot and therefore a real run.
+ * So location is part of the ARTIFACT, written by the side that knows the answer (the
+ * producer) rather than inferred by a consumer from its environment (epic #5328). The
+ * slot is still location-keyed so two producers never overwrite each other. Reuse of a
+ * PASS/NA is keyed on (sha, scenario, base, capabilities) across sibling locations in
+ * the same git common-dir store (#5875): a second worktree must not pay another 350s
+ * for a fact that already exists. FAIL/TIMEOUT stay at the producing tree so a flaky
+ * red cannot become every tree's answer (#5339).
  */
 interface EvidenceLocation {
   /** worktree root that ran the checks (git toplevel; cwd when git cannot say). */
@@ -1155,23 +1173,59 @@ function otherLocationRecords(
   return found;
 }
 
-function readOwnerPid(path: string): number | undefined {
+/**
+ * The owner block of a lease, or `undefined` when the record is unreadable or
+ * names no usable pid. `undefined` stays fail-closed at every call site: it is a
+ * corrupt lease, never "nobody holds this".
+ */
+function readOwnerRecord(path: string): OwnerRecord | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(`${path}/owner.json`, "utf8")) as { pid?: unknown };
-    return typeof parsed.pid === "number" && parsed.pid > 1 ? parsed.pid : undefined;
+    const parsed = JSON.parse(readFileSync(`${path}/owner.json`, "utf8")) as {
+      pid?: unknown;
+      processStartedAt?: unknown;
+      startedAt?: unknown;
+    };
+    // `>= 1`, not `> 1`: inside a container the gate genuinely runs as pid 1,
+    // and treating that record as unreadable would refuse a legitimate owner on
+    // every containerised host. Only a non-positive or non-integer pid is
+    // unusable — those are the group/broadcast values `kill(2)` reinterprets.
+    if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid < 1)
+      return undefined;
+    return {
+      pid: parsed.pid,
+      processStartedAt:
+        typeof parsed.processStartedAt === "number" ? parsed.processStartedAt : undefined,
+      startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
+    };
   } catch {
     return undefined;
   }
 }
 
-function processIsAlive(pid: number | undefined): boolean {
-  if (pid === undefined) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Reclaiming a lease whose pid was RECYCLED is the interesting event, and the
+ * only one worth a line: an ordinary dead owner (ESRCH) is the routine case and
+ * saying so every time would be noise. Naming it here is what stops the next
+ * human from reading a stale ledger entry as a running gate and acting on a pid
+ * that now belongs to something else entirely (#5815).
+ */
+function noteRecycledOwner(scenario: string, verdict: LivenessVerdict): void {
+  if (verdict.reason !== "pid-recycled") return;
+  console.error(`⚠️  reclaiming ${scenario} verification lease: ${verdict.detail}`);
+}
+
+/**
+ * How a live-owner refusal names itself.
+ *
+ * `startTimeChecked` is the difference between 「measured, and it is the same
+ * process」 and 「could not measure, so recycling was not ruled out」 — both of
+ * which are `alive`, and which would otherwise print identically. Reading it
+ * here is what stops a blind instrument from looking like a verified one.
+ */
+export function livenessSuffix(verdict: LivenessVerdict): string {
+  return verdict.startTimeChecked
+    ? verdict.reason
+    : `${verdict.reason}; start time unmeasured, recycling NOT ruled out`;
 }
 
 /** POSIX rename onto an existing directory; treat as "already held". */
@@ -1309,17 +1363,22 @@ function createLeaseLock(lock: string, owner: Record<string, unknown>): void {
 function acquireLocalScenarioLease(scenario: string): ScenarioLease | undefined {
   const path = localLeasePath(scenario);
   mkdirSync(".verify/.leases", { recursive: true });
+  // Hoisted out of the retry loop deliberately (Codex P2 on #5825). Every field
+  // is a constant: the pid and the process's own start time are fixed for this
+  // process's lifetime, and `startedAt` only has to be an UPPER BOUND on that
+  // start, so computing it once is not merely cheaper but equally correct.
+  // Inside the loop it cost one `ps` subprocess per iteration — measured at
+  // ~1.5 ms against `process.kill`'s ~0.0002 ms, about 7,400x — and the shared
+  // wait loop below can run for 900 s at 100 ms intervals.
+  const identity = ownerIdentity({ scenario });
+  const startTimeMs = memoizedStartTimeReader();
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      createLeaseLock(path, {
-        pid: process.pid,
-        scenario,
-        startedAt: new Date().toISOString(),
-      });
+      createLeaseLock(path, identity);
       return { path };
     } catch (err) {
       if (!isLeaseHeldError(err)) throw err;
-      const owner = readOwnerPid(path);
+      const owner = readOwnerRecord(path);
       // Lock creation is atomic (temp dir + rename), so a missing/malformed
       // owner is a corrupt lease, not the mkdir→write window. Reclaiming it
       // would admit duplicate gates if another owner is still using it.
@@ -1329,14 +1388,16 @@ function acquireLocalScenarioLease(scenario: string): ScenarioLease | undefined 
         );
         return undefined;
       }
-      if (processIsAlive(owner)) {
+      const liveness = evaluateOwnerLiveness(owner, { startTimeMs });
+      if (liveness.alive) {
         console.error(
-          `❌ ${scenario} is already running (owner pid ${owner}); refusing duplicate gate admission.`,
+          `❌ ${scenario} is already running (owner pid ${owner.pid}, ${livenessSuffix(liveness)}); refusing duplicate gate admission.`,
         );
         return undefined;
       }
       // A crashed owner leaves no process to coordinate with. Reclaim only
       // this scenario's own lock directory, then retry its atomic create once.
+      noteRecycledOwner(scenario, liveness);
       rmSync(path, { recursive: true, force: true });
     }
   }
@@ -1354,13 +1415,17 @@ function writeAtomic(path: string, content: string): void {
   renameSync(temporary, path);
 }
 
+/** Gate tokens a sibling location may donate. FAIL/TIMEOUT stay at the producing tree. */
+const SIBLING_REUSABLE_RESULTS = new Set<string>(["PASS", "NA"]);
+
 function readSharedEvidence(
   dir: string,
   sha: string,
   scenario: string,
   base: string,
-  location: EvidenceLocation,
+  location: EvidenceLocation | undefined,
   capabilities: CapabilitySet,
+  allowedResults?: ReadonlySet<string>,
 ): CachedEvidence | undefined {
   const metadataPath = `${dir}/metadata.json`;
   const reportPath = `${dir}/report.md`;
@@ -1372,6 +1437,9 @@ function readSharedEvidence(
     const result = readFileSync(resultPath, "utf8").trim() as VerifyResult;
     const producedAt = parseLocation(metadata.location);
     const disclosed = parseEnvGaps(metadata.envGaps, metadataPath);
+    const accepted = allowedResults
+      ? allowedResults.has(result)
+      : ["PASS", "NA", "FAIL", "TIMEOUT"].includes(result);
     if (
       // A record that cannot state what its checks reported about the environment is
       // not readable evidence — fail closed rather than read it as gap-free (#5386).
@@ -1384,10 +1452,11 @@ function readSharedEvidence(
       metadata.sourceClean !== true ||
       metadata.result !== result ||
       !isCoverage(metadata) ||
-      // #5339: a record only answers for the location that produced it. The slot is
-      // already location-keyed; re-checking the producer's own statement here means a
-      // record misfiled into another location's slot still cannot be reused as its own.
-      !sameLocation(producedAt, location) ||
+      // Own-slot reads still require the producer's statement to match this tree
+      // (#5339): a record misfiled into another location's slot cannot be reused
+      // as its own. Sibling PASS/NA reuse passes `location === undefined` and is
+      // gated by {@link SIBLING_REUSABLE_RESULTS} instead (#5875).
+      (location !== undefined && !sameLocation(producedAt, location)) ||
       // #5386, the same argument one axis over: the slot is capability-keyed, and
       // re-checking the producer's own statement here means a record misfiled into
       // another environment's slot still cannot be reused as its own.
@@ -1395,7 +1464,7 @@ function readSharedEvidence(
       // Only a full run is ever published here; a record claiming otherwise is not
       // shared evidence and must not be reused as one (#5067).
       metadata.fullScenario !== true ||
-      !["PASS", "NA", "FAIL", "TIMEOUT"].includes(result)
+      !accepted
     ) {
       return undefined;
     }
@@ -1412,6 +1481,48 @@ function readSharedEvidence(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Own-slot record (any result) first; then a sibling PASS/NA whose
+ * (sha, scenario, base, capabilities) match. Location is on the artifact, not a
+ * refuse-to-reuse key for PASS (#5875). FAIL is never donated across trees.
+ */
+function findReusableSharedEvidence(
+  coordination: string,
+  sha: string,
+  scenario: string,
+  base: string,
+  location: EvidenceLocation,
+  capabilities: CapabilitySet,
+): { cached: CachedEvidence; record: string } | undefined {
+  const ownDir = evidenceDir(coordination, location, capabilities);
+  const own = readSharedEvidence(ownDir, sha, scenario, base, location, capabilities);
+  if (own) return { cached: own, record: ownDir };
+
+  const byLocation = resolve(coordination, "by-location");
+  let slots: string[];
+  try {
+    slots = readdirSync(byLocation);
+  } catch {
+    return undefined;
+  }
+  const mine = locationId(location, capabilities);
+  for (const slot of slots) {
+    if (slot === mine) continue;
+    const dir = resolve(byLocation, slot);
+    const sibling = readSharedEvidence(
+      dir,
+      sha,
+      scenario,
+      base,
+      undefined,
+      capabilities,
+      SIBLING_REUSABLE_RESULTS,
+    );
+    if (sibling) return { cached: sibling, record: dir };
+  }
+  return undefined;
 }
 
 function hasPartialSharedEvidence(dir: string): boolean {
@@ -1598,25 +1709,46 @@ function acquireSharedScenarioLease(
   const dir = evidenceDir(coordination, location, capabilities);
   const lock = `${coordination}/lease.lock`;
   const deadline = Date.now() + sharedWaitMs();
-  mkdirSync(dir, { recursive: true });
+  // Do not mkdir the location slot until this tree is actually going to run:
+  // an empty own slot would look like a second producer to `readdir` (#5875).
+  // Hoisted out of the retry loop deliberately (Codex P2 on #5825). Every field
+  // is a constant: the pid and the process's own start time are fixed for this
+  // process's lifetime, and `startedAt` only has to be an UPPER BOUND on that
+  // start, so computing it once is not merely cheaper but equally correct.
+  // Inside the loop it cost one `ps` subprocess per iteration — measured at
+  // ~1.5 ms against `process.kill`'s ~0.0002 ms, about 7,400x — and the shared
+  // wait loop below can run for 900 s at 100 ms intervals.
+  const identity = ownerIdentity({ scenario, sha });
+  const startTimeMs = memoizedStartTimeReader();
 
   for (;;) {
-    const cached = readSharedEvidence(dir, sha, scenario, base, location, capabilities);
-    if (cached) return cached;
+    const reusable = findReusableSharedEvidence(
+      coordination,
+      sha,
+      scenario,
+      base,
+      location,
+      capabilities,
+    );
+    if (reusable) return reusable.cached;
     try {
-      createLeaseLock(lock, {
-        pid: process.pid,
-        scenario,
-        sha,
-        startedAt: new Date().toISOString(),
-      });
+      createLeaseLock(lock, identity);
       // A completed writer may have released immediately before our create.
       // Re-check while holding the lock; if so we only reuse it and do not run.
-      const completed = readSharedEvidence(dir, sha, scenario, base, location, capabilities);
+      // Sibling PASS/NA is the same fact (#5875): location must not split the slot.
+      const completed = findReusableSharedEvidence(
+        coordination,
+        sha,
+        scenario,
+        base,
+        location,
+        capabilities,
+      );
       if (completed) {
         rmSync(lock, { recursive: true, force: true });
-        return completed;
+        return completed.cached;
       }
+      mkdirSync(dir, { recursive: true });
       // A crashed publisher may have left report/result without the atomic
       // metadata commit, or a corrupt metadata file.  It is evidence-shaped
       // but untrustworthy; replacing it with a fresh run would turn ambiguity
@@ -1634,7 +1766,7 @@ function acquireSharedScenarioLease(
       return { path: lock, shared: { coordination, sha, scenario, base, location, capabilities } };
     } catch (err) {
       if (!isLeaseHeldError(err)) throw err;
-      const owner = readOwnerPid(lock);
+      const owner = readOwnerRecord(lock);
       // Lock creation is atomic, so a missing/malformed owner is corrupt, not
       // a racer between mkdir and write. Deleting it would reopen the race.
       if (owner === undefined) {
@@ -1643,13 +1775,15 @@ function acquireSharedScenarioLease(
         );
         return undefined;
       }
-      if (!processIsAlive(owner)) {
+      const liveness = evaluateOwnerLiveness(owner, { startTimeMs });
+      if (!liveness.alive) {
+        noteRecycledOwner(scenario, liveness);
         rmSync(lock, { recursive: true, force: true });
         continue;
       }
       if (Date.now() >= deadline) {
         console.error(
-          `❌ ${scenario}@${sha.slice(0, 9)} is still running (owner pid ${owner}); timed out waiting without starting a duplicate gate.`,
+          `❌ ${scenario}@${sha.slice(0, 9)} is still running (owner pid ${owner.pid}, ${livenessSuffix(liveness)}); timed out waiting without starting a duplicate gate.`,
         );
         return undefined;
       }
@@ -1677,16 +1811,19 @@ function acquireFailedEvidenceRetryLease(
   const lock = `${coordination}/lease.lock`;
   const deadline = Date.now() + sharedWaitMs();
   mkdirSync(dir, { recursive: true });
+  // Hoisted out of the retry loop deliberately (Codex P2 on #5825). Every field
+  // is a constant: the pid and the process's own start time are fixed for this
+  // process's lifetime, and `startedAt` only has to be an UPPER BOUND on that
+  // start, so computing it once is not merely cheaper but equally correct.
+  // Inside the loop it cost one `ps` subprocess per iteration — measured at
+  // ~1.5 ms against `process.kill`'s ~0.0002 ms, about 7,400x — and the shared
+  // wait loop below can run for 900 s at 100 ms intervals.
+  const identity = ownerIdentity({ scenario, sha, retryFailed: true });
+  const startTimeMs = memoizedStartTimeReader();
 
   for (;;) {
     try {
-      createLeaseLock(lock, {
-        pid: process.pid,
-        scenario,
-        sha,
-        retryFailed: true,
-        startedAt: new Date().toISOString(),
-      });
+      createLeaseLock(lock, identity);
       const cached = readSharedEvidence(dir, sha, scenario, base, location, capabilities);
       if (!cached) {
         if (hasPartialSharedEvidence(dir)) {
@@ -1716,20 +1853,22 @@ function acquireFailedEvidenceRetryLease(
       return { path: lock, shared: { coordination, sha, scenario, base, location, capabilities } };
     } catch (err) {
       if (!isLeaseHeldError(err)) throw err;
-      const owner = readOwnerPid(lock);
+      const owner = readOwnerRecord(lock);
       if (owner === undefined) {
         console.error(
           `❌ ${scenario}@${sha.slice(0, 9)} has an unreadable shared verification lease; refusing retry admission.`,
         );
         return undefined;
       }
-      if (!processIsAlive(owner)) {
+      const liveness = evaluateOwnerLiveness(owner, { startTimeMs });
+      if (!liveness.alive) {
+        noteRecycledOwner(scenario, liveness);
         rmSync(lock, { recursive: true, force: true });
         continue;
       }
       if (Date.now() >= deadline) {
         console.error(
-          `❌ ${scenario}@${sha.slice(0, 9)} is still running (owner pid ${owner}); timed out waiting without starting a duplicate retry.`,
+          `❌ ${scenario}@${sha.slice(0, 9)} is still running (owner pid ${owner.pid}, ${livenessSuffix(liveness)}); timed out waiting without starting a duplicate retry.`,
         );
         return undefined;
       }
@@ -1793,13 +1932,16 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
  * `.git/agentloop/verification/<sha>` — wrong twice over for the factory, where every agent
  * works in a linked worktree whose `.git` is a FILE: the record lives in the git COMMON
  * dir, at a path this notice is the only thing in a position to know. So it prints the
- * resolved record path, not a template. Reuse is now always same-location (a different
- * location gets its own slot and therefore a real run), hence the single branch.
+ * resolved record path, not a template.
+ *
+ * #5875: reuse of PASS/NA is no longer same-location only. A sibling location in this
+ * git common-dir store is named on the line so silent reuse cannot hide a 350s skip.
  */
 export function provenanceNotice(
   cached: CachedEvidence,
   sha: string,
   record: string | undefined,
+  here?: EvidenceLocation,
 ): string {
   const at = cached.location;
   // `record` is a resolved filesystem path, and paths may legally contain `'`. This line
@@ -1818,8 +1960,10 @@ export function provenanceNotice(
   const gaps = cached.envGaps.length
     ? `> ⚠️ That run reported environment gap(s): \`${cached.envGaps.join("`, `")}\` — part of its answer was decided by what the host could not do.\n`
     : "";
+  const sibling = here !== undefined && !sameLocation(cached.location, here);
+  const where = sibling ? "a sibling location in this git common-dir store" : "this same location";
   return (
-    "> ℹ **Reused evidence** — produced by an earlier run at this same location, under the " +
+    `> ℹ **Reused evidence** — produced by an earlier run at ${where}, under the ` +
     "same declared capabilities, for this same commit — not by the invocation that " +
     "delivered it.\n" +
     `> Produced at tree \`${at.worktree}\` · host clone \`${at.hostClone}\`` +
@@ -2042,6 +2186,40 @@ export function cleanForEvidence(): EvidenceDirtiness {
 }
 
 /**
+ * Would this invocation reuse completed shared evidence without running checks?
+ *
+ * Consulted BEFORE lane admission (arc#5833) so a zero-work reuse does not
+ * queue behind a live holder. Same identity as {@link runScenario}'s reuse
+ * path (sha, scenario, base, capabilities; a sibling-location PASS/NA is a
+ * hit, #5875). A miss here must not skip the lane, because a false hit would
+ * run the full gate unadmitted.
+ *
+ * Returns the reusable record, or `undefined` when this invocation would
+ * actually run checks (or cannot decide). `--help`/`--na`/`--deliver-cached`
+ * are already skipped by `NON_HEAVY_FLAGS` and are not this function's job.
+ */
+export function peekReusableSharedEvidence(
+  config: ScenarioConfig,
+  argv: string[],
+): CachedEvidence | undefined {
+  if (argv.includes("--help") || argv.includes("-h") || argv.includes("--na")) return undefined;
+  if (argv.includes("--deliver-cached")) return undefined;
+  const only = parseSelect(argv, "--only");
+  const skip = parseSelect(argv, "--skip");
+  if (only || skip) return undefined;
+  if (resolveRetryFailed(argv, config)) return undefined;
+  const sha = head();
+  const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
+  const here = evidenceLocation();
+  const capabilities = probeCapabilities(config.capabilities);
+  const root = sharedRoot();
+  if (!root) return undefined;
+  const coordination = sharedDir(root, sha, config.scenario, base);
+  return findReusableSharedEvidence(coordination, sha, config.scenario, base, here, capabilities)
+    ?.cached;
+}
+
+/**
  * Run a scenario end-to-end and exit the process with the gate code. This is the
  * single entrypoint a repo's thin scenario script (e.g. `.claude/verify/pre-pr.ts`)
  * calls: `runScenario(config, process.argv)`.
@@ -2184,21 +2362,28 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const partial = cached && !cached.coverage.fullScenario ? cached : undefined;
     if (partial) cached = undefined;
     const root = sharedRoot();
-    const record = root
-      ? evidenceDir(sharedDir(root, sha, config.scenario, base), here, declaredCapabilities)
-      : undefined;
+    const coordination = root ? sharedDir(root, sha, config.scenario, base) : undefined;
+    let record = coordination ? evidenceDir(coordination, here, declaredCapabilities) : undefined;
     if (!cached) {
-      const shared = record
-        ? readSharedEvidence(record, sha, config.scenario, base, here, declaredCapabilities)
+      const shared = coordination
+        ? findReusableSharedEvidence(
+            coordination,
+            sha,
+            config.scenario,
+            base,
+            here,
+            declaredCapabilities,
+          )
         : undefined;
       if (shared) {
-        writeLocalCache(sha, config.scenario, base, shared);
-        cached = shared;
+        writeLocalCache(sha, config.scenario, base, shared.cached);
+        cached = shared.cached;
+        record = shared.record;
       }
     }
     if (cached) {
       console.error(`AGENTLOOP_CACHE_STATE=${CACHE_STATE.current}`);
-      const reused = provenanceNotice(cached, sha, record);
+      const reused = provenanceNotice(cached, sha, record, here);
       console.error(reused.trimEnd());
       const delivery = deliver(`${reused}${cached.report}`, sha, cached.result, {
         wallMs: gateWallMs(),
@@ -2287,7 +2472,14 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
           `ℹ that cached verdict is ${admission.result}. It is NOT re-run automatically (single-flight, #5060) — pass --retry-failed to force one real retry here.`,
         );
       }
-      const reused = provenanceNotice(admission, shaForBroker, brokerRecord);
+      const reused = provenanceNotice(
+        admission,
+        shaForBroker,
+        brokerCoordination
+          ? evidenceDir(brokerCoordination, admission.location, admission.capabilities)
+          : brokerRecord,
+        here,
+      );
       console.error(reused.trimEnd());
       const cached = deliver(`${reused}${admission.report}`, shaForBroker, admission.result, {
         wallMs: gateWallMs(),
@@ -2315,7 +2507,14 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         console.error(
           `ℹ retry target completed while waiting; reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}.`,
         );
-        const reused = provenanceNotice(retry, shaForBroker, brokerRecord);
+        const reused = provenanceNotice(
+          retry,
+          shaForBroker,
+          brokerCoordination
+            ? evidenceDir(brokerCoordination, retry.location, retry.capabilities)
+            : brokerRecord,
+          here,
+        );
         console.error(reused.trimEnd());
         const cached = deliver(`${reused}${retry.report}`, shaForBroker, retry.result, {
           wallMs: gateWallMs(),

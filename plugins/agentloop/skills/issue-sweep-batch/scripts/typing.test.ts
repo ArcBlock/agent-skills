@@ -11,8 +11,8 @@ import {
   type Untyped,
 } from "./typing";
 
-const U = (id: number, title: string, body = "", labels: string[] = []): Untyped => ({
-  id,
+const U = (id: number | string, title: string, body = "", labels: string[] = []): Untyped => ({
+  id: String(id),
   title,
   body,
   labels,
@@ -58,9 +58,9 @@ describe("proposeType —— 有证据才提议，没证据就说不知道", () 
 describe("deriveRules —— 从人类判断里长出规则", () => {
   test("ACCEPT：同一个标题前缀被人反复判成同一类 → 长出规则", () => {
     const ds: Decision[] = [
-      { id: 1, title: "[design] a", body: "", labels: [], type: "feature", by: "human" },
-      { id: 2, title: "[design] b", body: "", labels: [], type: "feature", by: "human" },
-      { id: 3, title: "[design] c", body: "", labels: [], type: "feature", by: "human" },
+      { id: "1", title: "[design] a", body: "", labels: [], type: "feature", by: "human" },
+      { id: "2", title: "[design] b", body: "", labels: [], type: "feature", by: "human" },
+      { id: "3", title: "[design] c", body: "", labels: [], type: "feature", by: "human" },
     ];
     const rs = deriveRules(ds);
     const r = rs.find((x) => x.kind === "titlePrefix" && x.pattern === "[design]");
@@ -70,9 +70,9 @@ describe("deriveRules —— 从人类判断里长出规则", () => {
 
   test("★ REJECT：同一前缀被判成不同类 → 不得长出规则（人自己都没一致）", () => {
     const ds: Decision[] = [
-      { id: 1, title: "[x] a", body: "", labels: [], type: "feature", by: "human" },
-      { id: 2, title: "[x] b", body: "", labels: [], type: "bug", by: "human" },
-      { id: 3, title: "[x] c", body: "", labels: [], type: "feature", by: "human" },
+      { id: "1", title: "[x] a", body: "", labels: [], type: "feature", by: "human" },
+      { id: "2", title: "[x] b", body: "", labels: [], type: "bug", by: "human" },
+      { id: "3", title: "[x] c", body: "", labels: [], type: "feature", by: "human" },
     ];
     expect(deriveRules(ds).some((r) => r.pattern === "[x]")).toBe(false);
   });
@@ -80,9 +80,9 @@ describe("deriveRules —— 从人类判断里长出规则", () => {
   test("★ 只从人类判断学，agent 自己的提议不得成为下一轮的规则来源", () => {
     // 否则第一次猜错会自我强化——「模型学自己的输出」这一类退化。
     const ds: Decision[] = [
-      { id: 1, title: "[z] a", body: "", labels: [], type: "bug", by: "agent" },
-      { id: 2, title: "[z] b", body: "", labels: [], type: "bug", by: "agent" },
-      { id: 3, title: "[z] c", body: "", labels: [], type: "bug", by: "agent" },
+      { id: "1", title: "[z] a", body: "", labels: [], type: "bug", by: "agent" },
+      { id: "2", title: "[z] b", body: "", labels: [], type: "bug", by: "agent" },
+      { id: "3", title: "[z] c", body: "", labels: [], type: "bug", by: "agent" },
     ];
     expect(deriveRules(ds)).toEqual([]);
   });
@@ -94,10 +94,10 @@ describe("deriveRules —— 从人类判断里长出规则", () => {
 
 describe("★ replayGuard —— 规则必须可证伪", () => {
   const ds: Decision[] = [
-    { id: 1, title: "[design] a", body: "", labels: [], type: "feature", by: "human" },
-    { id: 2, title: "[design] b", body: "", labels: [], type: "feature", by: "human" },
-    { id: 3, title: "[design] c", body: "", labels: [], type: "feature", by: "human" },
-    { id: 4, title: "[design] 例外", body: "", labels: [], type: "bug", by: "human" },
+    { id: "1", title: "[design] a", body: "", labels: [], type: "feature", by: "human" },
+    { id: "2", title: "[design] b", body: "", labels: [], type: "feature", by: "human" },
+    { id: "3", title: "[design] c", body: "", labels: [], type: "feature", by: "human" },
+    { id: "4", title: "[design] 例外", body: "", labels: [], type: "bug", by: "human" },
   ];
 
   test("REJECT：会预测错任何一条人类判断的规则被拒绝", () => {
@@ -137,9 +137,9 @@ describe("coverage —— 学习有没有真的发生，看这个数", () => {
     const items = [U(1, "[design] a"), U(2, "[design] b"), U(3, "别的")];
     const before = coverage(items, []).ratio;
     const rules = deriveRules([
-      { id: 9, title: "[design] x", body: "", labels: [], type: "feature", by: "human" },
-      { id: 10, title: "[design] y", body: "", labels: [], type: "feature", by: "human" },
-      { id: 11, title: "[design] z", body: "", labels: [], type: "feature", by: "human" },
+      { id: "9", title: "[design] x", body: "", labels: [], type: "feature", by: "human" },
+      { id: "10", title: "[design] y", body: "", labels: [], type: "feature", by: "human" },
+      { id: "11", title: "[design] z", body: "", labels: [], type: "feature", by: "human" },
     ]);
     const after = coverage(items, rules).ratio;
     expect(after).toBeGreaterThan(before);
@@ -183,7 +183,7 @@ describe("decisionGroups —— 让人做最少次数的判断", () => {
 
   test("★ singletons 如实报出无法批量的那些，不假装能批", () => {
     const g = decisionGroups(items, []);
-    expect(singletons(items, g)).toContain(6);
+    expect(singletons(items, g)).toContain("6");
   });
 
   test("空输入 → 空组 + 空 singleton，不抛", () => {

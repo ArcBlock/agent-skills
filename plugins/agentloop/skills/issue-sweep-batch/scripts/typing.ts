@@ -26,7 +26,7 @@
 export type WorkTypeName = "bug" | "feature" | "idea" | "research" | "symptom" | "report";
 
 export interface Untyped {
-  id: number;
+  id: string;
   title: string;
   body: string;
   labels: string[];
@@ -168,7 +168,7 @@ export interface DecisionGroup {
   feature: string;
   kind: RuleKind;
   pattern: string;
-  ids: number[];
+  ids: string[];
   titles: string[];
   /** 已有规则给出的倾向（若有）——只是提示，不是结论 */
   hint: WorkTypeName | null;
@@ -191,13 +191,13 @@ export interface DecisionGroup {
  * 第一次判断就覆盖 22 条。剩下无共享特征的只能逐条看——**不假装它们也能批量**。
  */
 export function decisionGroups(items: Untyped[], rules: Rule[], minSize = 2): DecisionGroup[] {
-  const byFeature = new Map<string, { kind: RuleKind; pattern: string; ids: Set<number> }>();
-  const titleOf = new Map<number, string>();
+  const byFeature = new Map<string, { kind: RuleKind; pattern: string; ids: Set<string> }>();
+  const titleOf = new Map<string, string>();
   for (const i of items) {
     titleOf.set(i.id, i.title);
     for (const f of featuresOf(i)) {
       const k = `${f.kind}\u0000${f.pattern}`;
-      const e = byFeature.get(k) ?? { kind: f.kind, pattern: f.pattern, ids: new Set<number>() };
+      const e = byFeature.get(k) ?? { kind: f.kind, pattern: f.pattern, ids: new Set<string>() };
       e.ids.add(i.id);
       byFeature.set(k, e);
     }
@@ -244,7 +244,7 @@ export function decisionGroups(items: Untyped[], rules: Rule[], minSize = 2): De
 }
 
 /** 无共享特征、只能逐条看的那些。**不假装它们能批量。** */
-export function singletons(items: Untyped[], groups: DecisionGroup[]): number[] {
+export function singletons(items: Untyped[], groups: DecisionGroup[]): string[] {
   const covered = new Set(groups.flatMap((g) => g.ids));
   return items.map((i) => i.id).filter((x) => !covered.has(x));
 }

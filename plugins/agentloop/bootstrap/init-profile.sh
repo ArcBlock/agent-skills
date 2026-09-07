@@ -53,6 +53,7 @@ reference implementation to copy patterns from.
 | \`gate_mode\` | \`both\` — \`scripts\` (local only) / \`ci\` (gh pr checks only) / \`both\` (both green). See contract below. |
 | \`verification_entry\` | \`bun .claude/verify/pre-pr.ts\` (scaffold with scaffold-verify.sh) |
 | \`pre_merge_entry\` | \`bun .claude/verify/pre-merge.ts\` |
+| \`reviewer_engines\` | \`<FILL>\` — 指向本仓导出 \`REVIEWER_ENGINES\` 的模块（如 \`.claude/verify/reviewer-engines.ts\`）。跨引擎 review 用；没有它 local-review 直接 exit 2，不退回任何默认。 |
 | \`merge_gate_entry\` | \`bun .claude/verify/merge-gate.ts\` (optional; only if you use the SHA-match merge gate) |
 | \`additional_merge_gates\` | \`[]\` — extra gates on backend diffs; empty for most repos |
 | \`docs_na_flag\` | \`--na "docs-only change"\` |

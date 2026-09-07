@@ -6,13 +6,19 @@
  * Ghost only for a local pid>1 whose process is dead.
  *
  * Reuses the code-agents process-table row shape (`id`, `status`, `pid`,
- * `remoteId`, `capabilities.launch`, `cwd`, `startedAt`, `exitedAt`). Does
- * not talk to the :4900 cockpit.
+ * `remoteId`, `capabilities.launch`, `cwd`, `startedAt`, `exitedAt`) plus the
+ * `ownerIdentity()` fields (`processStartedAt`, `startTimeSource`) when present.
+ * Does not talk to the :4900 cockpit.
  *
  *   bun assert-no-live-children.ts --runs-dir DIR [--ids id1,id2]
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  evaluateOwnerLiveness,
+  type OwnerRecord,
+  type StartTimeSource,
+} from "../../../lib/pid-liveness.ts";
 
 const RUN_JSON_RE = /^agent-[a-f0-9]+\.json$/;
 
@@ -23,6 +29,10 @@ export interface ProcessTableRow {
   pid: number;
   cwd?: string;
   startedAt?: string;
+  /** Epoch ms of the hired process's own start; same field `ownerIdentity()` writes. */
+  processStartedAt?: number;
+  /** Which instrument produced `processStartedAt`. */
+  startTimeSource?: StartTimeSource;
   exitedAt?: string;
   remoteId?: string;
   capabilities?: { launch?: string };
@@ -38,16 +48,40 @@ export interface ChildVerdict {
   cwd?: string;
 }
 
-export type PidAlive = (pid: number) => boolean;
+export type PidAlive = (pid: number, row?: ProcessTableRow) => boolean;
 
-export function isPidAlive(pid: number): boolean {
+function isStartTimeSource(value: unknown): value is StartTimeSource {
+  return value === "ps" || value === "proc";
+}
+
+/**
+ * Owner-record shape `ownerIdentity()` writes, filled from a process-table row.
+ *
+ * Process identity is pid + processStartedAt + startTimeSource only. AgentRun
+ * `startedAt` is the session timestamp (preserved across resume) — feeding it
+ * to evaluateOwnerLiveness as the route-2 upper bound makes a resumed live
+ * child look pid-recycled and the watchdog exit 0. Missing process-start
+ * fields fail closed to alive (`start-time-unavailable`), never ghost.
+ */
+export function ownerRecordFromRow(row: ProcessTableRow): OwnerRecord {
+  return {
+    pid: row.pid,
+    processStartedAt: row.processStartedAt,
+    startTimeSource: row.startTimeSource,
+  };
+}
+
+/**
+ * Local pid liveness via `evaluateOwnerLiveness`, not a second pid-existence
+ * predicate. A bare catch that treated every errno as dead folded EPERM into
+ * ESRCH — the unsafe half. Ghost = status=running AND local pid>1 is dead
+ * (ESRCH / recycled). pid<=1 is not a local hired pid (cockpit uses -1;
+ * pid 0 is not an existence probe); those never reach `kill`.
+ */
+export function isPidAlive(pid: number, row?: ProcessTableRow): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  const owner: OwnerRecord = row ? ownerRecordFromRow({ ...row, pid }) : { pid };
+  return evaluateOwnerLiveness(owner).alive;
 }
 
 /** Cockpit manager row: not a posix pid. Never probe with `kill(pid, 0)`. */
@@ -70,7 +104,7 @@ export function classifyHiredChildren(
     if (isRemoteHireRow(rec)) {
       return { id, kind: "live", status: rec.status, pid: rec.pid, cwd: rec.cwd };
     }
-    if (isAlive(rec.pid)) {
+    if (isAlive(rec.pid, rec)) {
       return { id, kind: "live", status: rec.status, pid: rec.pid, cwd: rec.cwd };
     }
     return { id, kind: "ghost", status: rec.status, pid: rec.pid, cwd: rec.cwd };
@@ -122,6 +156,10 @@ function parseRow(value: unknown): ProcessTableRow | undefined {
   };
   if (typeof rec.cwd === "string") row.cwd = rec.cwd;
   if (typeof rec.startedAt === "string") row.startedAt = rec.startedAt;
+  if (typeof rec.processStartedAt === "number" && Number.isFinite(rec.processStartedAt)) {
+    row.processStartedAt = rec.processStartedAt;
+  }
+  if (isStartTimeSource(rec.startTimeSource)) row.startTimeSource = rec.startTimeSource;
   if (typeof rec.exitedAt === "string") row.exitedAt = rec.exitedAt;
   if (typeof rec.remoteId === "string" && rec.remoteId) row.remoteId = rec.remoteId;
   const caps = rec.capabilities;

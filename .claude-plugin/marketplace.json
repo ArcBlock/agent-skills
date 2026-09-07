@@ -134,7 +134,7 @@
     {
       "name": "agentloop",
       "description": "Autonomous engineering-loop engine: verification gate, issue/PR sweeps + reviews, issue-graph, design-review, build-phases, and a repo bootstrap. Config-driven and repo-agnostic via .claude/repo-profile.md.",
-      "version": "0.35.3",
+      "version": "0.36.9",
       "author": {
         "name": "ArcBlock Team"
       },

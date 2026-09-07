@@ -189,8 +189,8 @@ round silently skips. `~/.agentloop-fleet/deployment.json`:
   a fresh checkout is untrusted so its allowlist is ignored — see the permission section in
   [`fleet/README.md`](fleet/README.md) before choosing anything else.
 - **Daemon isolation is a named instance.** Skills that boot `arc service` run
-  `arc service start fleet-issue-sweep` / `fleet-pr-sweep`; the port is kernel-allocated and
-  `arc service url NAME` reads the address back. `skillEnv` carries optional hand-tuned extras
+  `arc service start --instance fleet-issue-sweep` / `arc service start --instance fleet-pr-sweep`; the port is kernel-allocated and
+  `arc service url --instance NAME` reads the address back. `skillEnv` carries optional hand-tuned extras
   and is **preserved across reconcile** — whatever you put there stays until you remove it by
   hand, so keep it to values the skill actually reads. Every field is in the reference table in
   [`fleet/README.md`](fleet/README.md#config-field-reference).

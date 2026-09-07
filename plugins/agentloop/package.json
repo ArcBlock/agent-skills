@@ -1,0 +1,9 @@
+{
+  "name": "@agentloop/plugin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dependency manifest for the agentloop plugin's OWN test suite. The plugin ships as a Claude-Code plugin, not an npm package — this file exists so `linkedom` (needed by the issue-sweep-batch page-script tests) is DECLARED rather than borrowed from whatever ancestor node_modules the host repo happens to have (#5773).",
+  "devDependencies": {
+    "linkedom": "^0.18.12"
+  }
+}

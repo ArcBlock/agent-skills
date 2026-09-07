@@ -221,7 +221,7 @@ export function disjointness(a: PathSurface, b: PathSurface): DisjointResult {
  * 报出 overlap——那是同一份工作，不是两个 agent 会撞车。实测报告里
  * #5627/#5634/#5635 都是 #5560 的成员却被列成「撞 #5560」，让整份冲突清单不可用。
  */
-export function isSelfMember(id: number, epicMembers: number[]): boolean {
+export function isSelfMember(id: string, epicMembers: string[]): boolean {
   return epicMembers.includes(id);
 }
 
@@ -249,31 +249,31 @@ export function fingerprint(body: string | null | undefined, labels: string[]): 
 }
 
 export interface LedgerRecord {
-  issue: number;
+  issue: string;
   fingerprint: string;
   classifiedAt: string;
   layer?: string | null;
   pathSurface?: string[];
   surfaceState?: SurfaceState;
-  epic?: number | null;
+  epic?: string | null;
   outcome?: string;
   exclusionReason?: string | null;
 }
 
 /** 与来源无关的最小工作项（见 source.ts 的 WorkItemSource）。 */
 export interface WorkItemLite {
-  number: number;
+  number: string;
   body: string | null | undefined;
   labels: string[];
 }
 
 export interface Delta {
   /** 需要（重新）分类的 */
-  toClassify: number[];
+  toClassify: string[];
   /** ledger 里没有的全新条目 */
-  fresh: number[];
+  fresh: string[];
   /** 指纹未变且未过 TTL，本轮跳过 —— 效率的全部来源 */
-  skipped: number[];
+  skipped: string[];
 }
 
 export function ledgerDelta(

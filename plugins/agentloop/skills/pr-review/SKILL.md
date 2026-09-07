@@ -260,7 +260,7 @@ Step 2 核验"这个 PR **声称**改的";这一步核验它对**系统其他部
 
 ### Step 3 — ★ 获取 verification 门控事实(pre-merge)并判读根因
 
-**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前每个 reviewer 都必须**调用 `<pre_merge_entry>`**(profile 字段;只读、不写远端,与默认 read-only 不冲突;`--comment` 会把报告贴到 PR)。调用不等于重复执行:支持 shared evidence broker 的 repo 由入口按 **`{HEAD SHA, scenario=pre-merge, resolved base}`** 取得同一事实——首个 caller 实跑,并发 follower 等待或复用 PASS；HEAD、场景或 resolved base 任一变化就必须重新跑。没有该能力的 repo 仍按普通入口实际执行，绝不由 reviewer 手工猜 cache 是否可用:
+**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前要有一份 **current** verification 事实。若 sticky 或 `--deliver-cached` 的身份已经是 current（`sha=HEAD`、scenario=`pre-merge`、同一 resolved base + capabilities），**读这个事实，不要再付 350s**——独立 code review 仍读 diff、仍发 verdict，再跑一遍闸不是审查。身份不匹配时才调用 `<pre_merge_entry>`（profile 字段;只读、不写远端;`--comment` 会把报告贴到 PR）。支持 shared evidence broker 的 repo 由入口按 **`{HEAD SHA, scenario=pre-merge, resolved base, capabilities}`** 取得同一事实，**含 sibling worktree 上已有的 PASS**；HEAD、场景、resolved base 或 capabilities 任一变化就必须重新跑。没有该能力的 repo 仍按普通入口实际执行，绝不由 reviewer 手工猜 cache 是否可用:
 
 ```bash
 # <pre_merge_entry> from repo-profile.md
@@ -287,7 +287,8 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 | **(a) 本 PR 真实缺陷** | 失败的测试/类型/架构检查由 diff 引入 | → `BLOCK`,comment 指出 `path:line` + 失败检查名 + `rawTail` |
 | **(b) flaky / 基础设施** | 与改动无关的偶发(网络/超时/沙箱抖动) | → 不阻断;comment 注明"失败与本 PR 无关(flaky)",重跑坐实 |
 | **(c) base 陈旧需 rebase** | mergeable=`CONFLICTING`,或失败因 main 已前进(`pre-merge` base 已抓) | → Step 0.5 已 auto-rebase；若未执行（异常情况），`COMMENT` 要求人工 rebase |
-| **(d) 可自修的噪音** | `format` 是 warn-only(脚本已非阻断);单行 lint/import 等机械件 | → **不阻断**;`--post` 模式可在 PR 分支自修 → push → 重跑 |
+| **(d) 可自修的噪音** | 单行 lint/import 等机械件(**不含 `format`**,见 (e)) | → **不阻断**;`--post` 模式可在 PR 分支自修 → push → 重跑 |
+| **(e) `format` 红** | 自 arc#5805 起 `check-format` 是 **blocking** | → **阻断,不得放行**;必须真修后重跑。**修复命令取自该红行自己打印的 remedy**(次选 repo-profile 的 `<formatter>`),绝不硬编码某个包管理器的命令 |
 
 **结果进 verdict:** 全 blocking ✅ PASS → 允许 `MERGE`;非 PASS → **verdict 不得为 `MERGE`**。
 - **简单失败**(格式/import/单行 lint):`--post` 模式在 PR 分支修 → 重跑;read-only 模式在 verdict 里指出。
@@ -295,7 +296,7 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 
 > **这一步在 pr-review 是 advisory(判定输入),不是不可跳过的合并门控。** 真正不可跳过的硬门控——"`<merge_gate_entry> <pr#>` exit 0(SHA 匹配 + result=PASS/NA;profile 字段,arc = `<merge_gate_entry>`)"——在 [`pr-sweep` 合并闸](../pr-sweep/SKILL.md)(机制点:SHA 比对由该脚本执行、不靠自觉)。pr-review 只判不合,门控在那边执行。
 >
-> 例外只限入口已经证明存在同一 `{HEAD SHA, scenario=pre-merge, resolved base}` 的 PASS 事实；不能用“同一 HEAD + 时间较新”的人工启发式，也不能手读/手贴旧报告来绕过入口。只验证并投递已存在事实的 `--deliver-cached` 类命令，必须同样校验这个完整身份。
+> 例外只限 sticky/`--deliver-cached` 已经证明存在同一 `{HEAD SHA, scenario=pre-merge, resolved base, capabilities}` 的 PASS 事实（含 sibling worktree 产出的）；不能用“同一 HEAD + 时间较新”的人工启发式，也不能手读/手贴旧报告来绕过入口。只验证并投递已存在事实的 `--deliver-cached` 类命令，必须同样校验这个完整身份。FAIL 不得被洗成 sibling 的 PASS。
 
 **运行时 / CF-parity PR(改该仓库的多运行时 parity 面 `<Backend Face Paths>`,或 blocklet render/mount/serve 语义):`/agentloop:verification` 的静态门控看不到「跑起来对不对」——补跑 `/e2e-verify`(该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)。** 它本地 boot **两个** runtime 做匿名 + 认证 roundtrip 核验:Node = `<dev_server_node>`,**CF = `<dev_server_edge>` 本地 miniflare(自带 D1 + migration,不需要 CF 账号、不碰 staging)**。所以 CF 那侧**本地就能验**——绝不判成「需要云端 CF/wrangler 环境」而 defer;别把「别猛测线上 staging」当成「CF 本地验不了」。`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`(arc `cli_binary` = `arc`)。
 
@@ -465,7 +466,7 @@ fi
 ## Key Principles
 
 1. **对照已落地代码是第一优先,核验范围含横切影响。** PR diff 自洽 ≠ 落到现实正确。最有价值的发现是"这个 fix 没真修 / 这条 doc 改动对不上 shipped 面 / 这个 test 是空跑"。**并且**:diff 自洽也 ≠ 对系统其余部分无害——必跳出 diff 查六件横切影响(Step 2.5):反向引用(删/rename 留下的悬空引用)、跨包 parity(node/cf 镜像 + 声明↔分派配套)、端到端使用场景闭环(不只看有没有 caller)、性能回退(含请求链·init·冷启)、测试覆盖、清理收尾。**这是 agent review 最常漏的一层。**
-2. **verification 门控是信号不是判官(PR 上已无 CI)。** 失败必诊断根因(a/b/c/d),PASS 也不免逐条核验。噪音类失败(format warn-only / 单行 lint)不阻断,可自修;真实测试/类型/架构违规才 BLOCK。
+2. **verification 门控是信号不是判官(PR 上已无 CI)。** 失败必诊断根因(a/b/c/d),PASS 也不免逐条核验。噪音类失败(单行 lint 等机械件)不阻断,可自修;真实测试/类型/架构/**格式**违规才 BLOCK(arc#5805:format 已是 blocking)。
 3. **冲突要定责到留谁关谁,带判据。** 同 issue / 同文件两把主键;矛盾(如 license 串不一致)必须查权威源拍板,不能两个都留。
 4. **每条发现都有可复现证据。** `path:line` / `gh` 输出 / 真实测试输出。无证据 = 不写。
 5. **产物落 PR,不落会话。** 跑完 = PR 里多一条可被下一轮接力的 verdict comment。

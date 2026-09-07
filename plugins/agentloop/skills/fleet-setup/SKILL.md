@@ -135,8 +135,8 @@ bun "$PLUGIN/fleet/setup.ts"  … same flags …  --local --apply     # writes c
   needs no token at all — at the cost of stopping when the user logs out, and the installer does
   not recognize it.)
 - **Repos running a daemon** (arc: `arc service`) isolate concurrent skills with named
-  instances: `arc service start fleet-issue-sweep` / `fleet-pr-sweep` — the port is
-  kernel-allocated, and `arc service url NAME` reads the address back. Leave `skillEnv`
+  instances: `arc service start --instance fleet-issue-sweep` / `arc service start --instance fleet-pr-sweep` — the port is
+  kernel-allocated, and `arc service url --instance NAME` reads the address back. Leave `skillEnv`
   empty unless a skill genuinely reads a value from it; entries there survive every
   later reconcile.
 

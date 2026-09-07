@@ -26,6 +26,29 @@
 
 export type WorkType = "bug" | "feature" | "idea" | "research" | "symptom" | "report" | "untyped";
 
+/** GitHub source default: labelled bugs. Explicit `--types bug` still uses this. */
+export const DEFAULT_TYPES_GITHUB = "bug";
+/**
+ * Work-object default after #6000. GitHub-imported rows are
+ * `creativeWorkStatus: "idea"` with no keywords → `typeOf` is `untyped`.
+ * Defaulting to `"bug"` alone makes the candidate set 0 — same color as
+ * "nothing to do". Explicit `--types bug` still filters.
+ */
+export const DEFAULT_TYPES_WORK_OBJECT = "bug,untyped";
+
+/** `--types` default depends on `--source`. Unknown source uses work-object. */
+export function defaultTypesFor(source: string): string {
+  const kind = source.trim().split(":")[0] ?? "";
+  return kind === "github" ? DEFAULT_TYPES_GITHUB : DEFAULT_TYPES_WORK_OBJECT;
+}
+
+export function parseTypes(raw: string): WorkType[] {
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean) as WorkType[];
+}
+
 /** 每种类型的分类轴。untyped 没有轴——必须先定类型。 */
 export type Axis = "defectLayer" | "capabilityArea" | "openQuestion";
 
@@ -137,21 +160,21 @@ export const VERDICT_KEEPS_OPEN: SymptomVerdict[] = ["bug"];
 /* ===== 失效判定 ===== */
 
 export interface ClassificationRecord {
-  issue: number;
+  issue: string;
   fingerprint: string;
   classifiedAt: string;
   /** null = 从未分类过 */
   layer: string | null;
   type?: WorkType;
-  epic?: number | null;
+  epic?: string | null;
 }
 
 /** 来自 issue-graph 的邻域信号（graph-scan 的 kicks / blocked 计算）。 */
 export interface Neighborhood {
   /** 近窗口内关闭的邻居（父 / 子 / blocker） */
-  closedNeighbors: number[];
+  closedNeighbors: string[];
   /** 因某条关闭而被解锁 */
-  unblockedBy: number[];
+  unblockedBy: string[];
   /** 分类之后出现过新的人类输入 */
   newHumanInput: boolean;
 }
@@ -198,4 +221,74 @@ export function shouldProcess(mode: Mode, everClassified: boolean, reasons: stri
   if (mode === "new") return !everClassified;
   if (mode === "revalidate") return everClassified && reasons.length > 0;
   return reasons.length > 0;
+}
+
+/**
+ * Build the delta record from the work item itself, falling back to a
+ * sidecar ledger only for fields the source did not surface.
+ * `item.layer === null` is a loaded write-back (unassigned), not "absent".
+ */
+export function classificationFromWork(
+  item: {
+    id: string;
+    layer?: string | null;
+    fingerprint?: string;
+    classifiedAt?: string;
+  },
+  ledger?: Partial<Pick<ClassificationRecord, "fingerprint" | "classifiedAt" | "layer">>,
+): ClassificationRecord {
+  return {
+    issue: item.id,
+    fingerprint: item.fingerprint ?? ledger?.fingerprint ?? "",
+    classifiedAt: item.classifiedAt ?? ledger?.classifiedAt ?? new Date(0).toISOString(),
+    layer: item.layer !== undefined ? item.layer : (ledger?.layer ?? null),
+  };
+}
+
+/** Payload the production write path persists. `layer` is a real string — never null.
+ * `fingerprint`/`classifiedAt` are omitted when the stamp only carries an
+ * already-stored layer — refreshing them would erase the revalidation demand
+ * for work nobody re-examined. */
+export interface ClassificationWriteback {
+  layer: string;
+  pathSurface: string[];
+  surfaceState: string;
+  fingerprint?: string;
+  classifiedAt?: string;
+  epic?: string | null;
+}
+
+function nonEmptyLayer(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Production classification stamp. Refuses to emit `layer: null` — that
+ * write is the same color as "never classified" (`Boolean(rec.layer)`),
+ * so `--mode revalidate` would select nothing and `--mode new` would
+ * never shrink. Agent-assigned layer (Step 3 / `--layers`) wins and
+ * refreshes fingerprint/classifiedAt; carrying `existingLayer` keeps
+ * the stored fingerprint so unexamined items stay in the revalidate set.
+ */
+export function classificationWriteback(input: {
+  layer?: string | null;
+  existingLayer?: string | null;
+  fingerprint: string;
+  classifiedAt: string;
+  pathSurface: string[];
+  surfaceState: string;
+  epic?: string | null;
+}): ClassificationWriteback | undefined {
+  const assigned = nonEmptyLayer(input.layer);
+  const layer = assigned ?? nonEmptyLayer(input.existingLayer);
+  if (!layer) return undefined;
+  return {
+    layer,
+    pathSurface: input.pathSurface,
+    surfaceState: input.surfaceState,
+    ...(assigned ? { fingerprint: input.fingerprint, classifiedAt: input.classifiedAt } : {}),
+    ...(input.epic !== undefined ? { epic: input.epic } : {}),
+  };
 }

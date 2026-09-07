@@ -27,7 +27,7 @@
  */
 
 export interface HealthItem {
-  id: number;
+  id: string;
   type: string;
   createdAt: string;
   closedAt: string | null;

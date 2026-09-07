@@ -5,13 +5,21 @@
  * correct reject. Empty hire list / settled / ghost pid must exit 0.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  evaluateOwnerLiveness,
+  ownerIdentity,
+  readProcessStartTime,
+} from "../../../lib/pid-liveness.ts";
+import {
   classifyHiredChildren,
   formatLiveChildrenFailure,
+  isPidAlive,
+  ownerRecordFromRow,
   type ProcessTableRow,
 } from "./assert-no-live-children.ts";
 
@@ -47,7 +55,7 @@ function row(
   return {
     pid: partial.pid ?? 0,
     cwd: partial.cwd ?? "/tmp/work",
-    startedAt: partial.startedAt ?? "2026-08-21T20:30:00Z",
+    startedAt: partial.startedAt ?? new Date().toISOString(),
     ...partial,
     id: partial.id,
     status: partial.status,
@@ -70,11 +78,45 @@ function deadPid(): number {
   for (let pid = 2_000_000; pid > 100_000; pid -= 1000) {
     try {
       process.kill(pid, 0);
-    } catch {
-      return pid;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return pid;
     }
   }
   throw new Error("could not find a dead pid for the ghost fixture");
+}
+
+/**
+ * A REAL signal-refusing process, found rather than assumed. pid 1 is the
+ * container gate's own pid, so leaning on it would conflate two arms.
+ */
+function findEpermPid(): { pid?: number; scanned: number } {
+  const ps = spawnSync("ps", ["-Ao", "pid="], { encoding: "utf8" });
+  if (ps.status !== 0) return { scanned: 0 };
+  let scanned = 0;
+  for (const line of ps.stdout.split("\n")) {
+    const pid = Number(line.trim());
+    // pid 1 is EPERM on many hosts but isPidAlive treats pid<=1 as "not a
+    // local hired pid" (cockpit sentinel / not killable as existence). Skip it
+    // so this arm actually exercises evaluateOwnerLiveness's EPERM colour.
+    if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
+    scanned++;
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") return { pid, scanned };
+    }
+  }
+  return { scanned };
+}
+
+const EPERM_SCAN = findEpermPid();
+const EPERM_PID = EPERM_SCAN.pid;
+
+function assertEpermScanWasReal(): void {
+  expect(
+    EPERM_SCAN.scanned,
+    "the EPERM scan must have examined a real process table",
+  ).toBeGreaterThan(1);
 }
 
 describe("classifyHiredChildren — REJECT: live hired child", () => {
@@ -207,6 +249,144 @@ describe("classifyHiredChildren — ACCEPT: ghost running + dead pid", () => {
   });
 });
 
+describe("isPidAlive — EPERM is alive, not folded into dead (#5829)", () => {
+  test("ACCEPT: this process is alive", () => {
+    expect(isPidAlive(process.pid)).toBe(true);
+  });
+
+  test("ACCEPT: a running row carrying ownerIdentity() is live (default predicate)", () => {
+    const identity = ownerIdentity({ scenario: "unit" });
+    const table = [
+      row({
+        id: "agent-aaaaaaa1",
+        status: "running",
+        pid: identity.pid as number,
+        startedAt: identity.startedAt as string,
+        processStartedAt: identity.processStartedAt as number,
+        startTimeSource: identity.startTimeSource as "ps" | "proc",
+      }),
+    ];
+    const verdicts = classifyHiredChildren(table, ["agent-aaaaaaa1"]);
+    expect(verdicts[0]?.kind).toBe("live");
+    expect(verdicts[0]?.pid).toBe(process.pid);
+  });
+
+  test("ACCEPT: a signal-refusing pid is live, not ghost", () => {
+    if (EPERM_PID === undefined) {
+      assertEpermScanWasReal();
+      return;
+    }
+    expect(isPidAlive(EPERM_PID)).toBe(true);
+    const table = [row({ id: "agent-e0e0e0e1", status: "running", pid: EPERM_PID })];
+    const verdicts = classifyHiredChildren(table, ["agent-e0e0e0e1"]);
+    expect(verdicts[0]?.kind).toBe("live");
+    expect(verdicts[0]?.kind).not.toBe("ghost");
+  });
+
+  test("REJECT: a gone pid is not alive", () => {
+    const pid = deadPid();
+    expect(isPidAlive(pid)).toBe(false);
+  });
+
+  test("REJECT: the production predicate is evaluateOwnerLiveness, not catch-return-false", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    const start = src.indexOf("export function isPidAlive");
+    const end = src.indexOf("export function isRemoteHireRow");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+    expect(body).toMatch(/evaluateOwnerLiveness/);
+    expect(body).not.toMatch(/process\.kill/);
+    expect(src).toMatch(/ownerIdentity|OwnerRecord/);
+  });
+});
+
+/**
+ * AgentRun.startedAt is the SESSION timestamp, preserved across resume. Passing
+ * it into evaluateOwnerLiveness as route-2's upper bound makes a resumed live
+ * child look pid-recycled → ghost → watchdog exit 0. Process identity is pid +
+ * processStartedAt + startTimeSource only (#5829 / review 3921022981).
+ */
+describe("isPidAlive — session startedAt is not process identity (#5829)", () => {
+  const SIX_HOURS_AGO = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+  test("BREAK: running local pid, session startedAt hours ago, no processStartedAt → live, not ghost", () => {
+    const hired = row({
+      id: "agent-resumed01",
+      status: "running",
+      pid: process.pid,
+      startedAt: SIX_HOURS_AGO,
+    });
+    expect(hired.processStartedAt).toBeUndefined();
+    expect(hired.startTimeSource).toBeUndefined();
+
+    const owner = ownerRecordFromRow(hired);
+    expect(owner).not.toHaveProperty("startedAt");
+    const verdict = evaluateOwnerLiveness(owner);
+    expect(verdict.alive).toBe(true);
+    expect(verdict.reason).not.toBe("pid-recycled");
+    expect(verdict.reason).toBe("start-time-unavailable");
+
+    expect(isPidAlive(process.pid, hired)).toBe(true);
+    const kinds = classifyHiredChildren([hired], ["agent-resumed01"]);
+    expect(kinds[0]?.kind).toBe("live");
+    expect(kinds[0]?.kind).not.toBe("ghost");
+  });
+
+  test("ACCEPT: matching processStartedAt + startTimeSource and live pid → live", () => {
+    const identity = ownerIdentity({ scenario: "unit" });
+    const hired = row({
+      id: "agent-ident001",
+      status: "running",
+      pid: identity.pid as number,
+      startedAt: SIX_HOURS_AGO,
+      processStartedAt: identity.processStartedAt as number,
+      startTimeSource: identity.startTimeSource as "ps" | "proc",
+    });
+    expect(isPidAlive(hired.pid, hired)).toBe(true);
+    const kinds = classifyHiredChildren([hired], ["agent-ident001"]);
+    expect(kinds[0]?.kind).toBe("live");
+    expect(evaluateOwnerLiveness(ownerRecordFromRow(hired)).reason).toBe("running");
+  });
+
+  test("REJECT recycle: processStartedAt clearly earlier than the live pid's start → ghost", () => {
+    const live = readProcessStartTime(process.pid);
+    expect(live, "start-time instrument must see this process").toBeDefined();
+    const hired = row({
+      id: "agent-recycle01",
+      status: "running",
+      pid: process.pid,
+      startedAt: SIX_HOURS_AGO,
+      processStartedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      startTimeSource: live?.source,
+    });
+    expect(isPidAlive(process.pid, hired)).toBe(false);
+    const kinds = classifyHiredChildren([hired], ["agent-recycle01"]);
+    expect(kinds[0]?.kind).toBe("ghost");
+    expect(evaluateOwnerLiveness(ownerRecordFromRow(hired)).reason).toBe("pid-recycled");
+  });
+
+  test("BREAK (CLI): session startedAt hours ago + live pid + no processStartedAt exits 1, not ghost-0", () => {
+    const runs = tmpRuns();
+    writeRow(
+      runs,
+      row({
+        // loadRunsDir only accepts agent-<hex>.json
+        id: "agent-a1b2c3d4",
+        status: "running",
+        pid: process.pid,
+        cwd: "/tmp/resume",
+        startedAt: SIX_HOURS_AGO,
+      }),
+    );
+    const result = runCli(["--runs-dir", runs, "--ids", "agent-a1b2c3d4"]);
+    expect(result.exitCode).not.toBe(0);
+    const text = `${result.stdout}${result.stderr}`;
+    expect(text).toContain("agent-a1b2c3d4");
+    expect(text.toLowerCase()).not.toContain("ghost");
+  });
+});
+
 describe("assert-no-live-children CLI", () => {
   test("REJECT: running + live pid exits non-zero and names the child id", () => {
     const runs = tmpRuns();
@@ -292,6 +472,20 @@ describe("assert-no-live-children CLI", () => {
     );
     const result = runCli(["--runs-dir", runs, "--ids", "agent-28f61685,agent-3fcd4c34"]);
     expect(result.exitCode).toBe(0);
+  });
+
+  test("REJECT: running + EPERM pid is live (not ghost), exits non-zero", () => {
+    if (EPERM_PID === undefined) {
+      assertEpermScanWasReal();
+      return;
+    }
+    const runs = tmpRuns();
+    writeRow(runs, row({ id: "agent-e0e0e0e1", status: "running", pid: EPERM_PID }));
+    const result = runCli(["--runs-dir", runs, "--ids", "agent-e0e0e0e1"]);
+    expect(result.exitCode).not.toBe(0);
+    const text = `${result.stdout}${result.stderr}`;
+    expect(text).toContain("agent-e0e0e0e1");
+    expect(text.toLowerCase()).not.toContain("ghost");
   });
 
   test("ACCEPT: status=running with a dead pid exits 0 (ghost)", () => {

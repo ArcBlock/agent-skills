@@ -130,44 +130,44 @@ describe("fingerprint — 增量判据", () => {
 describe("ledgerDelta — 避免全量重扫", () => {
   const now = new Date("2026-08-30T12:00:00Z");
   const fresh = {
-    issue: 1,
+    issue: "1",
     fingerprint: fingerprint("x", ["bug"]),
     classifiedAt: "2026-08-29T12:00:00Z",
   };
   const old = {
-    issue: 2,
+    issue: "2",
     fingerprint: fingerprint("y", ["bug"]),
     classifiedAt: "2026-07-01T12:00:00Z",
   };
 
   test("ACCEPT：指纹未变且未过 TTL → 跳过（这是效率的全部来源）", () => {
-    const d = ledgerDelta([{ number: 1, body: "x", labels: ["bug"] }], [fresh], 14, now);
-    expect(d.skipped).toEqual([1]);
+    const d = ledgerDelta([{ number: "1", body: "x", labels: ["bug"] }], [fresh], 14, now);
+    expect(d.skipped).toEqual(["1"]);
     expect(d.toClassify).toEqual([]);
   });
 
   test("REJECT：指纹变了 → 必须重分类", () => {
-    const d = ledgerDelta([{ number: 1, body: "CHANGED", labels: ["bug"] }], [fresh], 14, now);
-    expect(d.toClassify).toEqual([1]);
+    const d = ledgerDelta([{ number: "1", body: "CHANGED", labels: ["bug"] }], [fresh], 14, now);
+    expect(d.toClassify).toEqual(["1"]);
     expect(d.skipped).toEqual([]);
   });
 
   test("REJECT：过了 TTL → 必须重分类（陈旧记录不得被当新鲜）", () => {
-    const d = ledgerDelta([{ number: 2, body: "y", labels: ["bug"] }], [old], 14, now);
-    expect(d.toClassify).toEqual([2]);
+    const d = ledgerDelta([{ number: "2", body: "y", labels: ["bug"] }], [old], 14, now);
+    expect(d.toClassify).toEqual(["2"]);
   });
 
   test("ledger 里没有的 → 新条目", () => {
-    const d = ledgerDelta([{ number: 9, body: "z", labels: ["bug"] }], [], 14, now);
-    expect(d.toClassify).toEqual([9]);
-    expect(d.fresh).toEqual([9]);
+    const d = ledgerDelta([{ number: "9", body: "z", labels: ["bug"] }], [], 14, now);
+    expect(d.toClassify).toEqual(["9"]);
+    expect(d.fresh).toEqual(["9"]);
   });
 
   test("★ 空 ledger 不得让一切都被跳过（守卫自身的 accept 臂）", () => {
     const d = ledgerDelta(
       [
-        { number: 1, body: "a", labels: [] },
-        { number: 2, body: "b", labels: [] },
+        { number: "1", body: "a", labels: [] },
+        { number: "2", body: "b", labels: [] },
       ],
       [],
       14,
@@ -276,12 +276,12 @@ describe("★ 部分抽取必须被说出来（Codex P1，#5628 评审）", () =
 
 describe("★ 成员不该与自己的 epic 报冲突", () => {
   test("REJECT：候选是该 epic 的成员时，与它的冲突不算冲突", () => {
-    expect(isSelfMember(5627, [5627, 5634, 5635])).toBe(true);
+    expect(isSelfMember("5627", ["5627", "5634", "5635"])).toBe(true);
   });
   test("ACCEPT：非成员的冲突必须照报", () => {
-    expect(isSelfMember(4892, [5627, 5634, 5635])).toBe(false);
+    expect(isSelfMember("4892", ["5627", "5634", "5635"])).toBe(false);
   });
   test("空成员表 → 谁都不是成员", () => {
-    expect(isSelfMember(1, [])).toBe(false);
+    expect(isSelfMember("1", [])).toBe(false);
   });
 });

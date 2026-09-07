@@ -408,8 +408,32 @@ export function emit(result: CheckResult): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
-function icon(r: CheckResult): string {
-  if (isSkipped(r)) return "⊘ SKIP";
+/**
+ * Last-known standing result for a fail-fast-skipped check (#5835).
+ * `pass: false` → standing-red; `pass: true` → would-pass; missing → unknown.
+ */
+export type SkipHistory = Readonly<Record<string, { pass: boolean; sha?: string }>>;
+
+let skipHistoryLoader: () => SkipHistory = () => ({});
+
+/** Arc wires this from `.claude/verify/fail-fast-skip.ts` so scenario.ts stays untouched. */
+export function setSkipHistoryLoader(fn: () => SkipHistory): void {
+  skipHistoryLoader = fn;
+}
+
+function isFailFastSkipReason(r: CheckResult): boolean {
+  return typeof r.skipped === "string" && r.skipped.includes("fail-fast");
+}
+
+function icon(r: CheckResult, history: SkipHistory): string {
+  if (isSkipped(r)) {
+    if (isFailFastSkipReason(r)) {
+      const known = history[r.check];
+      if (!known) return "⊘ SKIP unknown";
+      return known.pass ? "⊘ SKIP would-pass" : "⊘ SKIP standing-red";
+    }
+    return "⊘ SKIP";
+  }
   if (r.pass) return "✅ PASS";
   return r.blocking ? "❌ FAIL" : "⚠️ WARN";
 }
@@ -481,12 +505,18 @@ export function renderReport(
     origin?: string;
     notice?: string;
     wallMs?: number;
+    /**
+     * Last-known standing results for fail-fast skips (#5835). Omit to use the
+     * installed loader (empty by default — unknown, never silently would-pass).
+     */
+    skipHistory?: SkipHistory;
   },
 ): string {
+  const history = opts.skipHistory ?? skipHistoryLoader();
   const ok = passed(results);
   const total = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
   const rows = results
-    .map((r) => `| ${r.title} | ${icon(r)} | ${statsStr(r)} | ${dur(r.durationMs)} |`)
+    .map((r) => `| ${r.title} | ${icon(r, history)} | ${statsStr(r)} | ${dur(r.durationMs)} |`)
     .join("\n");
 
   const failures = results.filter((r) => !r.pass && !isSkipped(r) && r.rawTail);
@@ -494,7 +524,7 @@ export function renderReport(
     ? `\n\n### Failures\n${failures
         .map(
           (r) =>
-            `\n<details><summary>${r.title} ${icon(r)}</summary>\n\n\`\`\`\n${r.rawTail}\n\`\`\`\n</details>`,
+            `\n<details><summary>${r.title} ${icon(r, history)}</summary>\n\n\`\`\`\n${r.rawTail}\n\`\`\`\n</details>`,
         )
         .join("\n")}`
     : "";

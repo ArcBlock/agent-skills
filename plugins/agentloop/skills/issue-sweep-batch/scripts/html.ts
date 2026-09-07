@@ -16,32 +16,32 @@
  */
 
 export interface HtmlItem {
-  id: number;
+  id: string;
   title: string;
   type: string;
   /** 本轮是否进了分类流程（受 --types / --mode 影响）。未选中的仍然展示，标灰。 */
   selected?: boolean;
   lanes: string[];
   files: string[];
-  surfaceState: "measured" | "unproven" | "code-located";
+  surfaceState: "measured" | "partial" | "unproven" | "code-located";
   /** 年龄桶（服务端算好，前端只做字符串相等）。null = 源未提供 timeline，未采集。 */
   ageBucket?: string | null;
   reasons: string[];
-  epic: number | null;
+  epic: string | null;
   url: string;
 }
 
 export interface HtmlEpic {
-  id: number;
+  id: string;
   title: string;
-  members: number[];
+  members: string[];
   files: string[];
   url: string;
 }
 
 export interface HtmlOverlap {
-  item: number;
-  epic: number;
+  item: string;
+  epic: string;
   shared: string[];
 }
 
@@ -73,11 +73,11 @@ export interface Typing {
   groups: {
     feature: string;
     hint: string | null;
-    ids: number[];
+    ids: string[];
     titles: string[];
     homogeneity: number;
   }[];
-  singletons: number[];
+  singletons: string[];
 }
 
 export interface Health {
@@ -203,6 +203,8 @@ margin-right:5px;vertical-align:baseline}
 .recon{margin:2px 0 12px;padding:7px 10px;background:var(--chip);border-radius:6px;font-size:12px}
 .legend2 .lg{cursor:pointer;padding:1px 6px;border-radius:4px}
 .legend2 .lg:hover{background:var(--chip)}
+.legend2 .lg.on{outline:1px solid var(--accent);background:var(--chip);color:var(--fg);font-weight:600}
+.chartbox.pair .chead.sub{margin-top:10px}
 .fnote{margin-top:8px;font-size:12px;color:var(--dim)}
 .clr{color:var(--accent);cursor:pointer;text-decoration:underline}
 .agebar{width:44px;background:var(--accent);border-radius:4px 4px 0 0}
@@ -267,7 +269,7 @@ border-radius:6px;padding:5px 10px;font-size:12px;width:220px}
 
 const JS = String.raw`
 const M = window.__MODEL__;
-let view = "overview", sel = null, q = "", gran = "day", ftype = null, fage = null;
+let view = "overview", sel = null, q = "", gran = "day", ftype = null, fage = null, chartType = null;
 const byId = new Map(M.items.map(i => [i.id, i]));
 const epicById = new Map(M.epics.map(e => [e.id, e]));
 const ov = M.overlaps;
@@ -473,6 +475,18 @@ const stackTypes = s => {
     .concat(present.filter(t => !KNOWN_T.has(t)).sort());
 };
 const swatch = t => '<i style="background:' + tcolor(t) + '"></i>';
+const CHART_W = 1000;
+function xOf(i, n) { return (i + 0.5) * (CHART_W / Math.max(1, n)); }
+function deltaFill(net) {
+  return net > 0 ? '#f85149' : net < 0 ? '#3fb950' : 'var(--fg)';
+}
+function seriesView(s) {
+  if (!chartType || !s.byType || !s.byType[chartType]) return s;
+  const t = s.byType[chartType];
+  const by = {};
+  by[chartType] = t;
+  return { labels: s.labels, opened: t.opened, closed: t.closed, stock: t.stock, byType: by };
+}
 const AGE_ORDER = M.ageScale || ['<1d','1-3d','3-7d','7-14d','>14d'];
 
 /**
@@ -539,23 +553,24 @@ function renderOverview() {
         '<div class="v">' + c.open + '</div>' +
         '<div class="sub">已关 ' + c.closed + '</div></div>';
     })).join('');
-  const s2 = o.series[gran];
+  const raw = o.series[gran];
+  const s2 = seriesView(raw);
   const gtabs = [['hour','小时'],['day','天'],['week','周'],['month','30 天']]
     .map(([k,l]) => '<span class="gtab' + (gran===k?' on':'') + '" data-g="' + k + '">' + l + '</span>').join('');
   return healthBanner() + '<div class="stats">' + cards + '</div>' +
     agingRow(M.items, M.items.length + ' 条工作项（不含 ' + (M.totals.all - M.items.length) + ' 条 epic 自身 —— 容器不是工作项）') +
     (o.unknownTypes.length ? '<div class="note">未归入已知类型：' + o.unknownTypes.map(esc).join(', ') + '</div>' : '') +
-    '<div class="chartbox"><div class="chead"><b>流量 · 开 vs 关</b>' +
-    '<span class="dim">进货比出货快，存量就涨——这是「修了这么多为什么总数不降」的直接答案</span>' +
-    '<span class="gtabs">' + gtabs + '</span></div>' + bars(s2) + '</div>' +
-    '<div class="chartbox"><div class="chead"><b>存量 · 还开着的总数</b>' +
+    '<div class="chartbox pair"><div class="chead"><b>流量 · 开 vs 关</b>' +
+    '<span class="dim">往上开、往下关 —— 进货比出货快，存量就涨</span>' +
+    '<span class="gtabs">' + gtabs + '</span></div>' + bars(s2) +
+    '<div class="chead sub"><b>存量 · 还开着的总数</b>' +
     '<span class="dim">流量的积分，滞后于流量：净值转负数天后这条线才明显下弯</span></div>' +
-    line(s2) + '</div>' +
+    line(s2) + chartLegend(raw, s2) + '</div>' +
     '<div class="note">' + esc(o.windowNote) + '</div>';
 }
 
 /**
- * 流量 —— 每桶两根柱（开 / 关），**各自按类型堆叠**。
+ * 流量 —— 每桶一根棒槌：开往 +y（零轴上），关往 −y（零轴下），各自按类型堆叠。
  *
  * 一根「全部」的柱子回答不了真正的问题：进的是什么、出的是什么。实测 arc 的
  * 存量主体是 feature 而不是 bug，而聚合柱把这件事完全藏住了。
@@ -567,79 +582,88 @@ function renderOverview() {
 function bars(s) {
   const ts = stackTypes(s);
   const max = Math.max(1, ...s.opened, ...s.closed);
-  const W = 1000, H = 200, n = s.labels.length, bw = W / n, PLOT = H - 46;
-  let g = '';
-  const stack = (x, w, key, i) => {
-    let y = H - 20, out = '';
+  const W = CHART_W, H = 248, n = s.labels.length, bw = W / n;
+  const mid = 114, half = 92, barW = bw * 0.52;
+  let g = '<line x1="0" y1="' + mid + '" x2="' + W + '" y2="' + mid + '" stroke="currentColor" opacity=".2"/>';
+  const stack = (i, key, dir) => {
+    let y = mid, out = '';
+    if (!s.byType) return out;
     for (const t of ts) {
       const v = s.byType[t][key][i];
       if (!v) continue;
-      const h = (v / max) * PLOT;
-      y -= h;
-      out += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+      const h = (v / max) * half;
+      const y0 = dir < 0 ? y - h : y;
+      out += '<rect x="' + (xOf(i, n) - barW/2) + '" y="' + y0 + '" width="' + barW + '" height="' + h +
         '" fill="' + tcolor(t) + '" opacity="' + (key === 'closed' ? '.55' : '.95') + '">' +
         '<title>' + s.labels[i] + ' · ' + t + ' · ' + (key === 'opened' ? '开' : '关') + ' ' + v +
         '</title></rect>';
+      y += dir * h;
     }
     return out;
   };
   for (let i = 0; i < n; i++) {
-    const x = i * bw, net = s.opened[i] - s.closed[i];
+    const net = s.opened[i] - s.closed[i];
+    const cx = xOf(i, n);
     if (s.byType) {
-      g += stack(x + bw * 0.12, bw * 0.34, 'opened', i);
-      g += stack(x + bw * 0.52, bw * 0.34, 'closed', i);
+      g += stack(i, 'opened', -1);
+      g += stack(i, 'closed', +1);
     } else {
-      const ho = (s.opened[i] / max) * PLOT, hc = (s.closed[i] / max) * PLOT;
-      g += '<rect x="' + (x + bw*0.12) + '" y="' + (H - 20 - ho) + '" width="' + bw*0.34 + '" height="' + ho + '" fill="var(--a5)"/>';
-      g += '<rect x="' + (x + bw*0.52) + '" y="' + (H - 20 - hc) + '" width="' + bw*0.34 + '" height="' + hc + '" fill="var(--a2)"/>';
+      const ho = (s.opened[i] / max) * half, hc = (s.closed[i] / max) * half;
+      g += '<rect x="' + (cx - barW/2) + '" y="' + (mid - ho) + '" width="' + barW + '" height="' + ho + '" fill="var(--a5)"/>';
+      g += '<rect x="' + (cx - barW/2) + '" y="' + mid + '" width="' + barW + '" height="' + hc + '" fill="var(--a2)"/>';
     }
-    if (n <= 32) g += '<text x="' + (x + bw/2) + '" y="' + (H - 6) + '" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">' + s.labels[i] + '</text>';
-    // 净值用箭头而不是红/绿：红已经是 bug 的颜色，再拿它表示「涨」就有两个意思。
-    if (net !== 0 && n <= 32) g += '<text x="' + (x + bw/2) + '" y="12" font-size="9" text-anchor="middle" fill="currentColor" opacity="' + (net > 0 ? '.9' : '.45') + '">' + (net>0?'▲+':'▼') + net + '</text>';
+    if (n <= 32) g += '<text x="' + cx + '" y="' + (H - 6) + '" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">' + s.labels[i] + '</text>';
+    if (n <= 32) g += '<text x="' + cx + '" y="12" font-size="9" text-anchor="middle" fill="' + deltaFill(net) + '">' + (net>0?'+':'') + net + '</text>';
   }
-  const tot = s.opened.reduce((a,b)=>a+b,0), totc = s.closed.reduce((a,b)=>a+b,0);
-  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' + g + '</svg>' +
-    '<div class="legend2">' + (s.byType ? ts.map(t =>
-      '<span class="lg" data-type="' + t + '">' + swatch(t) + t + '</span>').join('') : '') +
-    '<span class="dim">左柱 = 开（实），右柱 = 关（淡）· 窗口内共 开 ' + tot + ' / 关 ' + totc +
-    ' / 净 ' + (tot-totc>0?'+':'') + (tot-totc) + ' · 柱顶 ▲ = 当桶净增</span></div>';
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' + g + '</svg>';
 }
 
 /**
  * 存量 —— **按类型堆叠的面积**，不是一条总线。
  *
+ * X 与流量图共用 xOf：每个点落在对应棒槌的中心，两张图是同一个时间尺。
  * 「总数为什么不降」这个问题，一条总线只能说「没降」；分层才能说出是哪一层在涨。
  */
 function line(s) {
   const ts = stackTypes(s);
   const max = Math.max(1, ...s.stock);
-  const W = 1000, H = 170, n = s.stock.length, PLOT = H - 26;
-  const X = i => n === 1 ? 0 : (i / (n - 1)) * W;
+  const W = CHART_W, H = 170, n = s.stock.length, PLOT = H - 26;
   const Y = v => H - 14 - (v / max) * PLOT;
   let g = '';
   if (s.byType) {
-    // 自底向上累加，每层画成一条带 —— 顶边恒等于总存量。
     const acc = new Array(n).fill(0);
     for (const t of ts) {
       const lo = acc.slice();
       for (let i = 0; i < n; i++) acc[i] += s.byType[t].stock[i];
-      const up = acc.map((v, i) => X(i) + ',' + Y(v)).join(' ');
-      const dn = lo.map((v, i) => X(i) + ',' + Y(v)).reverse().join(' ');
+      const up = acc.map((v, i) => xOf(i, n) + ',' + Y(v)).join(' ');
+      const dn = lo.map((v, i) => xOf(i, n) + ',' + Y(v)).reverse().join(' ');
       g += '<polygon points="' + up + ' ' + dn + '" fill="' + tcolor(t) + '" opacity=".75">' +
         '<title>' + t + '</title></polygon>';
     }
   } else {
     g += '<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="' +
-      s.stock.map((v, i) => X(i) + ',' + Y(v)).join(' ') + '"/>';
+      s.stock.map((v, i) => xOf(i, n) + ',' + Y(v)).join(' ') + '"/>';
   }
   const last = s.stock[s.stock.length - 1];
   return '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart">' + g +
     '<text x="6" y="12" font-size="10" fill="currentColor" opacity=".55">峰值 ' + max + '</text>' +
     '<text x="' + (W - 6) + '" y="12" font-size="10" text-anchor="end" fill="currentColor" opacity=".55">当前 ' + last + '</text>' +
-    '</svg>' +
-    '<div class="legend2">' + (s.byType ? ts.map(t =>
-      '<span class="lg" data-type="' + t + '">' + swatch(t) + t + '</span>').join('') : '') +
-    '<span class="dim">堆叠面积，顶边 = 总存量 —— 一条总线只能说「没降」，分层才说得出是哪一层在涨</span></div>';
+    '</svg>';
+}
+
+function chartLegend(raw, shown) {
+  const ts = stackTypes(raw);
+  const tot = shown.opened.reduce((a,b)=>a+b,0), totc = shown.closed.reduce((a,b)=>a+b,0);
+  const net = tot - totc;
+  let h = '<div class="legend2">';
+  h += '<span class="lg' + (!chartType ? ' on' : '') + '" data-ct="">全部</span>';
+  for (const t of ts) {
+    h += '<span class="lg' + (chartType === t ? ' on' : '') + '" data-ct="' + t + '">' +
+      swatch(t) + t + '</span>';
+  }
+  h += '<span class="dim">上开 / 下关 · 窗口内 开 ' + tot + ' / 关 ' + totc +
+    ' / 净 ' + (net>0?'+':'') + net + ' · 点类型只筛这两张图</span></div>';
+  return h;
 }
 
 function section(t, b) { return '<div class="epic"><h3>' + esc(t) + '</h3>' + b + '</div>'; }
@@ -679,9 +703,15 @@ function render() {
 }
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-id],[data-epic],[data-trace],[data-type],[data-ftype],[data-age],.tab,.gtab');
+  const t = e.target.closest('[data-id],[data-epic],[data-trace],[data-type],[data-ftype],[data-age],[data-ct],.tab,.gtab');
   if (!t) return;
   if (t.classList.contains('gtab')) { gran = t.dataset.g; render(); return; }
+  if (t.dataset.ct !== undefined) {
+    e.preventDefault();
+    const v = t.dataset.ct || null;
+    chartType = (!v || chartType === v) ? null : v;
+    render(); return;
+  }
   if (t.dataset.age) {
     // 再点一次取消 —— 一个筛不掉的筛选器会把人困在一个子集里而不自知。
     e.preventDefault();
@@ -693,9 +723,9 @@ document.addEventListener('click', e => {
     e.preventDefault(); ftype = t.dataset.ftype || null; render(); return;
   }
   if (t.classList.contains('tab')) { view = t.dataset.v; render(); return; }
-  if (t.dataset.trace) { e.preventDefault(); sel = +t.dataset.trace; view = 'trace'; render(); return; }
+  if (t.dataset.trace) { e.preventDefault(); sel = t.dataset.trace; view = 'trace'; render(); return; }
   if (t.dataset.epic) { e.preventDefault(); view = 'epics'; render(); return; }
-  e.preventDefault(); sel = +t.dataset.id; render();
+  e.preventDefault(); sel = t.dataset.id; render();
 });
 document.getElementById('q').addEventListener('input', e => { q = e.target.value; render(); });
 document.addEventListener('click', e => {

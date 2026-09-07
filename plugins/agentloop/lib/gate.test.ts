@@ -43,6 +43,37 @@ describe("requireStickyGate", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("opts.accept={PASS} rejects NA — a door that cannot take the docs exemption", () => {
+    const r = requireStickyGate(
+      "1",
+      HEAD,
+      MARKER_PREFIX,
+      "cross-engine review",
+      HINT,
+      withComment(sticky(MARKER_PREFIX, HEAD, "NA")),
+      { accept: ["PASS"] },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("NA");
+      expect(r.reason).toContain("PASS");
+      expect(r.reason).not.toMatch(/PASS or NA/);
+    }
+  });
+
+  it("opts.accept={PASS} still accepts PASS (otherwise a total reject satisfies the NA test)", () => {
+    const r = requireStickyGate(
+      "1",
+      HEAD,
+      MARKER_PREFIX,
+      "cross-engine review",
+      HINT,
+      withComment(sticky(MARKER_PREFIX, HEAD, "PASS")),
+      { accept: ["PASS"] },
+    );
+    expect(r).toEqual({ ok: true, sha: HEAD, result: "PASS" });
+  });
+
   it("blocks when result is FAIL", () => {
     const r = requireStickyGate(
       "1",

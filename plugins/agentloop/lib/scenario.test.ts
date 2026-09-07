@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ENV_GAP_CAPABILITY, envGapIdentity, FAILURE_REASONS } from "./failure-class.ts";
+import { readProcessStartTimeMs } from "./pid-liveness.ts";
 import { type CheckResult, deriveResult, isSkipped, passed } from "./report.ts";
 import {
   CACHE_STATE,
@@ -32,20 +33,66 @@ import {
   checkFailuresOf,
   classifyLocalCache,
   dirtyPorcelainFiles,
+  livenessSuffix,
   observedEnvGaps,
   probeCapabilities,
   provenanceNotice,
   type RunContext,
   runCheckGuarded,
   undeclaredEnvGaps,
+  VERIFICATION_STATE_DIR_ENV,
 } from "./scenario.ts";
 
 const LIB = import.meta.dir;
 const dirs: string[] = [];
+/**
+ * cwd (realpath) → isolated evidence root. Per-fixture, shared across that
+ * fixture's linked worktrees, never the process-default
+ * `<git-common-dir>/agentloop/verification` (arc#5776).
+ */
+const evidenceByCwd = new Map<string, string>();
 
 afterEach(() => {
+  evidenceByCwd.clear();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+
+function cwdKey(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return dir;
+  }
+}
+
+/** Isolated broker root for `dir` and any worktree that {@link shareEvidence} bound to it. */
+function evidenceRootFor(dir: string): string {
+  const key = cwdKey(dir);
+  const existing = evidenceByCwd.get(key);
+  if (existing) return existing;
+  const root = mkdtempSync(join(tmpdir(), "agentloop-evidence-"));
+  dirs.push(root);
+  evidenceByCwd.set(key, root);
+  return root;
+}
+
+/** Two worktrees of one fixture share one isolated broker — the production shape. */
+function shareEvidence(primary: string, peer: string): void {
+  evidenceByCwd.set(cwdKey(peer), evidenceRootFor(primary));
+}
+
+function childEnv(dir: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    [VERIFICATION_STATE_DIR_ENV]: evidenceRootFor(dir),
+    ...extra,
+  };
+}
+
+/** Broker root the spawned runner will actually use. */
+function brokerRoot(dir: string): string {
+  return evidenceRootFor(dir);
+}
 
 /** A git repo with one commit, so HEAD resolves and the tree is clean. */
 function repo(): string {
@@ -58,7 +105,15 @@ function repo(): string {
   git("config user.name t");
   writeFileSync(join(dir, "f.txt"), "one\n");
   git("add -A");
-  git("commit -qm init");
+  // Unique committer date so parallel fixtures cannot share a SHA — same-SHA
+  // plus a shared store is how file-internal concurrency used to flake.
+  const stamp = new Date(1_700_000_000_000 + Math.floor(Math.random() * 1e12)).toISOString();
+  spawnSync("git", ["commit", "-qm", "init"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: childEnv(dir, { GIT_AUTHOR_DATE: stamp, GIT_COMMITTER_DATE: stamp }),
+  });
+  evidenceRootFor(dir);
   return dir;
 }
 
@@ -69,7 +124,11 @@ function commitFiles(dir: string, files: Record<string, string>): void {
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content);
   }
-  const committed = spawnSync("git", ["add", "-A"], { cwd: dir, encoding: "utf8" });
+  const committed = spawnSync("git", ["add", "-A"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: childEnv(dir),
+  });
   expect(committed.status).toBe(0);
   const commit = spawnSync("git", ["commit", "-qm", "fixture change"], {
     cwd: dir,
@@ -115,7 +174,10 @@ function runScenarioIn(
        ["bun", "scenario-run.ts"${extraArgv}],
      );`,
   );
-  const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], { encoding: "utf8" });
+  const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], {
+    encoding: "utf8",
+    env: childEnv(dir),
+  });
   const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
     encoding: "utf8",
   }).stdout.trim();
@@ -146,7 +208,7 @@ function runMultiIn(
        ["bun", "multi-run.ts"${extraArgv}],
      );`,
   );
-  const r = spawnSync("bun", [script], { cwd, encoding: "utf8" });
+  const r = spawnSync("bun", [script], { cwd, encoding: "utf8", env: childEnv(cwd) });
   const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
     encoding: "utf8",
   }).stdout.trim();
@@ -158,12 +220,12 @@ const meta = (dir: string, sha: string) =>
 
 /**
  * The SharedEvidence file the UNKNOWN-rate walker opens (#5573 P2): basename
- * `metadata.json` under the git-common-dir broker, NEVER the local
+ * `metadata.json` under the isolated broker, NEVER the local
  * `.verify/${sha}.metadata.json` the rate face does not read. Dropping
  * `checkFailures` from `publishSharedEvidence` must turn these tests red.
  */
 function brokerMeta(dir: string): { path: string; body: Record<string, unknown> } {
-  const root = join(dir, ".git", "agentloop", "verification");
+  const root = brokerRoot(dir);
   const found: string[] = [];
   const walk = (p: string): void => {
     try {
@@ -181,11 +243,160 @@ function brokerMeta(dir: string): { path: string; body: Record<string, unknown> 
   const path = found[0] as string;
   // The rate walker only opens basename `metadata.json` under the broker.
   // `.verify/<sha>.metadata.json` is a different file and a different name.
-  expect(path).toContain("/agentloop/verification/");
+  expect(path.startsWith(root)).toBe(true);
   expect(path.endsWith("/metadata.json")).toBe(true);
   expect(path).not.toMatch(/\.verify\/[^/]+\.metadata\.json$/);
+  // Isolated root, never the process-default git-common-dir store (arc#5776).
+  expect(path).not.toContain("/.git/agentloop/verification/");
   return { path, body: JSON.parse(readFileSync(path, "utf8")) };
 }
+
+/**
+ * #5776 — tests that exercise the shared broker used to write
+ * `<fixture>/.git/agentloop/verification`, which is the same prefix a live
+ * gate uses when GIT_DIR is inherited and is the same SHA-keyed store
+ * concurrent fixtures collide on. Isolation is the fixture; cross-worktree
+ * reuse is still the production shape (one root, many location slots).
+ */
+describe("scenario tests isolate the evidence store (#5776)", () => {
+  test("REJECT: a full run does not write .git/agentloop/verification", () => {
+    // Mutation: drop childEnv from runScenarioIn and this goes red — that is
+    // the proof the fixture can see a collision with the process-default store.
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, true);
+    expect(code).toBe(0);
+    expect(existsSync(join(dir, ".git", "agentloop", "verification"))).toBe(false);
+    // And not the PROCESS-default store (this checkout's git-common-dir) either
+    // — GIT_DIR inheritance is how a fixture used to land on a live gate's
+    // broker. A SHA collision with production HEAD is not a thing: repo() pins
+    // a unique committer date.
+    const common = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(common.length).toBeGreaterThan(0);
+    expect(existsSync(join(common, "agentloop", "verification", sha))).toBe(false);
+    expect(existsSync(join(brokerRoot(dir), sha))).toBe(true);
+  });
+
+  test("ACCEPT: two worktrees of one fixture still share the isolated broker", () => {
+    const dir = repo();
+    const first = runScenarioIn(dir, true);
+    expect(first.code).toBe(0);
+    const peer = join(tmpdir(), `agentloop-iso-peer-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `iso-peer-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    const peerRun = runScenarioIn(peer, true);
+    expect(peerRun.code).toBe(0);
+    // Same isolated root. A sibling PASS is reused (#5875), so the second tree
+    // does not write a second location slot.
+    expect(brokerRoot(peer)).toBe(brokerRoot(dir));
+    const byLocation = join(brokerRoot(dir), first.sha, "unit", "HEAD", "by-location");
+    expect(readdirSync(byLocation)).toHaveLength(1);
+    expect(peerRun.out).toContain("reused shared unit evidence");
+    // The default git-common-dir store on the fixture is still untouched.
+    expect(existsSync(join(dir, ".git", "agentloop", "verification"))).toBe(false);
+  });
+
+  test("childEnv points outside the fixture so the override cannot dirty the tree", () => {
+    const dir = repo();
+    const env = childEnv(dir);
+    const root = env[VERIFICATION_STATE_DIR_ENV];
+    expect(typeof root).toBe("string");
+    expect(root).toBe(brokerRoot(dir));
+    expect(root?.startsWith(dir)).toBe(false);
+    expect(root).not.toContain("/.git/agentloop/verification");
+  });
+});
+
+/**
+ * #5833 — zero-work reuse must be visible BEFORE lane admission. The peek is
+ * the consult acquireLane's `reusePeek` calls; a miss here still queues.
+ */
+describe("peekReusableSharedEvidence (arc#5833)", () => {
+  function peekIn(
+    dir: string,
+    extraArgv: string[] = [],
+  ): { peeked: boolean; result: string | null } {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-peek-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "peek.ts");
+    writeFileSync(
+      script,
+      `import { peekReusableSharedEvidence } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const peeked = peekReusableSharedEvidence(
+         { scenario: "unit", resolveBase: () => "HEAD", checks: [{ id: "only", run: () => { throw new Error("peek must not run checks"); } }] },
+         process.argv,
+       );
+       console.log(JSON.stringify({ peeked: peeked !== undefined, result: peeked?.result ?? null }));`,
+    );
+    const r = spawnSync("bun", [script, ...extraArgv], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    expect(r.status).toBe(0);
+    return JSON.parse(r.stdout) as { peeked: boolean; result: string | null };
+  }
+
+  test("ACCEPT: after a full PASS, peek hits without running checks", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, true).code).toBe(0);
+    expect(peekIn(dir)).toEqual({ peeked: true, result: "PASS" });
+  });
+
+  test("REJECT: no evidence is a miss, so the caller still takes the lane", () => {
+    const dir = repo();
+    expect(peekIn(dir)).toEqual({ peeked: false, result: null });
+  });
+
+  test("REJECT: --only is a miss (partial runs still do work)", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, true).code).toBe(0);
+    expect(peekIn(dir, ["--only", "only"])).toEqual({ peeked: false, result: null });
+  });
+
+  test("REJECT: --retry-failed is a miss so a retry still takes the lane", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, false).code).toBe(1);
+    expect(peekIn(dir, ["--retry-failed"])).toEqual({ peeked: false, result: null });
+  });
+
+  test("ACCEPT (#5875): peek hits a sibling-location PASS without running checks", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, true).code).toBe(0);
+    const peer = join(tmpdir(), `agentloop-peek-peer-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `peek-peer-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    expect(peekIn(peer)).toEqual({ peeked: true, result: "PASS" });
+  });
+
+  test("REJECT (#5875): a sibling FAIL is not a peek hit — FAIL is never laundered into PASS", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, false).code).toBe(1);
+    const peer = join(tmpdir(), `agentloop-peek-fail-peer-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `peek-fail-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    expect(peekIn(peer)).toEqual({ peeked: false, result: null });
+  });
+});
 
 /**
  * #5067: a partial verification wrote a PASS cache that satisfied the push gate.
@@ -222,7 +433,7 @@ describe("runScenario — partial verification is not a gate token (#5067)", () 
     expect(delivery.out).toContain("PARTIAL");
     expect(delivery.out).toContain("a, b");
     // A partial run must never reach the shared broker either — at ANY location slot.
-    const shaRoot = join(dir, ".git", "agentloop", "verification", sha);
+    const shaRoot = join(brokerRoot(dir), sha);
     expect(
       spawnSync("bash", ["-c", `find ${shaRoot} -name result -print -quit 2>/dev/null`], {
         encoding: "utf8",
@@ -335,7 +546,11 @@ describe("runScenario — partial verification is not a gate token (#5067)", () 
       `,
     });
     renameSync(join(dir, "docs/contract.md"), join(dir, "docs/renamed.md"));
-    const committed = spawnSync("git", ["add", "-A"], { cwd: dir, encoding: "utf8" });
+    const committed = spawnSync("git", ["add", "-A"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
     expect(committed.status).toBe(0);
     expect(spawnSync("git", ["commit", "-qm", "rename fixture"], { cwd: dir }).status).toBe(0);
 
@@ -415,7 +630,7 @@ describe("runScenario — .verify cache", () => {
       cwd: dir,
       encoding: "utf8",
     }).stdout.trim();
-    const lock = join(dir, ".git", "agentloop", "verification", sha, "unit", "HEAD", "lease.lock");
+    const lock = join(brokerRoot(dir), sha, "unit", "HEAD", "lease.lock");
     mkdirSync(lock, { recursive: true });
     writeFileSync(join(lock, "owner.json"), "already-owned\n");
     const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
@@ -426,7 +641,11 @@ describe("runScenario — .verify cache", () => {
       `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
        runScenario({ scenario: "unit", resolveBase: () => "HEAD", identity: () => { throw new Error("identity must not run"); }, checks: [{ id: "only", run: () => { throw new Error("check must not run"); } }] }, process.argv);`,
     );
-    const result = spawnSync("bun", [script, "--help"], { cwd: dir, encoding: "utf8" });
+    const result = spawnSync("bun", [script, "--help"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
     expect(result.status).toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain("Usage: unit");
     expect(existsSync(join(dir, ".verify"))).toBe(false);
@@ -463,7 +682,7 @@ describe("runScenario — .verify cache", () => {
        const value = cleanForEvidence();
        console.log(JSON.stringify(value));`,
     );
-    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     expect(r.status).toBe(0);
     const parsed: unknown = JSON.parse(r.stdout);
     expect(parsed).toBeTypeOf("object");
@@ -591,14 +810,18 @@ describe("runScenario — .verify cache", () => {
          return { check: "only", title: "Only", pass: true, blocking: true, durationMs: 1 };
        }}] }, process.argv);`,
     );
-    const first = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const first = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
       cwd: dir,
       encoding: "utf8",
     }).stdout.trim();
     expect(first.status).toBe(0);
     expect(existsSync(join(dir, ".verify", `${sha}.result`))).toBe(false);
-    const delivery = spawnSync("bun", [script, "--deliver-cached"], { cwd: dir, encoding: "utf8" });
+    const delivery = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
     expect(delivery.status).toBe(1);
     expect(`${delivery.stdout}${delivery.stderr}`).toContain("no current unit cache");
   });
@@ -635,7 +858,7 @@ describe("runScenario — .verify cache", () => {
     expect(retried.code).toBe(0);
     expect(`${retried.out}`).toContain("retrying cached FAIL evidence");
     expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
-    const shaRoot = join(dir, ".git", "agentloop", "verification", first.sha, "unit", "HEAD");
+    const shaRoot = join(brokerRoot(dir), first.sha, "unit", "HEAD");
     const archived = spawnSync(
       "bash",
       ["-c", `find ${shaRoot} -path '*/retries/*' -name result -print -quit`],
@@ -659,35 +882,28 @@ describe("runScenario — .verify cache", () => {
     expect(retried.out).toContain("cannot be combined");
   });
 
-  test("a linked worktree reaches the same store through git-common-dir (#5339: own slot)", () => {
+  test("a linked worktree reaches the same store through git-common-dir (#5875: sibling PASS reused)", () => {
     const dir = repo();
     const first = runScenarioIn(dir, true);
     expect(first.code).toBe(0);
 
     const peer = join(tmpdir(), `agentloop-scenario-peer-${Date.now()}-${Math.random()}`);
     dirs.push(peer);
-    const added = spawnSync("git", ["worktree", "add", "-b", "peer", peer, "HEAD"], {
+    const added = spawnSync("git", ["worktree", "add", "-b", `peer-${Date.now()}`, peer, "HEAD"], {
       cwd: dir,
       encoding: "utf8",
     });
     expect(added.status).toBe(0);
+    shareEvidence(dir, peer);
 
     const peerRun = runScenarioIn(peer, true);
     expect(peerRun.code).toBe(0);
     expect(readFileSync(join(peer, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
-    // The store is the COMMON dir's (the peer's own `.git` is a file), and each tree
-    // holds its own record there rather than inheriting the other's verdict.
-    const byLocation = join(
-      dir,
-      ".git",
-      "agentloop",
-      "verification",
-      first.sha,
-      "unit",
-      "HEAD",
-      "by-location",
-    );
-    expect(readdirSync(byLocation)).toHaveLength(2);
+    expect(peerRun.out).toContain("reused shared unit evidence");
+    // The store is the COMMON dir's (the peer's own `.git` is a file). A sibling
+    // PASS is reused rather than writing a second location slot (#5875).
+    const byLocation = join(brokerRoot(dir), first.sha, "unit", "HEAD", "by-location");
+    expect(readdirSync(byLocation)).toHaveLength(1);
   });
 
   test("does not reuse pre-merge evidence after its resolved base advances", () => {
@@ -708,17 +924,17 @@ describe("runScenario — .verify cache", () => {
     const first = spawnSync("bun", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "origin-main-a" },
+      env: childEnv(dir, { TEST_BASE: "origin-main-a" }),
     });
     const staleDelivery = spawnSync("bun", [script, "--deliver-cached"], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "origin-main-b" },
+      env: childEnv(dir, { TEST_BASE: "origin-main-b" }),
     });
     const second = spawnSync("bun", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "origin-main-b" },
+      env: childEnv(dir, { TEST_BASE: "origin-main-b" }),
     });
     expect(first.status).toBe(0);
     // #5635: stale identity is not "missing" (1) and not current red (also 1).
@@ -752,26 +968,16 @@ describe("runScenario — .verify cache", () => {
          return { check: "slow", title: "Slow", pass: result.code === 0, blocking: true, durationMs: result.ms };
        }}] }, ["bun", "slow-scenario.ts"]);`,
     );
-    const first = spawn("bun", [script], { cwd: dir, stdio: "ignore" });
+    const first = spawn("bun", [script], { cwd: dir, stdio: "ignore", env: childEnv(dir) });
     const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
       encoding: "utf8",
     }).stdout.trim();
-    const lease = join(
-      dir,
-      ".git",
-      "agentloop",
-      "verification",
-      sha,
-      "single-flight",
-      "HEAD",
-      "lease.lock",
-      "owner.json",
-    );
+    const lease = join(brokerRoot(dir), sha, "single-flight", "HEAD", "lease.lock", "owner.json");
     const deadline = Date.now() + 5000;
     while (!existsSync(lease) && Date.now() < deadline) await Bun.sleep(20);
     expect(existsSync(lease)).toBe(true);
 
-    const second = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const second = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     expect(second.status).toBe(0);
     expect(`${second.stdout}${second.stderr}`).toContain("reused shared single-flight evidence");
     expect(`${second.stdout}${second.stderr}`).toContain("Reused evidence");
@@ -804,12 +1010,13 @@ describe("runScenario — .verify cache", () => {
         encoding: "utf8",
       }).status,
     ).toBe(0);
+    shareEvidence(dir, peer);
     writeFileSync(join(peer, "untracked.txt"), "dirty\n");
 
     // Do not wait for either lease: this is the race that used to let the dirty
     // caller observe no shared lock and start its own worktree-local gate.
-    const clean = spawn("bun", [script], { cwd: dir, stdio: "ignore" });
-    const dirty = spawn("bun", [script], { cwd: peer, stdio: "ignore" });
+    const clean = spawn("bun", [script], { cwd: dir, stdio: "ignore", env: childEnv(dir) });
+    const dirty = spawn("bun", [script], { cwd: peer, stdio: "ignore", env: childEnv(peer) });
     const [cleanCode, dirtyCode] = await Promise.all(
       [clean, dirty].map(
         (child) => new Promise<number | null>((resolve) => child.once("exit", resolve)),
@@ -856,12 +1063,17 @@ describe("runScenario — .verify cache", () => {
           },
         ).status,
       ).toBe(0);
+      shareEvidence(dir, peer);
       writeFileSync(join(peer, "untracked.txt"), "dirty\n");
     }
 
     const codes = await Promise.all(
       peers.map((peer) => {
-        const child = spawn("bun", [script], { cwd: peer, stdio: "ignore" });
+        const child = spawn("bun", [script], {
+          cwd: peer,
+          stdio: "ignore",
+          env: childEnv(peer),
+        });
         return new Promise<number | null>((resolve) => child.once("exit", resolve));
       }),
     );
@@ -886,7 +1098,7 @@ describe("runScenario — .verify cache", () => {
       cwd: dir,
       encoding: "utf8",
     }).stdout.trim();
-    const lock = join(dir, ".git", "agentloop", "verification", sha, "unit", "HEAD", "lease.lock");
+    const lock = join(brokerRoot(dir), sha, "unit", "HEAD", "lease.lock");
     mkdirSync(lock, { recursive: true });
     writeFileSync(join(lock, "owner.json"), "not json\n", { encoding: "utf8", flag: "w" });
 
@@ -901,16 +1113,7 @@ describe("runScenario — .verify cache", () => {
     const dir = repo();
     const first = runScenarioIn(dir, false);
     expect(first.code).toBe(1);
-    const lock = join(
-      dir,
-      ".git",
-      "agentloop",
-      "verification",
-      first.sha,
-      "unit",
-      "HEAD",
-      "lease.lock",
-    );
+    const lock = join(brokerRoot(dir), first.sha, "unit", "HEAD", "lease.lock");
     mkdirSync(lock, { recursive: true });
     writeFileSync(join(lock, "owner.json"), "not json\n", { encoding: "utf8", flag: "w" });
 
@@ -927,7 +1130,7 @@ describe("runScenario — .verify cache", () => {
     // report.md present, the atomic metadata commit missing.
     const first = runScenarioIn(dir, true);
     expect(first.code).toBe(0);
-    const coordination = join(dir, ".git", "agentloop", "verification", first.sha, "unit", "HEAD");
+    const coordination = join(brokerRoot(dir), first.sha, "unit", "HEAD");
     const slots = readdirSync(join(coordination, "by-location"));
     expect(slots).toHaveLength(1);
     const record = join(coordination, "by-location", slots[0]);
@@ -985,13 +1188,13 @@ describe("runScenario — atomic lease create (#5361)", () => {
   }
 
   function race(script: string, cwdA: string, cwdB: string, args: string[] = []) {
-    const a = spawn("bun", [script, ...args], { cwd: cwdA });
-    const b = spawn("bun", [script, ...args], { cwd: cwdB });
+    const a = spawn("bun", [script, ...args], { cwd: cwdA, env: childEnv(cwdA) });
+    const b = spawn("bun", [script, ...args], { cwd: cwdB, env: childEnv(cwdB) });
     return Promise.all([waitExit(a), waitExit(b)]);
   }
 
   function sharedLockPath(dir: string, sha: string, scenario: string): string {
-    return join(dir, ".git", "agentloop", "verification", sha, scenario, "HEAD", "lease.lock");
+    return join(brokerRoot(dir), sha, scenario, "HEAD", "lease.lock");
   }
 
   function localLockPath(dir: string, scenario = "unit"): string {
@@ -1169,7 +1372,7 @@ describe("runScenario — atomic lease create (#5361)", () => {
     const failed = spawnSync("bun", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_FAIL: "1" },
+      env: childEnv(dir, { TEST_FAIL: "1" }),
     });
     expect(failed.status).toBe(1);
     writeFileSync(runs, "");
@@ -1215,7 +1418,7 @@ describe("runScenario — fail-fast skip (#5223)", () => {
          ],
        }, ["bun", "failfast.ts"]);`,
     );
-    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
       cwd: dir,
       encoding: "utf8",
@@ -1252,7 +1455,7 @@ describe("runScenario — fail-fast skip (#5223)", () => {
          ],
        }, ["bun", "warn.ts"]);`,
     );
-    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     expect(r.status).toBe(0);
     expect(readFileSync(ran, "utf8").trim().split("\n")).toEqual(["warn", "expensive"]);
   });
@@ -1316,13 +1519,17 @@ describe("runScenario — evidence carries its production location (#5339)", () 
       .filter((l) => l.trim()).length;
 
   const shaOf = (dir: string): string =>
-    spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+    spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    }).stdout.trim();
 
   const exec = (script: string, cwd: string, env: Record<string, string> = {}) => {
     const r = spawnSync("bun", [script], {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, ...env },
+      env: childEnv(cwd, env),
     });
     return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
   };
@@ -1336,6 +1543,7 @@ describe("runScenario — evidence carries its production location (#5339)", () 
         encoding: "utf8",
       }).status,
     ).toBe(0);
+    shareEvidence(dir, peer);
     return peer;
   }
 
@@ -1367,35 +1575,42 @@ describe("runScenario — evidence carries its production location (#5339)", () 
     expect(countRuns(runs)).toBe(1);
   });
 
-  test("accept: a DIFFERENT tree at the same sha really re-runs instead of reusing", () => {
+  test("ACCEPT (#5875): a DIFFERENT tree at the same sha reuses a sibling PASS instead of re-running", () => {
     const dir = repo();
     const runs = runsLog();
     const script = countingScript(runs);
     expect(exec(script, dir).code).toBe(0);
 
-    const peer = addWorktree(dir, "rerun");
+    const peer = addWorktree(dir, "reuse-pass");
+    const second = exec(script, peer);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("reused shared loc evidence");
+    expect(second.out).toContain("Reused evidence");
+    expect(second.out).toContain("sibling location");
+    // The second tree must not start checks — wall-clock near 0, one run on disk.
+    expect(countRuns(runs)).toBe(1);
+    expect(readFileSync(runs, "utf8")).not.toContain(realpathSync(peer));
+    // Producer slot stays the producer's; reuse does not write a second slot.
+    const byLocation = join(brokerRoot(dir), shaOf(dir), "loc", "HEAD", "by-location");
+    expect(readdirSync(byLocation)).toHaveLength(1);
+    // Location remains on the artifact — it is not a refuse-to-reuse key for PASS.
+    expect(second.out).toContain(`tree \`${realpathSync(dir)}\``);
+  });
+
+  test("REJECT (#5875): a sibling FAIL is not a free PASS — the other tree still runs", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir, { TEST_FAIL: "1" }).code).toBe(1);
+
+    const peer = addWorktree(dir, "refuse-fail");
     const second = exec(script, peer);
     expect(second.code).toBe(0);
     expect(second.out).not.toContain("reused shared loc evidence");
-    // The re-run is real, and it happened in the peer.
     expect(countRuns(runs)).toBe(2);
     expect(readFileSync(runs, "utf8")).toContain(realpathSync(peer));
-    // Both records survive: the second location does not overwrite the first.
-    const byLocation = join(
-      dir,
-      ".git",
-      "agentloop",
-      "verification",
-      shaOf(dir),
-      "loc",
-      "HEAD",
-      "by-location",
-    );
+    const byLocation = join(brokerRoot(dir), shaOf(dir), "loc", "HEAD", "by-location");
     expect(readdirSync(byLocation)).toHaveLength(2);
-    // …and the divergence is stated in the report, not left for a human to notice.
-    const peerReport = readFileSync(join(peer, ".verify", `${shaOf(dir)}.md`), "utf8");
-    expect(peerReport).toContain("Independent evidence");
-    expect(peerReport).toContain(realpathSync(dir));
   });
 
   test("accept: the reuse notice names the REAL shared record, and deleting it forces a re-run", () => {
@@ -1412,8 +1627,8 @@ describe("runScenario — evidence carries its production location (#5339)", () 
     const printed = /Shared record: `([^`]+)`/.exec(second.out)?.[1];
     expect(printed).toBeTruthy();
     expect(existsSync(printed as string)).toBe(true);
-    // The record lives in the COMMON git dir, not in the linked worktree's .git.
-    expect((printed as string).startsWith(realpathSync(dir))).toBe(true);
+    // The record lives in the isolated shared broker, not in the linked worktree.
+    expect((printed as string).startsWith(brokerRoot(dir))).toBe(true);
     expect((printed as string).startsWith(realpathSync(peer))).toBe(false);
 
     rmSync(printed as string, { recursive: true, force: true });
@@ -1444,16 +1659,7 @@ describe("runScenario — evidence carries its production location (#5339)", () 
 
     // The slot is location-keyed, but the producer's own statement is checked too:
     // a record moved (or forged) into this slot still answers only for where it was made.
-    const slotRoot = join(
-      dir,
-      ".git",
-      "agentloop",
-      "verification",
-      shaOf(dir),
-      "loc",
-      "HEAD",
-      "by-location",
-    );
+    const slotRoot = join(brokerRoot(dir), shaOf(dir), "loc", "HEAD", "by-location");
     const [slot] = readdirSync(slotRoot);
     const metadataPath = join(slotRoot, slot, "metadata.json");
     const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
@@ -1482,10 +1688,9 @@ describe("runScenario — evidence carries its production location (#5339)", () 
         encoding: "utf8",
       }).status,
     ).toBe(0);
+    shareEvidence(dir, odd);
     expect(exec(script, odd).code).toBe(0);
-    const slots = readdirSync(
-      join(dir, ".git", "agentloop", "verification", shaOf(dir), "loc", "HEAD", "by-location"),
-    );
+    const slots = readdirSync(join(brokerRoot(dir), shaOf(dir), "loc", "HEAD", "by-location"));
     expect(slots).toHaveLength(1);
     // One segment, no separator and no traversal smuggled in from the path.
     expect(slots[0]).not.toContain("/");
@@ -1821,7 +2026,7 @@ describe("runScenario — a throwing check does not take the run down (#5591)", 
          ["bun", "throw-run.ts"],
        );`,
     );
-    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
       cwd: dir,
       encoding: "utf8",
@@ -1963,7 +2168,11 @@ describe("environment capability is part of the evidence identity (#5386)", () =
 
   describe("end to end, through the real broker", () => {
     const shaOfRepo = (dir: string): string =>
-      spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+      spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+        env: childEnv(dir),
+      }).stdout.trim();
 
     /**
      * A scenario whose single check both depends on and reports an environment
@@ -2018,7 +2227,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
       const r = spawnSync("bun", [script], {
         cwd,
         encoding: "utf8",
-        env: { ...process.env, ...env },
+        env: childEnv(cwd, env),
       });
       return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
     };
@@ -2090,16 +2299,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
       const script = capabilityScript(runs);
       expect(exec(script, dir, { TEST_UPSTREAM: "1" }).code).toBe(0);
       expect(exec(script, dir, { TEST_UPSTREAM: "0" }).code).toBe(0);
-      const byLocation = join(
-        dir,
-        ".git",
-        "agentloop",
-        "verification",
-        shaOfRepo(dir),
-        "cap",
-        "HEAD",
-        "by-location",
-      );
+      const byLocation = join(brokerRoot(dir), shaOfRepo(dir), "cap", "HEAD", "by-location");
       const slots = readdirSync(byLocation);
       expect(slots).toHaveLength(2);
       // Each slot states the environment it was produced under, and they differ —
@@ -2191,7 +2391,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
         const cached = spawnSync("bun", [script, "--deliver-cached"], {
           cwd: dir,
           encoding: "utf8",
-          env: { ...process.env, TEST_GAP: "1" },
+          env: childEnv(dir, { TEST_GAP: "1" }),
         });
         expect(cached.status).toBe(0);
       });
@@ -2206,7 +2406,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
         expect(first.out).toContain("dns-localhost-subdomain");
         // Nothing banked: the store holds no record for this identity at all, so no
         // host — gapped or capable — can inherit a verdict a gap helped decide.
-        const store = join(dir, ".git", "agentloop", "verification", shaOfRepo(dir));
+        const store = join(brokerRoot(dir), shaOfRepo(dir));
         const records = existsSync(store)
           ? spawnSync("bash", ["-c", `find ${JSON.stringify(store)} -name metadata.json | wc -l`], {
               encoding: "utf8",
@@ -2230,7 +2430,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
         const cached = spawnSync("bun", [script, "--deliver-cached"], {
           cwd: dir,
           encoding: "utf8",
-          env: { ...process.env, TEST_GAP: "1" },
+          env: childEnv(dir, { TEST_GAP: "1" }),
         });
         expect(cached.status).toBe(0);
       });
@@ -2256,7 +2456,7 @@ describe("environment capability is part of the evidence identity (#5386)", () =
         const cached = spawnSync("bun", [script, "--deliver-cached"], {
           cwd: dir,
           encoding: "utf8",
-          env: { ...process.env, TEST_GAP: "1" },
+          env: childEnv(dir, { TEST_GAP: "1" }),
         });
         const out = `${cached.stdout}${cached.stderr}`;
         expect(out).toContain("Reused evidence");
@@ -2398,7 +2598,10 @@ describe("runScenario — the run's class lands beside its result (#5626)", () =
          ["bun", "classed-run.ts"${extraArgv}],
        );`,
     );
-    const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], { encoding: "utf8" });
+    const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], {
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
     const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
       encoding: "utf8",
     }).stdout.trim();
@@ -2709,7 +2912,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     const first = spawnSync("bun", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "origin-main-a" },
+      env: childEnv(dir, { TEST_BASE: "origin-main-a" }),
     });
     expect(first.status).toBe(1);
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -2722,7 +2925,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     const stale = spawnSync("bun", [script, "--deliver-cached"], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "origin-main-b" },
+      env: childEnv(dir, { TEST_BASE: "origin-main-b" }),
     });
     expect(stale.status).toBe(STALE_EXIT);
     expect(cacheState(`${stale.stdout}${stale.stderr}`)).toBe("stale-identity");
@@ -2756,7 +2959,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     const first = spawnSync("bun", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_UPSTREAM: "1" },
+      env: childEnv(dir, { TEST_UPSTREAM: "1" }),
     });
     expect(first.status).toBe(0);
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -2766,7 +2969,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     const drifted = spawnSync("bun", [script, "--deliver-cached"], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_UPSTREAM: "0" },
+      env: childEnv(dir, { TEST_UPSTREAM: "0" }),
     });
     expect(drifted.status).toBe(STALE_EXIT);
     expect(cacheState(`${drifted.stdout}${drifted.stderr}`)).toBe("stale-identity");
@@ -2776,7 +2979,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     const restored = spawnSync("bun", [script, "--deliver-cached"], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_UPSTREAM: "1" },
+      env: childEnv(dir, { TEST_UPSTREAM: "1" }),
     });
     expect(restored.status).toBe(0);
     expect(cacheState(`${restored.stdout}${restored.stderr}`)).toBe("current");
@@ -2791,7 +2994,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     // run's record. Drop it so rehydration cannot mask a local leftover that
     // answers for a different tree (the rehydration accept path is the test
     // above, which corrupts `base` the same way).
-    rmSync(join(dir, ".git", "agentloop", "verification", sha), { recursive: true, force: true });
+    rmSync(join(brokerRoot(dir), sha), { recursive: true, force: true });
     const metadataPath = artifacts(dir, sha).metadata;
     const recorded = JSON.parse(readFileSync(metadataPath, "utf8"));
     writeFileSync(
@@ -2827,7 +3030,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
       spawnSync("bun", [script], {
         cwd: dir,
         encoding: "utf8",
-        env: { ...process.env, TEST_BASE: "base-a" },
+        env: childEnv(dir, { TEST_BASE: "base-a" }),
       }).status,
     ).toBe(1);
     const sha = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -2837,7 +3040,7 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     spawnSync("bun", [script, "--deliver-cached"], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, TEST_BASE: "base-b" },
+      env: childEnv(dir, { TEST_BASE: "base-b" }),
     });
     const a = artifacts(dir, sha);
     // The consumer that only asks "do the files exist?" must not see a current red.
@@ -2861,7 +3064,11 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
   }
 
   function runAt(script: string, dir: string, args: string[] = []): { code: number; out: string } {
-    const r = spawnSync("bun", [script, ...args], { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("bun", [script, ...args], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
     return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
   }
 
@@ -2938,5 +3145,383 @@ describe("--deliver-cached three states: current / stale-identity / missing (#56
     expect(cacheState(again.out)).not.toBe("stale-identity");
     expect(existsSync(artifacts(dir, sha).md)).toBe(true);
     expect(existsSync(artifacts(dir, sha).metadata)).toBe(true);
+  });
+});
+
+/**
+ * #5815 — the lease's own accept/reject pair for pid recycling.
+ *
+ * `lib/pid-liveness.test.ts` pins the predicate; these pin that the LEASE
+ * actually consults it, in both directions, through the real runner:
+ *
+ *  - ACCEPT: a lease held by a genuinely live owner is still respected. Getting
+ *    this wrong means every gate steals every lease — far worse than the wedge.
+ *  - REJECT: a lease whose recorded owner start time predates the process now
+ *    holding that pid is reclaimed, and the message NAMES pid recycling rather
+ *    than a generic "not alive", because the same ledger feeds the hygiene
+ *    check that asks a human to act on a pid.
+ */
+describe("runScenario — a recycled owner pid does not wedge the lease (#5815)", () => {
+  function plantLocalLease(dir: string, owner: Record<string, unknown>): string {
+    const lock = join(dir, ".verify", ".leases", "unit.lock");
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, "owner.json"), `${JSON.stringify(owner)}\n`, "utf8");
+    return lock;
+  }
+
+  test("ACCEPT: a lease held by a genuinely live owner is still respected", () => {
+    const dir = repo();
+    const lock = plantLocalLease(dir, {
+      pid: process.pid,
+      scenario: "unit",
+      processStartedAt: readProcessStartTimeMs(process.pid),
+      startedAt: new Date().toISOString(),
+    });
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(3);
+    expect(result.out).toContain("already running");
+    expect(result.out).toContain(`owner pid ${process.pid}`);
+    // The live owner's lock is untouched.
+    expect(existsSync(join(lock, "owner.json"))).toBe(true);
+  });
+
+  test("REJECT: a lease whose pid was recycled is reclaimed, and the reason says so", () => {
+    const dir = repo();
+    plantLocalLease(dir, {
+      pid: process.pid,
+      scenario: "unit",
+      // The owner that took this lease started a month ago; whatever holds this
+      // pid today demonstrably started later, so it is not that owner.
+      processStartedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      startedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("recycled");
+    expect(result.out).toContain(String(process.pid));
+    expect(result.out).not.toContain("already running");
+  });
+
+  test("REJECT: a legacy record carrying only startedAt is reclaimed too", () => {
+    const dir = repo();
+    plantLocalLease(dir, {
+      pid: process.pid,
+      scenario: "unit",
+      startedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("recycled");
+  });
+
+  /**
+   * `readOwnerRecord` used to demand `pid > 1`, so a container gate — which
+   * genuinely IS pid 1 — had its own lease read as CORRUPT. That path prints
+   * "unreadable" and exits 3, which is fail-closed but for the wrong reason and
+   * with the wrong remedy shown to a human.
+   */
+  test("ACCEPT: pid 1 is a readable owner, not a corrupt lease (container gates)", () => {
+    const dir = repo();
+    plantLocalLease(dir, { pid: 1, scenario: "unit", startedAt: new Date().toISOString() });
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(3);
+    expect(result.out).toContain("already running");
+    expect(result.out).toContain("owner pid 1");
+    expect(result.out).not.toContain("unreadable verification lease");
+  });
+
+  /**
+   * Breaking `ps` on PATH blinds the instrument ONLY where there is no `/proc`.
+   * On Linux the `/proc/<pid>/stat` fallback still measures a start time, so
+   * the verdict is `running` and the blind-path assertions would fail — this
+   * test used to be macOS-only and would have redded the blocking `plugins`
+   * gate on every Linux runner (review round 2).
+   *
+   * So it branches — and BOTH sides assert something real, because a branch
+   * whose other half never runs anywhere is the same defect one level up:
+   *
+   *   - no `/proc`  → the instrument really is blind ⇒ the refusal must SAY so;
+   *   - `/proc`     → the fallback really did rescue the measurement ⇒ the
+   *                   refusal must NOT claim blindness, which is the live proof
+   *                   that the documented Linux fallback works.
+   *
+   * `startTimeChecked`'s reader itself is pinned platform-independently by the
+   * `livenessSuffix` unit arms below, so no platform loses that coverage.
+   */
+  test("breaking ps blinds the instrument only where there is no /proc — both sides asserted", () => {
+    const dir = repo();
+    const binDir = mkdtempSync(join(tmpdir(), "agentloop-5815-nops-"));
+    dirs.push(binDir);
+    writeFileSync(join(binDir, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    plantLocalLease(dir, {
+      pid: process.pid,
+      scenario: "unit",
+      processStartedAt: readProcessStartTimeMs(process.pid),
+      startedAt: new Date().toISOString(),
+    });
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-5815-blind-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "blind.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: "unit", resolveBase: () => "HEAD", checks: [{ id: "only", run: () => ({
+         check: "only", title: "Only", pass: true, blocking: true, durationMs: 1,
+       }) }] }, ["bun", "blind.ts", "--only", "only"]);`,
+    );
+    const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], {
+      encoding: "utf8",
+      env: childEnv(dir, { PATH: `${binDir}:${process.env.PATH}` }),
+    });
+    const out = `${r.stdout}${r.stderr}`;
+    // Fail-closed on BOTH platforms: a live owner is still respected.
+    expect(r.status).toBe(3);
+    expect(out).toContain("already running");
+
+    if (existsSync("/proc/stat")) {
+      // Linux: the documented fallback measured the start time anyway. Assert
+      // it actually did — this side's positive control, and the only place the
+      // /proc path is exercised end to end. Both assertions are independent of
+      // the unconditional `already running` above; a `toContain("running")`
+      // here would be strictly subsumed by it and could never fail alone.
+      expect(out).not.toContain("recycling NOT ruled out");
+      expect(out).not.toContain("start-time-unavailable");
+    } else {
+      // No /proc: the instrument really is blind, and must say so rather than
+      // print the same thing a verified-alive owner prints.
+      expect(out).toContain("start-time-unavailable");
+      expect(out).toContain("recycling NOT ruled out");
+    }
+  });
+
+  /**
+   * The reader for `startTimeChecked`, pinned WITHOUT depending on whether this
+   * host can be blinded. The end-to-end arm above can only exercise one of
+   * these two states per platform; this exercises both, everywhere.
+   */
+  /**
+   * `readOwnerRecord`'s numeric guard was LOOSENED from `> 1` to `>= 1` so a
+   * container gate (which is pid 1) can own its own lease. The loosening is
+   * right; it needs a reject arm so it cannot loosen further unnoticed. These
+   * values are the ones `kill(2)` reinterprets as group/broadcast, and they
+   * must still read as corrupt-and-refuse, never as reclaimable.
+   */
+  test("REJECT: pid 0 / -1 / non-integer still read as a corrupt lease, not a reclaimable one", () => {
+    for (const pid of [0, -1, 4242.7]) {
+      const dir = repo();
+      plantLocalLease(dir, { pid, scenario: "unit", startedAt: new Date().toISOString() });
+      const result = runScenarioIn(dir, true, `, "--only", "only"`);
+      expect(result.code, `pid ${pid} must refuse`).toBe(3);
+      expect(result.out).toContain("unreadable verification lease");
+      expect(result.out).not.toContain("reclaiming");
+    }
+  });
+
+  /**
+   * The reclaim notice fires for `pid-recycled` ONLY. Without this arm, deleting
+   * that guard — and narrating every ordinary dead-owner reclaim as a recycling
+   * event — reds nothing, which is how a noisy signal stops meaning anything.
+   */
+  test("REJECT: an ordinary dead-owner reclaim is silent, not narrated as recycling", () => {
+    const dir = repo();
+    const dead = spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" });
+    const deadPid = Number(dead.stdout.trim());
+    expect(Number.isInteger(deadPid)).toBe(true);
+    plantLocalLease(dir, {
+      pid: deadPid,
+      scenario: "unit",
+      processStartedAt: Date.now() - 1000,
+      startedAt: new Date().toISOString(),
+    });
+    const result = runScenarioIn(dir, true, `, "--only", "only"`);
+    expect(result.code).toBe(0);
+    expect(result.out).not.toContain("reclaiming");
+    expect(result.out).not.toContain("recycled");
+  });
+
+  test("livenessSuffix distinguishes a measured owner from an unmeasurable one", () => {
+    expect(livenessSuffix({ alive: true, reason: "running", startTimeChecked: true })).toBe(
+      "running",
+    );
+    const blind = livenessSuffix({
+      alive: true,
+      reason: "start-time-unavailable",
+      startTimeChecked: false,
+    });
+    expect(blind).toContain("start-time-unavailable");
+    expect(blind).toContain("recycling NOT ruled out");
+    // The two states must not print the same thing — that is the whole point.
+    expect(blind).not.toBe(
+      livenessSuffix({ alive: true, reason: "start-time-unavailable", startTimeChecked: true }),
+    );
+  });
+
+  test("a fresh lease records the owner process's own start time, not just the lease's", () => {
+    const dir = repo();
+    const runsDir = mkdtempSync(join(tmpdir(), "agentloop-5815-owner-"));
+    dirs.push(runsDir);
+    const captured = join(runsDir, "owner.json");
+    const script = join(runsDir, "capture.ts");
+    // Copy the live lease's owner.json out from inside the gate: after the run
+    // exits the lock is gone, so this is the only place it can be observed.
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       import { copyFileSync } from "node:fs";
+       runScenario({ scenario: "unit", resolveBase: () => "HEAD", checks: [{ id: "only", run: () => {
+         copyFileSync(".verify/.leases/unit.lock/owner.json", ${JSON.stringify(captured)});
+         return { check: "only", title: "Only", pass: true, blocking: true, durationMs: 1 };
+       }}] }, ["bun", "capture.ts", "--only", "only"]);`,
+    );
+    const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], {
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    expect(r.status).toBe(0);
+    const owner = JSON.parse(readFileSync(captured, "utf8")) as Record<string, unknown>;
+    expect(typeof owner.pid).toBe("number");
+    expect(typeof owner.startedAt).toBe("string");
+    // The discriminator itself. Absent, every verdict silently degrades to the
+    // weaker lease-creation upper bound.
+    expect(typeof owner.processStartedAt).toBe("number");
+    expect(owner.processStartedAt as number).toBeLessThanOrEqual(
+      Date.parse(owner.startedAt as string) + 1000,
+    );
+  });
+});
+
+/**
+ * #5875 — PASS from a sibling location in the same git common-dir store is
+ * reusable when (sha, scenario, resolved base, capabilities) match. Location
+ * stays on the artifact; it is not a refuse-to-reuse key for PASS. FAIL is
+ * never laundered into a sibling PASS.
+ *
+ * The accept arm (second tree does NOT start checks) is load-bearing: restoring
+ * location-as-refuse-to-reuse makes it red. The reject arms prove mismatch still
+ * starts a real run — "reuse everything" would satisfy only the accept arm.
+ */
+describe("runScenario — sibling PASS is reusable across worktrees (#5875)", () => {
+  function countingScript(runs: string, scenario: string, base = "HEAD"): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-5875-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "counting.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: ${JSON.stringify(scenario)}, resolveBase: () => ${JSON.stringify(base)}, checks: [{ id: "one", run: () => {
+         appendFileSync(${JSON.stringify(runs)}, process.cwd() + "\\n");
+         return { check: "one", title: "One", pass: true, blocking: true, durationMs: 1 };
+       }}] }, process.argv);`,
+    );
+    return script;
+  }
+
+  function runsLog(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agentloop-5875-runs-"));
+    dirs.push(dir);
+    const runs = join(dir, "runs.log");
+    writeFileSync(runs, "");
+    return runs;
+  }
+
+  const countRuns = (runs: string): number =>
+    readFileSync(runs, "utf8")
+      .split("\n")
+      .filter((l) => l.trim()).length;
+
+  const exec = (script: string, cwd: string, extraArgv: string[] = []) => {
+    const r = spawnSync("bun", [script, ...extraArgv], {
+      cwd,
+      encoding: "utf8",
+      env: childEnv(cwd),
+    });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  };
+
+  function addWorktree(dir: string, name: string): string {
+    const peer = join(tmpdir(), `agentloop-5875-peer-${name}-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `${name}-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    return peer;
+  }
+
+  test("ACCEPT: --deliver-cached in a sibling tree rehydrates the PASS without checks", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs, "pre-merge");
+    expect(exec(script, dir).code).toBe(0);
+    const peer = addWorktree(dir, "deliver");
+    const delivered = exec(script, peer, ["--deliver-cached"]);
+    expect(delivered.code).toBe(0);
+    expect(delivered.out).toContain("Reused evidence");
+    expect(delivered.out).toContain("sibling location");
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("REJECT: a different scenario at the sibling tree still starts checks", () => {
+    const dir = repo();
+    const runs = runsLog();
+    expect(exec(countingScript(runs, "pre-pr"), dir).code).toBe(0);
+    const peer = addWorktree(dir, "scenario");
+    const second = exec(countingScript(runs, "pre-merge"), peer);
+    expect(second.code).toBe(0);
+    expect(second.out).not.toContain("reused shared pre-merge evidence");
+    expect(countRuns(runs)).toBe(2);
+  });
+
+  test("REJECT: a different resolved base at the sibling tree still starts checks", () => {
+    const dir = repo();
+    const runs = runsLog();
+    expect(exec(countingScript(runs, "pre-merge", "base-a"), dir).code).toBe(0);
+    const peer = addWorktree(dir, "base");
+    const second = exec(countingScript(runs, "pre-merge", "base-b"), peer);
+    expect(second.code).toBe(0);
+    expect(second.out).not.toContain("reused shared pre-merge evidence");
+    expect(countRuns(runs)).toBe(2);
+  });
+
+  test("REJECT: capability mismatch still refuses sibling reuse", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-5875-cap-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "cap.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const reachable = () => process.env.TEST_UPSTREAM === "1";
+       runScenario({
+         scenario: "cap",
+         resolveBase: () => "HEAD",
+         capabilities: [{ id: "upstream-reachable", probe: reachable }],
+         checks: [{ id: "mirror", run: () => {
+           appendFileSync(${JSON.stringify(runs)}, process.cwd() + "\\n");
+           return { check: "mirror", title: "Mirror", pass: true, blocking: true, durationMs: 1 };
+         }}],
+       }, process.argv);`,
+    );
+    const first = spawnSync("bun", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir, { TEST_UPSTREAM: "1" }),
+    });
+    expect(first.status).toBe(0);
+    const peer = addWorktree(dir, "cap");
+    const second = spawnSync("bun", [script], {
+      cwd: peer,
+      encoding: "utf8",
+      env: childEnv(peer, { TEST_UPSTREAM: "0" }),
+    });
+    expect(second.status).toBe(0);
+    expect(`${second.stdout}${second.stderr}`).not.toContain("reused shared cap evidence");
+    expect(countRuns(runs)).toBe(2);
   });
 });

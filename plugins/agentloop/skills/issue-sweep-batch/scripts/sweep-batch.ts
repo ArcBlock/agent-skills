@@ -12,17 +12,18 @@
  *
  * ## 来源可换
  *
- * 工作项从 `WorkItemSource`（见 `source.ts`）来，不直接绑 GitHub。今天是
- * `GitHubIssueSource`；work object（arc #5540）落地后换 `WorkObjectSource`，
+ * 工作项从 `WorkItemSource`（见 `source.ts`）来，不直接绑 GitHub。默认是
+ * `WorkObjectSource`（arc #6000）；`--source github` 仍可做投影 alias。
  * 判定核心一行不改。两个源过同一套 `source.conformance.test.ts`。
  *
  * 用法：
  *   bun sweep-batch.ts --dry-run                      只打印，不写 ledger、不建 issue
- *   bun sweep-batch.ts --types bug,feature,idea       扫哪些类型（默认 bug）
+ *   bun sweep-batch.ts --types bug,feature,idea       扫哪些类型（work-object 默认 bug,untyped）
  *   bun sweep-batch.ts --mode new                     只处理从未分类的（反复归类没动的是纯浪费）
  *   bun sweep-batch.ts --mode revalidate              只重验已分类的（世界变了之后旧结论还成立吗）
  *   bun sweep-batch.ts --dry-run --scope factory      只看工厂树的候选
- *   bun sweep-batch.ts --source work-object           换源（落地前会 fail-closed）
+ *   bun sweep-batch.ts --source github                换源（GitHub issue list；投影 alias）
+ *   bun sweep-batch.ts --layers '{"w_abc":"gate-credibility"}'  写入 Step 3 赋的 layer（不猜）
  *   bun sweep-batch.ts --html out.html                同时产出可交互的 HTML（双击就能开）
  *   bun sweep-batch.ts --ledger <path>                指定 ledger 位置
  *
@@ -35,6 +36,9 @@ import { dirname } from "node:path";
 import {
   axisFor,
   canonicalLabelFor,
+  classificationFromWork,
+  classificationWriteback,
+  defaultTypesFor,
   groupingQuestion,
   type Mode,
   revalidationReasons,
@@ -65,10 +69,13 @@ import {
 } from "./lib";
 import {
   capabilitiesOf,
-  GitHubIssueSource,
+  createSweepSource,
+  DEFAULT_SWEEP_SOURCE,
+  epicIdOf,
+  isInEpic,
+  membershipMode,
   type WorkItem,
   type WorkItemSource,
-  WorkObjectSource,
 } from "./source";
 import {
   bucketFlow,
@@ -92,23 +99,36 @@ import {
 } from "./typing";
 
 const args = process.argv.slice(2);
-const flag = (name: string, dflt: string) => {
+const flag = (name: string, dflt: string): string => {
   const i = args.indexOf(name);
-  return i >= 0 && args[i + 1] && !args[i + 1].startsWith("--") ? args[i + 1] : dflt;
+  const next = i >= 0 ? args[i + 1] : undefined;
+  return next && !next.startsWith("--") ? next : dflt;
 };
 const DRY = args.includes("--dry-run");
 const SCOPE = flag("--scope", "all");
-const TYPES = flag("--types", "bug")
+const SOURCE = flag("--source", DEFAULT_SWEEP_SOURCE);
+const TYPES = flag("--types", defaultTypesFor(SOURCE))
   .split(",")
   .map((t) => t.trim())
   .filter(Boolean) as WorkType[];
 const MODE = flag("--mode", "all") as Mode;
-const SOURCE = flag("--source", "github");
 const LEDGER = flag("--ledger", ".claude/state/sweep-batch-ledger.json");
 const HTML = flag("--html", "");
 const JSON_OUT = flag("--json", "");
+const LAYERS_FLAG = flag("--layers", "");
 const STATS_DAYS = Number(flag("--stats-days", "30"));
 const TTL_DAYS = 14;
+
+function assignedLayers(): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!LAYERS_FLAG) return out;
+  const text = LAYERS_FLAG.trim().startsWith("{") ? LAYERS_FLAG : readFileSync(LAYERS_FLAG, "utf8");
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  for (const [id, value] of Object.entries(parsed)) {
+    if (typeof value === "string" && value.trim()) out.set(id, value.trim());
+  }
+  return out;
+}
 
 function repoSlug(): string {
   // repo-profile 的 repo_slug 是权威；没有就从 git remote 推。
@@ -176,9 +196,10 @@ function sourceRoots(): string[] | undefined {
 const ROOTS = sourceRoots();
 
 function makeSource(): { src: WorkItemSource; label: string } {
-  if (SOURCE === "work-object") return { src: new WorkObjectSource(), label: "work-object" };
-  const repo = repoSlug();
-  return { src: new GitHubIssueSource(repo), label: `github:${repo}` };
+  if (SOURCE === "github" || SOURCE.startsWith("github:")) {
+    return createSweepSource(SOURCE, { repo: repoSlug() });
+  }
+  return createSweepSource(SOURCE);
 }
 
 /* ===== 候选集 ===== */
@@ -197,13 +218,14 @@ function inScope(s: PathSurface): boolean {
 
 const { src, label } = makeSource();
 const caps = capabilitiesOf(src);
+const MEMBERSHIP = membershipMode(SOURCE);
 
 const all = await src.list({ state: "open" });
 const claimed = await src.claimedIds();
 const epicMembers = await src.epicMembers();
 
 const candidates: WorkItem[] = [];
-const rejected: Record<string, number[]> = {
+const rejected: Record<string, string[]> = {
   "已在 epic": [],
   卡在人身上: [],
   在飞工作已认领: [],
@@ -225,7 +247,7 @@ for (const i of all) {
     rejected["卡在人身上"].push(i.id);
     continue;
   }
-  if (MODE === "new" && [...L].some((x) => /^epic:\d+$/.test(x))) {
+  if (MODE === "new" && isInEpic(i.id, i.labels, epicMembers, MEMBERSHIP)) {
     rejected["已在 epic（--mode new 跳过）"] = [
       ...(rejected["已在 epic（--mode new 跳过）"] ?? []),
       i.id,
@@ -260,23 +282,18 @@ if (existsSync(LEDGER)) {
    没有邻域信号时 quiet 是诚实的空值——上面已经打过警告说这一类会漏。 */
 const nbMap = caps.neighborhood && src.neighborhood ? await src.neighborhood(24) : new Map();
 const now = new Date();
-const reasonsById = new Map<number, string[]>();
-const everClassified = new Map<number, boolean>();
+const reasonsById = new Map<string, string[]>();
+const everClassified = new Map<string, boolean>();
 const ledgerById = new Map(ledger.map((r) => [r.issue, r]));
 for (const i of candidates) {
-  const rec = ledgerById.get(i.id);
+  const rec = classificationFromWork(i, ledgerById.get(i.id));
   const nb = nbMap.get(i.id) ?? { closedNeighbors: [], unblockedBy: [] };
-  const classified = Boolean(rec?.layer);
+  const classified = Boolean(rec.layer);
   everClassified.set(i.id, classified);
   reasonsById.set(
     i.id,
     revalidationReasons(
-      {
-        issue: i.id,
-        fingerprint: rec?.fingerprint ?? "",
-        classifiedAt: rec?.classifiedAt ?? new Date(0).toISOString(),
-        layer: rec?.layer ?? null,
-      },
+      rec,
       fingerprint(i.body, i.labels),
       { ...nb, newHumanInput: false },
       TTL_DAYS,
@@ -291,7 +308,7 @@ const skippedByMode = candidates.length - selected.length;
 
 // 在飞 epic 的合并路径面
 const byId = new Map(all.map((i) => [i.id, i]));
-const liveEpicSurface = new Map<number, PathSurface>();
+const liveEpicSurface = new Map<string, PathSurface>();
 for (const [epic, members] of epicMembers) {
   const bodies = members.map((m) => byId.get(m)?.body ?? "").join("\n");
   liveEpicSurface.set(epic, pathSurface(bodies, ROOTS));
@@ -299,7 +316,7 @@ for (const [epic, members] of epicMembers) {
 
 /* ===== 报告 ===== */
 
-const surf = new Map<number, PathSurface>();
+const surf = new Map<string, PathSurface>();
 for (const i of selected) surf.set(i.id, pathSurface(i.body, ROOTS));
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -563,7 +580,7 @@ if (HTML) {
     })(),
   );
   /** id -> createdAt（仅 open）。给 item 算年龄桶用；源不提供 timeline 时为空。 */
-  const createdAtById = new Map<number, string>();
+  const createdAtById = new Map<string, string>();
   /** 柱子与 item 的年龄桶必须用同一个 now，否则边界附近两边会差一条。 */
   const chartNow = new Date();
   // 健康判读：detector 是确定性的，agent 该读它的结构化输出而不是截图。
@@ -609,7 +626,7 @@ if (HTML) {
     console.log(`    需要人介入：${health.humanAttention ? "是" : "**否**"}`);
   }
 
-  const ghUrl = (n: number) => `https://github.com/${label.replace(/^github:/, "")}/issues/${n}`;
+  const ghUrl = (id: string) => `https://github.com/${label.replace(/^github:/, "")}/issues/${id}`;
   const overlaps: Model["overlaps"] = [];
   for (const [epic, es] of liveEpicSurface) {
     for (const i of measured) {
@@ -669,7 +686,7 @@ if (HTML) {
           files: s2.files,
           surfaceState: s2.state,
           reasons: reasonsById.get(i.id) ?? [],
-          epic: Number(i.labels.find((l) => /^epic:\d+$/.test(l))?.slice(5)) || null,
+          epic: epicIdOf(i.id, i.labels, epicMembers, MEMBERSHIP),
           selected: selected.some((x) => x.id === i.id),
           // null = 源没给 timeline，年龄未采集。**不猜**：页面据此显示「未采集」
           // 而不是把所有条目画进 <1d。
@@ -732,25 +749,61 @@ if (HTML) {
 
 if (!DRY) {
   const now = new Date().toISOString();
-  const next: LedgerRecord[] = [
-    ...ledger.filter((r) => !selected.some((x) => x.id === r.issue)),
-    ...candidates
-      .filter((i) => selected.some((x) => x.id === i.id))
-      .map((i) => ({
-        issue: i.id,
-        fingerprint: fingerprint(i.body, i.labels),
-        classifiedAt: now,
-        layer: null,
-        pathSurface: surf.get(i.id)!.files,
-        surfaceState: surf.get(i.id)!.state,
-        epic: null,
+  const classified = candidates.filter((i) => selected.some((x) => x.id === i.id));
+  const layers = assignedLayers();
+  const stamps = classified.flatMap((i) => {
+    const surface = surf.get(i.id);
+    const patch = classificationWriteback({
+      layer: layers.get(i.id),
+      existingLayer: i.layer,
+      fingerprint: fingerprint(i.body, i.labels),
+      classifiedAt: now,
+      pathSurface: surface?.files ?? [],
+      surfaceState: surface?.state ?? "unproven",
+      epic: epicIdOf(i.id, i.labels, epicMembers, MEMBERSHIP),
+    });
+    return patch ? [{ item: i, patch }] : [];
+  });
+  const skippedNoLayer = classified.length - stamps.length;
+  if (skippedNoLayer > 0) {
+    console.log(
+      `  ⚠ ${skippedNoLayer} 条没有 layer，未写回（脚本不猜；用 --layers '{"id":"defect-layer"}' 传入 Step 3 的赋值）`,
+    );
+  }
+  if (caps.writableClassification && typeof src.writeClassification === "function") {
+    let written = 0;
+    for (const { item, patch } of stamps) {
+      try {
+        await src.writeClassification(item.id, patch);
+        written++;
+      } catch (err) {
+        console.log(
+          `  ⚠ 写回 #${item.id} 失败：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    console.log(`分类已写回 work（ifMatch，${written}/${stamps.length} 条）\n`);
+  } else {
+    const stampedIds = new Set(stamps.map((s) => s.item.id));
+    const next: LedgerRecord[] = [
+      ...ledger.filter((r) => !stampedIds.has(r.issue)),
+      ...stamps.map(({ item, patch }) => ({
+        issue: item.id,
+        fingerprint: patch.fingerprint ?? ledgerById.get(item.id)?.fingerprint ?? "",
+        classifiedAt:
+          patch.classifiedAt ?? ledgerById.get(item.id)?.classifiedAt ?? new Date(0).toISOString(),
+        layer: patch.layer,
+        pathSurface: patch.pathSurface,
+        surfaceState: patch.surfaceState as LedgerRecord["surfaceState"],
+        epic: patch.epic ?? null,
         outcome: "open",
         exclusionReason: null,
       })),
-  ];
-  mkdirSync(dirname(LEDGER), { recursive: true });
-  writeFileSync(LEDGER, JSON.stringify(next, null, 2));
-  console.log(`ledger 已写 ${LEDGER}（${next.length} 条）\n`);
+    ];
+    mkdirSync(dirname(LEDGER), { recursive: true });
+    writeFileSync(LEDGER, JSON.stringify(next, null, 2));
+    console.log(`ledger 已写 ${LEDGER}（${next.length} 条）\n`);
+  }
 } else {
   console.log("dry-run：未写 ledger、未建任何 issue。\n");
 }

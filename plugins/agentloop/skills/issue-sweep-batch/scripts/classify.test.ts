@@ -3,11 +3,16 @@ import {
   axisFor,
   type ClassificationRecord,
   canonicalLabelFor,
+  classificationFromWork,
+  classificationWriteback,
+  defaultTypesFor,
   groupingQuestion,
   type Neighborhood,
+  parseTypes,
   revalidationReasons,
   SYMPTOM_VERDICTS,
   type SymptomVerdict,
+  shouldProcess,
   typeOf,
   VERDICT_KEEPS_OPEN,
 } from "./classify";
@@ -38,6 +43,29 @@ describe("typeOf —— 从 label 判类型", () => {
     // 把它们默认成 bug 会污染 bug 的分类轴。
     expect(typeOf([])).toBe("untyped");
     expect(typeOf(["P1", "agent:hold"])).toBe("untyped");
+  });
+});
+
+describe("defaultTypesFor — work-object default includes untyped (#6000 P1)", () => {
+  test("Happy: planted idea work with no keywords is in the work-object default", () => {
+    expect(typeOf([])).toBe("untyped");
+    const types = parseTypes(defaultTypesFor("work-object"));
+    expect(types).toContain("untyped");
+    expect(types).toContain("bug");
+    expect(types.includes(typeOf([]))).toBe(true);
+  });
+
+  test("REJECT: explicit --types bug still drops untyped", () => {
+    const types = parseTypes("bug");
+    expect(types.includes(typeOf([]))).toBe(false);
+    expect(types.includes(typeOf(["bug"]))).toBe(true);
+  });
+
+  test('Honesty: restoring types default "bug" for work-object reddens', () => {
+    expect(defaultTypesFor("work-object")).toMatch(/untyped/);
+    expect(defaultTypesFor("work-object")).not.toBe("bug");
+    expect(defaultTypesFor("github")).toBe("bug");
+    expect(defaultTypesFor("github:ArcBlock/arc")).toBe("bug");
   });
 });
 
@@ -79,7 +107,7 @@ describe("groupingQuestion —— 每个轴的聚簇判据是一句可回答的�
 describe("revalidationReasons —— 分类什么时候需要重做", () => {
   const now = new Date("2026-08-30T12:00:00Z");
   const rec: ClassificationRecord = {
-    issue: 100,
+    issue: "100",
     fingerprint: "fp-old",
     classifiedAt: "2026-08-29T12:00:00Z",
     layer: "gate-credibility",
@@ -100,13 +128,13 @@ describe("revalidationReasons —— 分类什么时候需要重做", () => {
   test("★ REJECT：自身没变，但邻居关掉了 → 仍需重验", () => {
     // 这是 GitHub label 给不出、graph 才有的信号：
     // 一条 issue 自己一个字没改，但它依赖的那条合了，分类可能已经不成立。
-    const r = revalidationReasons(rec, "fp-old", { ...quiet, closedNeighbors: [88] }, 14, now);
+    const r = revalidationReasons(rec, "fp-old", { ...quiet, closedNeighbors: ["88"] }, 14, now);
     expect(r.some((x) => x.includes("邻域"))).toBe(true);
     expect(r.join()).toContain("88");
   });
 
   test("★ REJECT：被解锁 → 需重验（blocked 时的分类可能是「等别人」）", () => {
-    const r = revalidationReasons(rec, "fp-old", { ...quiet, unblockedBy: [77] }, 14, now);
+    const r = revalidationReasons(rec, "fp-old", { ...quiet, unblockedBy: ["77"] }, 14, now);
     expect(r.some((x) => x.includes("解锁"))).toBe(true);
   });
 
@@ -139,7 +167,7 @@ describe("revalidationReasons —— 分类什么时候需要重做", () => {
     const r = revalidationReasons(
       rec,
       "fp-new",
-      { closedNeighbors: [1], unblockedBy: [2], newHumanInput: true },
+      { closedNeighbors: ["1"], unblockedBy: ["2"], newHumanInput: true },
       14,
       now,
     );
@@ -150,6 +178,152 @@ describe("revalidationReasons —— 分类什么时候需要重做", () => {
     // 若 revalidationReasons 退化成总是返回非空，增量就没了 —— 本条钉住那个方向。
     const r = revalidationReasons(rec, "fp-old", quiet, 14, now);
     expect(r.length).toBe(0);
+  });
+});
+
+describe("classificationFromWork — delta 必须读 work record，不能只读旁路 ledger", () => {
+  test("ACCEPT：work record 上的 layer/fingerprint 胜过空 ledger → revalidate 能看见", () => {
+    const rec = classificationFromWork(
+      {
+        id: "w_abc",
+        layer: "gate-credibility",
+        fingerprint: "fp-work",
+        classifiedAt: "2026-09-05T00:00:00.000Z",
+      },
+      undefined,
+    );
+    expect(rec.layer).toBe("gate-credibility");
+    expect(rec.fingerprint).toBe("fp-work");
+    expect(shouldProcess("revalidate", Boolean(rec.layer), [])).toBe(false);
+    expect(
+      shouldProcess(
+        "revalidate",
+        Boolean(rec.layer),
+        revalidationReasons(
+          rec,
+          "fp-new",
+          {
+            closedNeighbors: [],
+            unblockedBy: [],
+            newHumanInput: false,
+          },
+          14,
+          new Date("2026-09-05T12:00:00Z"),
+        ),
+      ),
+    ).toBe(true);
+    expect(shouldProcess("new", Boolean(rec.layer), ["从未分类过（记录里没有 layer）"])).toBe(
+      false,
+    );
+  });
+
+  test("GitHub 源没有 work 字段时回落到 ledger", () => {
+    const rec = classificationFromWork(
+      { id: "12" },
+      { layer: "from-ledger", fingerprint: "fp-ledger", classifiedAt: "2026-08-01T00:00:00.000Z" },
+    );
+    expect(rec.layer).toBe("from-ledger");
+    expect(rec.fingerprint).toBe("fp-ledger");
+  });
+
+  test("work record 的 layer:null 是已读到的写回，不得被 ledger 盖掉", () => {
+    const rec = classificationFromWork(
+      {
+        id: "w_abc",
+        layer: null,
+        fingerprint: "fp-work",
+        classifiedAt: "2026-09-05T00:00:00.000Z",
+      },
+      { layer: "from-ledger", fingerprint: "fp-ledger" },
+    );
+    expect(rec.layer).toBeNull();
+    expect(rec.fingerprint).toBe("fp-work");
+  });
+});
+
+describe("classificationWriteback — production stamp must be a real layer, not null", () => {
+  const quiet: Neighborhood = { closedNeighbors: [], unblockedBy: [], newHumanInput: false };
+  const now = new Date("2026-09-05T12:00:00Z");
+  const base = {
+    fingerprint: "fp-1",
+    classifiedAt: "2026-09-05T00:00:00.000Z",
+    pathSurface: ["scripts/a.ts"],
+    surfaceState: "measured",
+  };
+
+  test("REJECT: layer null is not a writeback — everClassified stays false, new never shrinks", () => {
+    expect(classificationWriteback({ ...base, layer: null, existingLayer: null })).toBeUndefined();
+    const rec = classificationFromWork({ id: "w_abc", layer: null, fingerprint: "fp-1" });
+    expect(shouldProcess("new", Boolean(rec.layer), ["从未分类过（记录里没有 layer）"])).toBe(true);
+    expect(
+      shouldProcess("revalidate", Boolean(rec.layer), ["从未分类过（记录里没有 layer）"]),
+    ).toBe(false);
+  });
+
+  test("ACCEPT: assigned layer + fingerprint → --mode new skips, --mode revalidate can select", () => {
+    const stamp = classificationWriteback({ ...base, layer: "gate-credibility" });
+    expect(stamp).toBeDefined();
+    expect(stamp?.layer).toBe("gate-credibility");
+    expect(stamp?.fingerprint).toBe("fp-1");
+    const rec = classificationFromWork({
+      id: "w_abc",
+      layer: stamp!.layer,
+      fingerprint: stamp!.fingerprint,
+      classifiedAt: stamp!.classifiedAt,
+    });
+    expect(Boolean(rec.layer)).toBe(true);
+    expect(shouldProcess("new", Boolean(rec.layer), ["从未分类过（记录里没有 layer）"])).toBe(
+      false,
+    );
+    expect(shouldProcess("revalidate", Boolean(rec.layer), [])).toBe(false);
+    const reasons = revalidationReasons(rec, "fp-changed", quiet, 14, now);
+    expect(reasons.some((x) => x.includes("指纹"))).toBe(true);
+    expect(shouldProcess("revalidate", Boolean(rec.layer), reasons)).toBe(true);
+    expect(shouldProcess("new", Boolean(rec.layer), reasons)).toBe(false);
+  });
+
+  test("ACCEPT: existing layer on the work record is enough — agent override not required to re-stamp", () => {
+    const stamp = classificationWriteback({ ...base, existingLayer: "gate-credibility" });
+    expect(stamp?.layer).toBe("gate-credibility");
+    expect(shouldProcess("new", Boolean(stamp?.layer), [])).toBe(false);
+  });
+
+  test("P1: carrying existingLayer must not refresh fingerprint/classifiedAt — revalidate still selects", () => {
+    const previous = {
+      layer: "gate-credibility",
+      fingerprint: "fp-old",
+      classifiedAt: "2026-09-01T00:00:00.000Z",
+    };
+    const stamp = classificationWriteback({
+      ...base,
+      existingLayer: previous.layer,
+      fingerprint: "fp-new",
+      classifiedAt: "2026-09-05T12:00:00.000Z",
+    });
+    expect(stamp?.layer).toBe("gate-credibility");
+    expect(stamp?.fingerprint).toBeUndefined();
+    expect(stamp?.classifiedAt).toBeUndefined();
+    const rec = classificationFromWork({
+      id: "w_abc",
+      layer: stamp!.layer,
+      fingerprint: stamp!.fingerprint ?? previous.fingerprint,
+      classifiedAt: stamp!.classifiedAt ?? previous.classifiedAt,
+    });
+    expect(rec.fingerprint).toBe("fp-old");
+    expect(rec.classifiedAt).toBe(previous.classifiedAt);
+    const reasons = revalidationReasons(rec, "fp-new", quiet, 14, now);
+    expect(reasons.some((x) => x.includes("指纹"))).toBe(true);
+    expect(shouldProcess("revalidate", Boolean(rec.layer), reasons)).toBe(true);
+    expect(shouldProcess("new", Boolean(rec.layer), reasons)).toBe(false);
+  });
+
+  test("agent --layers override wins over the existing layer", () => {
+    const stamp = classificationWriteback({
+      ...base,
+      layer: "path-surface",
+      existingLayer: "gate-credibility",
+    });
+    expect(stamp?.layer).toBe("path-surface");
   });
 });
 

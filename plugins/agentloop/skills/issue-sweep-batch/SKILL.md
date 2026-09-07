@@ -82,7 +82,7 @@ symptom 的产物是一个**判决**，必须终结成闭合词表里的一个�
 ### 三种模式
 
 ```bash
---types bug              # 默认；也可 feature,idea,research,untyped（逗号分隔）
+--types bug,untyped      # work-object 默认（导入无 keywords → untyped）；`--types bug` 仍只扫 bug
 --mode new               # 只处理**从未分类**的 —— 反复归类没动的东西是纯浪费
 --mode revalidate        # 只重验**已分类**的 —— 世界变了之后旧结论还成立吗
 --mode all               # 两者（默认）
@@ -232,7 +232,10 @@ bun .../sweep-batch.ts --dry-run --html sweep.html && open sweep.html
 页面上有一行对账（`101 条 · 铺成 172 张卡片，分布在 N 个路径面`）——实测跑出来的问题，
 不写出来的话点进去只会以为筛选器坏了。
 
-accept-path 检查：`node scripts/ui-verify.mjs <生成的 html>`（在仓库根下跑）。
+accept-path 检查：`bun scripts/ui-verify.mjs`（默认跑五份手写 Model：
+full / empty / single-bin / all-zero / uncollected）。断言打在 `renderHtml()` 产物上，
+不编码「这个仓库这一轮长什么样」。可选 `bun scripts/ui-verify.mjs <生成的 html>`
+对活数据只做结构性检查（能渲染、能点开、不崩），不含任何数字/库存断言。
 它执行页面**自己产出的**那段脚本，逐桶断言「柱子上的数 == 点开后的条数」。
 单测看不出这条——三处任何一处漂移，页面照样渲染得好好的，只是数对不上。
 判别力实测：删掉筛选那一行 → 全红；让柱子不跟随类型 → **只红 type×age 那一臂**。
@@ -245,7 +248,8 @@ accept-path 检查：`node scripts/ui-verify.mjs <生成的 html>`（在仓库�
 | **热度 `--a0..--a6`** | 年龄严重度 | 新鲜 → 陈旧单调变热，最老是红 |
 
 两套**互不冒充**：年龄柱一律用严重度色（不用类型色），类型卡 / chip / 堆叠图一律用类型色。
-所以流量图上净值不再用红/绿（红已经是 bug 的意思），改用 `▲/▼` + 明暗。
+净值数字走第三条通道（柱顶，不在柱体上）：净增红 · 净减绿 · 平为墨色（`--fg`）。
+柱体看类型，柱顶看涨跌，位置不同所以不会混。
 
 ### 概览页的两张图回答两个不同问题
 
@@ -256,9 +260,12 @@ accept-path 检查：`node scripts/ui-verify.mjs <生成的 html>`（在仓库�
 而没有人会去加。
 
 - **流量（开 vs 关，按桶）** —— 进货和出货哪个快？这是「修了这么多为什么总数不降」的
-  **直接**答案。实测某 14 天窗口：开 770 / 关 612，净 +158——关闭吞吐并不低，是进货更快。
+  **直接**答案。画成上下对称的棒槌：往 +y 开、往 −y 关，一眼看出哪头更长。
+  实测某 14 天窗口：开 770 / 关 612，净 +158——关闭吞吐并不低，是进货更快。
 - **存量（每桶末还开着的数）** —— 常说的 burn-down 那条线。它是流量的**积分**，
   好看但**滞后**：净值转负好几天后这条线才明显下弯。**先看流量再看存量。**
+  与流量图共用同一把 X 尺（每个点落在对应棒槌的中心）和同一份类型 legend；
+  点 legend 只筛这两张图（有「全部」），不跳到全局页。两张图是一个整体。
 
 ### 画这两张图必须拿到已关闭项
 
@@ -439,13 +446,14 @@ bun <plugin_root>/skills/issue-graph/scripts/graph-scan.ts --window-hours 24
 ### Step 8 — 无簇则静默
 形不成合格的簇就什么都不做、不发 comment。沿用 issue-sweep 的「无事则静默」。
 
-## 来源可换：GitHub issue 只是今天的实现
+## 来源可换：默认 WorkObjectSource，GitHub 是 opt-in
 
 工作项从 `WorkItemSource`（`scripts/source.ts`）来，判定核心不绑 GitHub。
+默认 `--source` 是 `WorkObjectSource`（AFS `/work`）。GitHub 只做投影 alias。
 
 ```bash
-bun .../sweep-batch.ts --dry-run                     # GitHubIssueSource（默认）
-bun .../sweep-batch.ts --dry-run --source work-object # WorkObjectSource
+bun .../sweep-batch.ts --dry-run                     # WorkObjectSource（默认）
+bun .../sweep-batch.ts --dry-run --source github     # GitHubIssueSource（opt-in）
 ```
 
 两个适配器过**同一套** `source.conformance.test.ts`——与本仓 provider conformance
@@ -461,7 +469,7 @@ GitHub 适配器**必须**把全部 open 工作项拉下来再本地过滤。`gh
 
 work object（arc #5540）落地后三件事同时变便宜：
 
-| | 今天（GitHub） | work object |
+| | GitHub 源（`--source github`） | 默认 WorkObjectSource |
 |---|---|---|
 | **过滤** | 拉全量 300 条正文再本地筛 | `/.actions/query` 按 label / layer / `changedSince` 下推 |
 | **分类** | 旁路 ledger 文件，多机各存一份 | `layer` / `pathSurface` / `surfaceState` 是**对象上的字段**，ledger 退役 |
@@ -477,9 +485,10 @@ work object（arc #5540）落地后三件事同时变便宜：
 > 这条断言最初写成了 `<=`，一个谎称下推的源全绿通过；是变异测试把这个洞照出来的。
 > **`<=` 与「真的下推了」在断言上同色。**
 
-`WorkObjectSource` 现在**刻意 fail-closed**（`exit 1`，错误信息指向 #5540），
-不给可运行的空桩——一个返回空数组的桩会让 conformance 的 ACCEPT 臂无法区分
-「源是空的」和「源坏了」。落地时要兑现的三条写在 `source.ts` 的类注释里。
+`WorkObjectSource` 走 AFS `/.actions/query` 下推、`member-of` 真边、分类 ifMatch 写回。
+构造注入 `WorkLedgerOps`；sweep-batch 默认 `arc afs`。AFS 不可用必须 throw（`exit ≠ 0`），
+不得返回空数组冒充「成功的 0 items」。id 是 string（GitHub `String(issue.number)`，
+work object 是 `w_<32hex>`），禁止把 DID 哈希成 number。
 
 **所有 I/O 走 AFS API**（`afs.read` / `afs.list` / `afs.exec`），不得直连后端——
 见仓库根 CLAUDE.md「AFS-Only I/O」第一原则。

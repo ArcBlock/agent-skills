@@ -13,18 +13,23 @@ import { describe, expect, test } from "bun:test";
 import {
   capabilitiesOf,
   claimsFromPr,
+  createSweepSource,
+  DEFAULT_SWEEP_SOURCE,
   MemoryWorkItemSource,
   type WorkItemSource,
   WorkObjectSource,
 } from "./source";
 
 /** 任何实现都要过这一套。新增适配器时把它挂进来。 */
-export function runSourceConformance(name: string, make: () => WorkItemSource) {
+export function runSourceConformance(
+  name: string,
+  make: () => WorkItemSource | Promise<WorkItemSource>,
+) {
   describe(`WorkItemSource conformance — ${name}`, () => {
     test("list 返回的每一项都带 id / title / body / labels", async () => {
-      const items = await make().list({ state: "open" });
+      const items = await (await make()).list({ state: "open" });
       for (const i of items) {
-        expect(typeof i.id).toBe("number");
+        expect(typeof i.id).toBe("string");
         expect(typeof i.title).toBe("string");
         expect(Array.isArray(i.labels)).toBe(true);
         expect(i.body === null || typeof i.body === "string").toBe(true);
@@ -32,7 +37,7 @@ export function runSourceConformance(name: string, make: () => WorkItemSource) {
     });
 
     test("ACCEPT：按 label 过滤真的收窄了结果", async () => {
-      const s = make();
+      const s = await make();
       const all = await s.list({ state: "open" });
       const bugs = await s.list({ state: "open", withLabels: ["bug"] });
       expect(bugs.length).toBeLessThan(all.length);
@@ -40,12 +45,12 @@ export function runSourceConformance(name: string, make: () => WorkItemSource) {
     });
 
     test("REJECT：不存在的 label 返回空，而不是全量", async () => {
-      const r = await make().list({ state: "open", withLabels: ["__no_such_label__"] });
+      const r = await (await make()).list({ state: "open", withLabels: ["__no_such_label__"] });
       expect(r).toEqual([]);
     });
 
     test("ACCEPT：排除 label 生效，且不吞掉不该排的", async () => {
-      const s = make();
+      const s = await make();
       const all = await s.list({ state: "open" });
       const r = await s.list({ state: "open", withoutLabels: ["bug"] });
       expect(r.every((i) => !i.labels.includes("bug"))).toBe(true);
@@ -53,21 +58,22 @@ export function runSourceConformance(name: string, make: () => WorkItemSource) {
     });
 
     test("claimedIds 返回被在飞工作认领的 id 集合（G5）", async () => {
-      const c = await make().claimedIds();
+      const c = await (await make()).claimedIds();
       expect(c instanceof Set).toBe(true);
     });
 
     test("epicMembers 返回 epic -> 成员 的映射", async () => {
-      const m = await make().epicMembers();
+      const m = await (await make()).epicMembers();
       expect(m instanceof Map).toBe(true);
       for (const [k, v] of m) {
-        expect(typeof k).toBe("number");
+        expect(typeof k).toBe("string");
         expect(Array.isArray(v)).toBe(true);
+        expect(v.every((id) => typeof id === "string")).toBe(true);
       }
     });
 
     test("★ 能力自述必须诚实：声明下推就必须真的下推", async () => {
-      const s = make();
+      const s = await make();
       const caps = capabilitiesOf(s);
       if (!caps.pushdown) {
         expect(caps.pushdown).toBe(false);
@@ -85,7 +91,7 @@ export function runSourceConformance(name: string, make: () => WorkItemSource) {
     });
 
     test("★ 声明了邻域能力就必须真的提供方法（否则整类失效信号会静默漏掉）", async () => {
-      const s = make();
+      const s = await make();
       const caps = capabilitiesOf(s);
       if (caps.neighborhood) {
         expect(typeof s.neighborhood).toBe("function");
@@ -103,32 +109,28 @@ runSourceConformance(
   "memory",
   () =>
     new MemoryWorkItemSource([
-      { id: 1, title: "a", body: "落点 `scripts/a.ts`", labels: ["bug"] },
-      { id: 2, title: "b", body: null, labels: ["feature"] },
-      { id: 3, title: "c", body: "`.claude/verify/checks/x.ts`", labels: ["bug", "epic:99"] },
+      { id: "1", title: "a", body: "落点 `scripts/a.ts`", labels: ["bug"] },
+      { id: "2", title: "b", body: null, labels: ["feature"] },
+      { id: "3", title: "c", body: "`.claude/verify/checks/x.ts`", labels: ["bug", "epic:99"] },
     ]),
 );
 
-describe("WorkObjectSource —— 未实现必须 fail-closed", () => {
-  // 这一组是变异测试补出来的：原来只写了 fail-closed 的类，从没断言过它真的 fail。
-  // 「声明了但没接线」与「接了线在保护你」在报告上完全同色。
-  test("★ 三个方法都必须抛，不得静默返回", async () => {
-    const s = new WorkObjectSource();
-    await expect(s.list()).rejects.toThrow(/尚未实现/);
-    await expect(s.claimedIds()).rejects.toThrow(/尚未实现/);
-    await expect(s.epicMembers()).rejects.toThrow(/尚未实现/);
-  });
-
-  test("错误信息必须指向落地条件，而不是一句泛泛的 not implemented", async () => {
-    const s = new WorkObjectSource();
-    await expect(s.list()).rejects.toThrow(/5540/);
-  });
-
-  test("它声明了三项能力 —— 落地时 conformance 的诚实臂会验这些声明", () => {
-    const c = capabilitiesOf(new WorkObjectSource());
+describe("WorkObjectSource —— 能力自述（实现见 source.work-object.test.ts）", () => {
+  test("它声明了三项能力 —— conformance 的诚实臂会验这些声明", () => {
+    const c = capabilitiesOf(
+      new WorkObjectSource({
+        read: async () => ({ data: null }),
+        readMany: async () => new Map(),
+        write: async () => ({}),
+        exec: async () => {
+          throw new Error("probe");
+        },
+      }),
+    );
     expect(c.pushdown).toBe(true);
     expect(c.incremental).toBe(true);
     expect(c.writableClassification).toBe(true);
+    expect(c.neighborhood).toBe(true);
   });
 });
 
@@ -153,19 +155,35 @@ describe("★ 认领判据必须权威（Codex P2，#5628 评审）", () => {
   });
 
   test("ACCEPT：确定性分支名 claude/issue-<N> 算认领", () => {
-    expect(claimsFromPr({ headRefName: "claude/issue-5624", body: "" })).toEqual([5624]);
+    expect(claimsFromPr({ headRefName: "claude/issue-5624", body: "" })).toEqual(["5624"]);
   });
 
   test("ACCEPT：Fixes / Part of #N 算认领", () => {
-    expect(claimsFromPr({ headRefName: "x", body: "Fixes #999" })).toEqual([999]);
-    expect(claimsFromPr({ headRefName: "x", body: "Part of #888" })).toEqual([888]);
+    expect(claimsFromPr({ headRefName: "x", body: "Fixes #999" })).toEqual(["999"]);
+    expect(claimsFromPr({ headRefName: "x", body: "Part of #888" })).toEqual(["888"]);
   });
 
   test("ACCEPT：closingIssuesReferences 是最权威的来源", () => {
-    expect(claimsFromPr({ headRefName: "x", body: "", closing: [77, 78] })).toEqual([77, 78]);
+    expect(claimsFromPr({ headRefName: "x", body: "", closing: [77, 78] })).toEqual(["77", "78"]);
   });
 
   test("分支名的多 phase 形态 claude/issue-<N>-p2 也算", () => {
-    expect(claimsFromPr({ headRefName: "claude/issue-5624-p2", body: "" })).toEqual([5624]);
+    expect(claimsFromPr({ headRefName: "claude/issue-5624-p2", body: "" })).toEqual(["5624"]);
+  });
+});
+
+describe("★ default sweep source is WorkObjectSource (#6000)", () => {
+  test("DEFAULT_SWEEP_SOURCE is work-object; createSweepSource(default) is not GitHub", () => {
+    expect(DEFAULT_SWEEP_SOURCE).toBe("work-object");
+    const { src, label } = createSweepSource(DEFAULT_SWEEP_SOURCE, {
+      ops: {
+        read: async () => ({ data: null }),
+        readMany: async () => new Map(),
+        write: async () => ({}),
+        exec: async () => ({ success: true, data: { entries: [] } }),
+      },
+    });
+    expect(label).toBe("work-object");
+    expect(src).toBeInstanceOf(WorkObjectSource);
   });
 });

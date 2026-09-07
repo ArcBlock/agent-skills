@@ -1,15 +1,16 @@
 ---
 name: land
 description: >-
-  Take ONE thing from wherever it is all the way to merged. Accepts an issue
-  number, a PR number/URL, several of them, or nothing at all (the thing being
-  discussed right now, or stated in the invocation). Resolves the target,
-  proves it is a single coherent piece of work, then routes: an epic goes to
-  epic-conductor; a PR skips to review + gate + merge; a plain issue gets an
-  isolated implementer, an independent clean-context reviewer, the repo's
-  verification gate, and a merge. Files the issue first when none exists. This
-  skill ORCHESTRATES existing skills — it never reimplements review, gating, or
-  epic decomposition. Use when you want one instruction to finish something.
+  Take ONE thing from wherever it is all the way to merged. Accepts a work DID,
+  Change Set @ sha, a GitHub issue/PR number or URL (projection alias), several
+  of them, or nothing at all (the thing being discussed right now, or stated in
+  the invocation). Resolves via /work first, proves it is a single coherent
+  piece of work, then routes: an epic goes to epic-conductor; a Change Set/PR
+  skips to review + gate + merge; a plain work item gets an isolated
+  implementer, an independent clean-context reviewer, the repo's verification
+  gate, and a merge. Files the work first when none exists. This skill
+  ORCHESTRATES existing skills — it never reimplements review, gating, or epic
+  decomposition. Use when you want one instruction to finish something.
 allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 ---
 
@@ -18,12 +19,14 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 ## Usage
 
 ```
-/agentloop:land <issue#>                  # 单个 issue
-/agentloop:land <PR#>                     # 已有 PR：跳过实现，直接 review + gate + merge
-/agentloop:land <url>                     # issue 或 PR 的完整链接
+/agentloop:land <work DID | w_<32hex>>    # /work 上的工作项
+/agentloop:land <40-char sha>             # Change Set @ head
+/agentloop:land <issue#>                  # GitHub 编号：先 /work，miss 才当投影 alias
+/agentloop:land <PR#>                     # 已有投影 PR：跳过实现，直接 review + gate + merge
+/agentloop:land <url>                     # sourceUrl 反查 /work；miss 才当投影 URL
 /agentloop:land <n1> <n2> <n3>            # 多个（每件一个隔离 subagent）
 /agentloop:land                           # 当下正在讨论的这件事（要过一致性闸）
-/agentloop:land <一句话描述>               # 还没开 issue 的事（要过一致性闸）
+/agentloop:land <一句话描述>               # 还没开 work 的事（要过一致性闸）
 ```
 
 **可选参数**
@@ -62,16 +65,28 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 
 ## Step 0 — 解析目标
 
-四种入口，按显式程度排序：
+**身份顺序（可执行，禁止跳过 `/work` 直接 `gh issue view`）：**
+
+1. **work DID / CS@sha** — 参数是 `did:…`、`w_<32hex>`、或 40-char git sha 时，先查 `/work`：
+   ```bash
+   arc --json afs exec /.actions/query --args '{"path":"/work","where":{"field":"meta.objectId","eq":"<DID>"},"limit":8}'
+   # Change Set @ sha:
+   arc --json afs exec /.actions/query --args '{"path":"/work","where":{"all":[{"field":"meta.workType","eq":"change-set"},{"field":"meta.head","eq":"<40-char-sha>"}]},"limit":8}'
+   ```
+2. **`/work` 命中** → 这就是目标。记录上的 `sourceUrl` 若存在，那是 GitHub 投影（issue/PR URL），不是调度身份。
+3. **`/work` 未命中** → 再把参数当 GitHub 编号/URL 做 **alias lookup**（`gh issue view` / `gh pr view`），并在输出里写明这是 alias，不是调度身份。禁止把 GitHub-only 成功当成 `/work` 已查。
+4. **无引用** → Step 1 一致性闸。
 
 | 形态 | 例 | 解析方式 |
 |---|---|---|
-| 显式编号 | `land 5649` | `gh issue view` 与 `gh pr view` 都试，判定是 issue 还是 PR |
-| 显式 URL | `land https://github.com/<org>/<repo>/pull/5643` | 直接取 |
-| 多个 | `land 5649 5651 5652` | 逐个解析，进批量模式（见下） |
+| work DID | `land did:example:…` / `land w_ab…` | `/work` query `meta.objectId` / path stem；**不得先** `gh issue view` |
+| CS@sha | `land` + 40 hex | `/work` query `meta.head` + `meta.workType=change-set` |
+| 显式编号 | `land 5649` | **先** `/work`（inbound ref / `sourceUrl` 反查）；miss 才 `gh issue view` 与 `gh pr view` |
+| 显式 URL | `land https://github.com/<org>/<repo>/pull/5643` | 当 `sourceUrl` 反查 `/work`；miss 才当投影 URL |
+| 多个 | `land 5649 5651 5652` | 逐个按上面解析，进批量模式（见下） |
 | **无引用** | 裸 `land`，或 `land <一句话描述>` | **必须先过 Step 1 的一致性闸** |
 
-一个编号同时命中 issue 和 PR 时（GitHub 编号空间共享），**报出两者让人选**，不要猜。
+一个编号同时命中 work 与 GitHub issue/PR 时，**以 `/work` 为准**，GitHub 是投影。`/work` miss 且 issue 与 PR 都命中时，**报出两者让人选**，不要猜。
 
 ---
 
@@ -268,7 +283,16 @@ gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --b
 
 ## Step 5 — Gate 与 merge（按仓库规矩）
 
-1. `<pre_merge_entry> --comment <PR#>`，然后 `<merge_gate_entry> <PR#>`。
+1. `<pre_merge_entry> --comment <PR#>`，然后 merge-gate **带着 CS `head`**：
+
+   ```bash
+   # --cs-head is the 40-char PR/CS head, must be current HEAD. PR# is the projection handle.
+   <merge_gate_entry> --cs-head <40-char-sha> <PR#>
+   # CS 有 sourceUrl 时才加 --source-url（headRefOid 交叉校验）。
+   ```
+
+   CS `head` 已知却丢掉 `--cs-head`、改跑 `<merge_gate_entry> <PR#>` = 把 GitHub 当调度身份，禁止。
+   `--data-file` 模式仍然必须带显式 PR#。
 
    > ⚠️ **PR 号必须写成 `--comment <PR#>`。** 裸位置参数（`<pre_merge_entry> <PR#>`）会被
    > **静默忽略**——`lib/comment.ts` 的 `parseCommentArgs` 只认 `--comment` / `--dry-run` 系列，

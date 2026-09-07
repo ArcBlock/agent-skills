@@ -375,7 +375,8 @@ gh api "repos/{owner}/{repo}/issues?state=open&labels=ui-verify:pending&filter=a
   result=PASS 或 result=NA:
   ```bash
   <pre_merge_entry> --comment <pr#>
-  <merge_gate_entry> <pr#>
+  # --cs-head is the 40-char PR/CS head, must be current HEAD.
+  <merge_gate_entry> --cs-head <40-char-sha> <pr#>
   ```
   两者都 exit 0 → 可合;任一 exit 1 → 打印原因并止步:没有 comment / SHA 过期(push 后未重验)/
   result=FAIL / resolved base 已推进。简单错误自己修后从 `<pre_merge_entry>` 重走;复杂错误把失败
@@ -498,7 +499,7 @@ bash "$AGENTLOOP_ROOT/scripts/merge-verified-pr.sh" <n> --method squash
 |---|---|
 | 格式/空格/lint 噪音(profile `formatter` 报的) | 在 **PR 分支**上 `<formatter>`/ 删空格 → commit → `git push`(ff / 新提交;push 到对方分支需有权限;无权限才升级)。rebase/amend 后用 `bun scripts/git-push-lease.ts`，禁止裸 `git push --force-with-lease`（#5212） |
 | base 落后 / `BLOCKED-behind` | `gh pr update-branch <n> --rebase`,然后重跑 `pre-merge` |
-| verification 过期(push 后未重验) | 重跑 `<pre_merge_entry> --comment <n>` → `<merge_gate_entry> <n>` 过闸 |
+| verification 过期(push 后未重验) | 重跑 `<pre_merge_entry> --comment <n>` → `<merge_gate_entry> --cs-head <40-char-sha> <n>` 过闸 |
 | review **已明确指出**的一处小确定性改动(补一行、改个 id、删冗余) | 直接在 PR 分支补上 |
 
 **做完这些机械修复后,PR 通常就过闸了 → 直接合。** 只有当机械修复后仍剩**真实判断/逻辑/设计/安全**问题时,才升级给人。判据:**"我现在能不能用 gh/git/编辑器把它推到可合?" 能 → 做;不能(要改逻辑、要拍设计、要人授权) → 才 `pr-sweep:awaiting-*`(按四档就低不就高)+ comment。**(verdict 已判定可机械推进却仍甩给人)
@@ -534,7 +535,10 @@ arc `gate_mode=scripts`:PR 上无 CI,`pre-merge` 脚本是唯一门控(`ci`/`bot
 - **不要**让每个 PR 手动绕 / 一直挂红。
 - **诊断根因**(`check-*.ts` 的判定逻辑 / 某个 flaky 测试 / 缺原生依赖 build),开一个独立
   **verification-fix PR**(走本 sweep 的低风险闸),把"门控该不该这么严/这么脆"当可独立修的工程问题。
-- 例:某测试因 WASM 重编译 flaky → 修测试或调超时;`format` 噪音 → 已是 warn-only(`check-format.ts`)。
+- 例:某测试因 WASM 重编译 flaky → 修测试或调超时。**`format` 不再是噪音类**——arc#5805 把
+  `check-format.ts` 翻成 blocking(它曾是闸上唯一的非阻断检查,main 因此带着未格式化文件
+  合了两天)。红了就照**该红行自己打印的 remedy** 修(次选 repo-profile 的 `<formatter>`);
+  一条命令的事,但**不作为「可忽略」处理**,也不要在本 skill 里硬编码某个包管理器的命令。
 - 改门控判定语义(哪个检查算 blocking)= 安全闸 → 属 🔴/需人确认那一类,**开 PR + 升级**,不自己合。
   升级 comment 带「需人确认块」:要人确认的那条门控改动 + 怎么验(前后 `pre-merge` 输出对比)+ 推荐。
 

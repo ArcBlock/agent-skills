@@ -201,8 +201,8 @@ export interface DeploymentConfig {
   env?: Record<string, string>;
   /**
    * Per-skill env, keyed by skill local name (`issue-sweep`). Optional extras only —
-   * daemon isolation is a named instance (`arc service start fleet-issue-sweep` /
-   * `fleet-pr-sweep`), not ports in this map. `{{CHECKOUT}}` expands to that run's
+   * daemon isolation is a named instance (`arc service start --instance fleet-issue-sweep` /
+   * `arc service start --instance fleet-pr-sweep`), not ports in this map. `{{CHECKOUT}}` expands to that run's
    * checkout path.
    */
   skillEnv?: Record<string, Record<string, string>>;
