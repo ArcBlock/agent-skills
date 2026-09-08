@@ -17,6 +17,7 @@
  * 一律 `BLOCKED`。`requireStickyGate` 只接受 {PASS, NA}，所以第五道门零新逻辑。
  */
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24,6 +25,8 @@ import { postOnce } from "../lib/comment.ts";
 import {
   assertReviewerEngine,
   convergence,
+  dispositionParseDiag,
+  formatDispositionParseDiag,
   LOCAL_REVIEW_PREFIX,
   nextRound,
   parseCodexReview,
@@ -33,6 +36,7 @@ import {
   REPORT_CONTRACT,
   ROUND_CAP,
   renderReviewComment,
+  reportContractWithNonce,
   resolveSubjectEngine,
   reviewerArgv,
   reviewResultForRound,
@@ -47,7 +51,8 @@ function reviewPrompt(
   base: string,
   round: number,
   prior: readonly StateFinding[],
-  title?: string,
+  title: string | undefined,
+  nonce: string,
 ): string {
   return [
     `你是这个仓库的独立 code reviewer。审查 \`${base}...HEAD\` 的改动${title ? `（${title}）` : ""}。`,
@@ -56,7 +61,7 @@ function reviewPrompt(
     "",
     roundPrompt(round, prior),
     "",
-    REPORT_CONTRACT,
+    reportContractWithNonce(nonce),
   ].join("\n");
 }
 
@@ -253,10 +258,13 @@ if (!engine) {
 // `-o` 把 review 正文单独写出来。不这么做就得从 stdout 里捞，而 stdout 混着
 // reviewer 的事件流——实测那会被当成 finding 正文吞进去，评论超过 GitHub 的
 // 65536 上限，交付直接 422。
+// arc#6123:每轮一个一次性 nonce。引擎原样复制它 = 这份输出没被截断,于是「完整且
+// 零条」与「没跑完」不再同色。**每轮重新生成**——复用会让上一轮的复述冒充这一轮。
+const nonce = `arc-review-nonce-${randomBytes(8).toString("hex")}`;
 const outFile = join(mkdtempSync(join(tmpdir(), "local-review-")), "review.md");
 const spec = assertReviewerEngine(engine);
 const cmd = reviewerArgv(engine, {
-  prompt: reviewPrompt(base, round, prior, pr ? `PR #${pr}` : undefined),
+  prompt: reviewPrompt(base, round, prior, pr ? `PR #${pr}` : undefined, nonce),
   base,
   outFile,
   ...(pr ? { title: `PR #${pr}` } : {}),
@@ -311,14 +319,18 @@ if (procFailed) {
     `⚠ reviewer 进程未正常结束（status=${proc.status} signal=${proc.signal} ${proc.error?.message ?? ""}）—— 判决降为 BLOCKED`,
   );
 }
-const parsed = parseCodexReview(stdout, repoRoot ? { repoRoot } : {});
+const parsed = parseCodexReview(stdout, repoRoot ? { repoRoot, nonce } : { nonce });
 const findings = parsed.ok ? parsed.findings : [];
 const unparseable = !parsed.ok || procFailed;
 // 第 N 轮的判决必须由**收敛**证明，不是「这轮没报东西」。
-const conv =
-  round > 1 && prior.length
-    ? convergence(prior, parsePriorDispositions(stdout), findings)
-    : undefined;
+const dispositions = parsePriorDispositions(stdout);
+const conv = round > 1 && prior.length ? convergence(prior, dispositions, findings) : undefined;
+const parseDiag = prior.length
+  ? dispositionParseDiag(
+      prior.map((f) => f.id),
+      dispositions,
+    )
+  : undefined;
 if (dirty) console.error(`⚠ 工作树不干净（${dirty.split("\n").length} 个文件）—— 判决降为 BLOCKED`);
 const body = renderReviewComment({
   reviewerEngine: engine,
@@ -329,6 +341,7 @@ const body = renderReviewComment({
   round,
   ...(conv ? { convergence: conv } : {}),
   ...(prior.length ? { prior } : {}),
+  ...(parseDiag ? { parseDiag } : {}),
   unparseable: unparseable || dirty.length > 0,
 });
 const { result: verdict, escalate } = reviewResultForRound({
@@ -344,14 +357,20 @@ if (conv && !conv.converged) {
     `⚠ 第 ${round} 轮未收敛 —— 漏判 ${conv.unadjudicated.length} · 仍开 ${conv.open.length} · 回归 ${conv.regressed.length} · 新 P1 ${conv.newP1.length}（deferred ${conv.deferred.length}）`,
   );
   if (conv.unadjudicated.length > 0) {
-    // 「漏判」有两种可能：reviewer 没写那一节，或者写了但格式不合。**它们修法相反**，
-    // 而这行数字对两者一模一样。所以把原始输出的路径指出来 —— 留了证据没人知道在哪，
-    // 等于没留。
-    console.error(
-      `   ↳ reviewer 原始输出：${rawPath}\n` +
-        `     漏判 = 报告里没有可解析的 \`Prior findings:\` 判定行。先看那个文件是**没写**\n` +
-        `     还是**写了但格式不合**（契约：\`- [fixed|open|regressed] <id> <理由>\`）。`,
-    );
+    // 「漏判」有两种颜色：parsed 空 = reviewer 没写；parsed 非空但对不上 = 解析没吃对。
+    // 只报「漏判 N」时两者同色（#6064）。
+    console.error(`   ↳ reviewer 原始输出：${rawPath}`);
+    if (parseDiag) {
+      console.error(
+        formatDispositionParseDiag(parseDiag)
+          .split("\n")
+          .map((l) => `   ${l}`)
+          .join("\n"),
+      );
+      if (parseDiag.parsed.length === 0) {
+        console.error("   ↳ 判定行格式：- [fixed|open|regressed] <id> <理由>");
+      }
+    }
   }
 }
 if (escalate) {

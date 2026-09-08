@@ -10,6 +10,8 @@ import {
   convergence,
   crossEngineVerdict,
   type Disposition,
+  dispositionParseDiag,
+  formatDispositionParseDiag,
   LOCAL_REVIEW_PREFIX,
   localReviewRerunHint,
   nextRound,
@@ -191,6 +193,319 @@ describe("parseCodexReview —— 拿真实产物解析，不是照着格式编�
     //   零条必须要有明确的哨兵，不能靠「没看见别的东西」推出来。
     expect(parseCodexReview("Summary\n\nFull review comments:\n").ok).toBe(false);
     expect(parseCodexReview("Summary\n\nFull review comments:").ok).toBe(false);
+  });
+
+  /**
+   * arc#6153 —— 真实产物,不是照着格式编的。
+   *
+   * `grok-build` 审 PR #6002 时输出了一条**完全符合契约**的 finding,只是把
+   * `path:line` 包进了反引号——markdown 里最自然的写法,而这份契约本身就印在
+   * markdown 上下文里。`FINDING_RE` 结尾是 `(\d+(?:-\d+)?)\s*$`,行尾多出的那个
+   * 反引号让整条匹配不上;小节里没有别的可认的东西,`unclaimed` 也归零,于是判
+   * unparseable。
+   *
+   * 后果不是「少认一条」,是**「reviewer 报了问题」被渲染成「reviewer 输出读不懂」**——
+   * 两者在 `result=BLOCKED` 上同色,而我按那个 marker 读成了前者。那条 P3 说得对
+   * (同一文件里 restart 用例仍有本 PR 刚修掉的时序问题),差点随工具缺陷一起消失。
+   */
+  test("★ arc#6153: 反引号包裹的 path:line 仍是一条 finding,不是「读不懂」", () => {
+    const real = [
+      "先把这次 diff 和被改文件的上下文看清楚。这次改动的生产逻辑是对的。",
+      "",
+      "Full review comments:",
+      "",
+      "- [P3] restart e2e 仍在端口断言之后才登记新 pid — `runtimes/node/test/daemon/dual-instance-catalog.e2e.test.ts:415-418`",
+      "  restart 一旦杀了旧进程、又在别的端口拉起新进程,端口断言会扔,新 pid 从未登记。",
+    ].join("\n");
+    const r = parseCodexReview(real);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(1);
+    const found = r.findings[0];
+    expect(found).toBeDefined();
+    if (!found) return;
+    expect(found).toMatchObject({
+      severity: "P3",
+      // 反引号必须被剥掉——留着它,贴到 PR 上的链接点不开。
+      file: "runtimes/node/test/daemon/dual-instance-catalog.e2e.test.ts",
+      line: "415-418",
+    });
+    expect(found.title).not.toContain("`");
+  });
+
+  /**
+   * 同一天的**第二个**真实变体(arc#6153):epic #6042 的 conductor 在 PR #6140 上
+   * 第 12 轮 review 里,reviewer 在 `path:line` 之后加了一个圆括号注记,同样被整条
+   * 吞成 unparseable —— 那一轮报的是一条 P1(bun 的 unowned stdout wait 没有超时,
+   * 会挂死),而它差点因为一个括号消失。
+   *
+   * 所以容忍的不是「反引号」这一个字符,是**位置之后的注记**。注记不丢:折进正文,
+   * 因为这个文件自己的规矩是「超出要**说出来**,不能悄悄截」。
+   */
+  test("★ arc#6153: path:line 之后的注记不改变「这是一条 finding」,且注记不被丢弃", () => {
+    const withNote = [
+      "S",
+      "",
+      "Full review comments:",
+      "",
+      "- [P1] bun 的 unowned stdout wait 没有超时 — runtimes/node/src/cli-bin.ts:88 (round 12)",
+      "  handler dump 打进停住的 reader 会永远到不了 process.exit。",
+    ].join("\n");
+    const r = parseCodexReview(withNote);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(1);
+    const f = r.findings[0];
+    expect(f).toBeDefined();
+    if (!f) return;
+    expect(f.severity).toBe("P1");
+    expect(f.file).toBe("runtimes/node/src/cli-bin.ts");
+    expect(f.line).toBe("88");
+    // 注记不许悄悄消失。
+    expect(f.body).toContain("round 12");
+    expect(f.body).toContain("永远到不了");
+  });
+
+  test("★ arc#6153: 标题里含破折号时,位置取最后一个 — 之后的那段", () => {
+    const emdashInTitle = [
+      "S",
+      "",
+      "Full review comments:",
+      "",
+      "- [P2] A — B 两条路径不一致 — packages/core/src/afs.ts:12",
+    ].join("\n");
+    const r = parseCodexReview(emdashInTitle);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const f = r.findings[0];
+    expect(f).toBeDefined();
+    if (!f) return;
+    expect(f.file).toBe("packages/core/src/afs.ts");
+    expect(f.line).toBe("12");
+    expect(f.title).toBe("A — B 两条路径不一致");
+  });
+
+  /**
+   * arc#6123 —— **review 闸的 accept path 从来没有成立过。**
+   *
+   * codex 在没发现问题时**整节不写**,只回一段散文结论;而 `(none)` 哨兵是解析器
+   * 认「干净」的唯一形状。于是:有 finding → 可解析 → `FAIL`;没有 finding →
+   * unparseable → `BLOCKED`。**一道只会说 FAIL/BLOCKED、永远说不出 PASS 的闸,
+   * 与一道全拒的闸完全同色** —— 这正是本仓 accept-path 铁律说的那件事,只是这次
+   * 落在 review 工具自己身上。
+   *
+   * 修法不是「相信空白」(空白与被截断无法区分,那是原设计刻意拒绝的),而是让引擎
+   * 原样复制一个**一次性 nonce**:nonce 在 = 这份输出完整。于是
+   * 「完整且零条」与「被截断」不再同色,而不必依赖引擎记得写 `(none)`。
+   *
+   * 加法,不改既有语义:不传 nonce 时行为逐字节不变。
+   */
+  /**
+   * ★ 设计更正(codex 第 3 轮的 P1,它是对的):**「输出完整 + 没有可识别的 finding」
+   * 不能等于「干净」**——"我没审成"同样是完整且零 finding。实测两种都会被放行:
+   * 编号列表 `1. [P1] …`(不匹配 `- [Pn]` 扫描)、以及「无法读取仓库,未完成审查」。
+   *
+   * 所以 #6123 的前提(不靠哨兵也能认干净)不成立。nonce 能证明**输出结束**,
+   * 永远证明不了**没有问题**。两个方向都要正面证据:
+   *   干净 ⟸ 显式 `(none)` 哨兵;完整 ⟸ nonce。缺任一 ⟹ unparseable。
+   */
+  test("★ arc#6123 REJECT: 完整但没有正面的「干净」证据,一律 unparseable", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    // 散文结论 + nonce:输出完整,但没说「没问题」——不许当干净。
+    expect(
+      parseCodexReview(["已审查全部改动,未发现缺陷。", "", NONCE].join("\n"), { nonce: NONCE }).ok,
+    ).toBe(false);
+    // 更要命的一种:根本没审成,也会是「完整 + 零 finding」。
+    expect(
+      parseCodexReview(["无法读取仓库,未完成审查。", "", NONCE].join("\n"), { nonce: NONCE }).ok,
+    ).toBe(false);
+    // 编号列表的 finding:认不出就拒绝,不许静默成零条。
+    expect(
+      parseCodexReview(["有问题。", "", "1. [P1] 错误放行 — a.ts:7", "", NONCE].join("\n"), {
+        nonce: NONCE,
+      }).ok,
+    ).toBe(false);
+  });
+
+  test("★ arc#6123: 哨兵不得为「认不出的问题行」背书", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    // codex 第 4 轮指出的残余洞:同时存在 `(none)` 和一条认不出的问题行时,
+    // 只扫 `- [Pn]` 的 orphan 检测扫不到编号列表,于是走哨兵分支判干净 ——
+    // **哨兵替一条它没看见的 finding 背了书。**
+    const sentinelPlusUnrecognised = [
+      "审查结论如下。",
+      "",
+      "(none)",
+      "",
+      "1. [P1] 错误放行 — a.ts:7",
+      "",
+      NONCE,
+    ].join("\n");
+    expect(parseCodexReview(sentinelPlusUnrecognised, { nonce: NONCE }).ok).toBe(false);
+    // 同理:带小节头时,认不出的问题行也不许被哨兵盖过去。
+    const inSection = [
+      "S",
+      "",
+      "Full review comments:",
+      "",
+      "(none)",
+      "1. [P2] 也是个问题 — b.ts:9",
+      "",
+      NONCE,
+    ].join("\n");
+    expect(parseCodexReview(inSection, { nonce: NONCE }).ok).toBe(false);
+  });
+
+  test("★ arc#6123 ACCEPT: 显式 (none) + nonce = 干净(哨兵可以不带小节头)", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    const withSentinel = ["审完了,没问题。", "", "(none)", "", NONCE].join("\n");
+    const r = parseCodexReview(withSentinel, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(0);
+  });
+
+  test("★ arc#6123 P2: nonce 必须是最后一个非空行,正文里提到它不算结束证明", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    // 实测逃逸:只说「本轮的结束标记是 <nonce>,开始审查。」就被 `includes` 判为完整。
+    const mentioned = `本轮的结束标记是 ${NONCE},开始审查。`;
+    expect(parseCodexReview(mentioned, { nonce: NONCE }).ok).toBe(false);
+
+    // ★ 上面那条**分辨不出** `includes` 与「独占末行」——两种实现下它都因为缺哨兵
+    //   而 unparseable。一条看不见自己要保护的东西的正控等于没有(自己做变异时实测:
+    //   把判据换回 `includes`,整套仍 139 pass)。下面这条才是那个判别量:
+    //   正文里提到 nonce **且**写了哨兵,但输出在之后被截断 —— `includes` 会判干净。
+    const mentionedThenTruncated = [
+      `本轮的结束标记是 ${NONCE},现在开始审查。`,
+      "",
+      "(none)",
+      "",
+      "接下来我还要检查第二个文件……",
+    ].join("\n");
+    expect(parseCodexReview(mentionedThenTruncated, { nonce: NONCE }).ok).toBe(false);
+  });
+
+  test("★ arc#6123 P2: 无小节头救回的 finding 必须带上正文", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    const noHeaderWithBody = [
+      "有问题。",
+      "",
+      "- [P1] 错误放行 — packages/core/src/afs.ts:7",
+      "  只有在 X 且 Y 时才会触发,修法是 Z。",
+      "",
+      NONCE,
+    ].join("\n");
+    const r = parseCodexReview(noHeaderWithBody, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(1);
+    // 正文被静默丢掉的话,交付到 PR 上只剩标题,触发条件和修法都没了。
+    expect(r.findings[0]?.body).toContain("修法是 Z");
+  });
+
+  test("★ arc#6123 ACCEPT: nonce 在 + 有小节有 finding,照常解析", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    const withFinding = [
+      "有一个问题。",
+      "",
+      "Full review comments:",
+      "",
+      "- [P2] 某处会错 — packages/core/src/afs.ts:7",
+      "  说明。",
+      "",
+      NONCE,
+    ].join("\n");
+    const r = parseCodexReview(withFinding, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(1);
+    expect(r.findings[0]?.file).toBe("packages/core/src/afs.ts");
+  });
+
+  test("★ arc#6123 REJECT: nonce 不在 = 截断/没跑完,一律 unparseable", () => {
+    const NONCE = "arc-review-nonce-0f1e2d3c";
+    // 这条是上面两条的正控。少了它,一个「有 nonce 参数就当干净」的实现会让 accept
+    // 臂全绿,而把**被截断的输出**也读成「审完了、干净」—— 干净是那个会放行合并的答案。
+    expect(parseCodexReview("已审查……未发现问题。", { nonce: NONCE }).ok).toBe(false);
+    // 小节头之后被截断,nonce 也没打出来 —— 仍然是没跑完。
+    expect(parseCodexReview("S\n\nFull review comments:\n", { nonce: NONCE }).ok).toBe(false);
+    // nonce 参数存在但输出里带的是**别的** nonce(上一轮的复述)也不算。
+    expect(parseCodexReview(`审完了。\n\narc-review-nonce-DIFFERENT`, { nonce: NONCE }).ok).toBe(
+      false,
+    );
+  });
+
+  /**
+   * codex 审这次修复时报的两条 P1(#6123 round 4),都对,都在这里钉住。
+   *
+   * (a) **严格照契约输出的干净报告反而被 BLOCKED**:`(none)` 之后的 nonce 行会进入
+   *     小节解析循环、被计成 `unclaimed`。而脚本每轮都传 nonce ⟹ 新契约一落地,
+   *     所有合法的零问题报告全被判 BLOCKED —— 我把要修的洞换个位置又挖了一遍。
+   *
+   * (b) **明确报出的 P1 被转成 PASS**:漏写小节标题但写了 finding 行 + 正确 nonce 时,
+   *     「完整 ⟹ 零条」那条分支直接返回空 findings。**nonce 只能证明输出结束,
+   *     不能证明没有问题** —— 这是 accept-path 铁律在反方向上的违规,比原 bug 更糟。
+   */
+  test("★ arc#6123 (a): 契约输出 = 小节 + (none) + 末尾 nonce,必须判干净", () => {
+    const NONCE = "arc-review-nonce-aabbccdd";
+    const strict = ["审完了,没问题。", "", "Full review comments:", "", "(none)", "", NONCE].join(
+      "\n",
+    );
+    const r = parseCodexReview(strict, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(0);
+  });
+
+  test("★ arc#6123 (b): 漏写小节标题但报了 finding + nonce,不许当成零条", () => {
+    const NONCE = "arc-review-nonce-aabbccdd";
+    const noHeader = [
+      "有问题。",
+      "",
+      "- [P1] 错误放行 — packages/core/src/afs.ts:7",
+      "  说明。",
+      "",
+      NONCE,
+    ].join("\n");
+    const r = parseCodexReview(noHeader, { nonce: NONCE });
+    // 要么把它解析成 1 条,要么拒绝;**唯独不能是「ok + 0 条」**——那会放行合并。
+    if (r.ok) {
+      expect(r.findings.length).toBe(1);
+      expect(r.findings[0]?.file).toBe("packages/core/src/afs.ts");
+    }
+  });
+
+  test("★ arc#6123 (b) 的正控:带显式哨兵的真·零条仍判干净", () => {
+    const NONCE = "arc-review-nonce-aabbccdd";
+    const prose = ["已审查全部改动,未发现缺陷。", "", "(none)", "", NONCE].join("\n");
+    const r = parseCodexReview(prose, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(0);
+  });
+
+  test("★ arc#6123: 不传 nonce 时,既有语义逐字节不变", () => {
+    // 向后兼容的正控:这条挂了说明修复改动了既有调用方的行为。
+    expect(parseCodexReview("已审查……未发现问题。").ok).toBe(false);
+    const clean = parseCodexReview("Looks good.\n\nFull review comments:\n\n(none)");
+    expect(clean.ok).toBe(true);
+    if (clean.ok) expect(clean.findings.length).toBe(0);
+  });
+
+  test("★ arc#6153 的 reject 臂:放宽不得放到「什么都算一条」", () => {
+    // 这条是上一条的正控。一个「只要 `- [Pn]` 开头就算一条」的宽松正则会让上面
+    // 那条绿,而把真正认不出的形状也吞成 0 条 finding + ok —— 那正是本文件开头
+    // 那条「零条与没看懂必须不同色」要防的东西,只是换到了行级。
+    const noLocation = [
+      "S",
+      "",
+      "Full review comments:",
+      "",
+      "- [P2] 说了个问题但没给 path:line",
+    ].join("\n");
+    expect(parseCodexReview(noLocation).ok).toBe(false);
+    const notAFinding = ["S", "", "Full review comments:", "", "- 随便一句话"].join("\n");
+    expect(parseCodexReview(notAFinding).ok).toBe(false);
   });
 });
 
@@ -737,6 +1052,182 @@ describe("★ 轮次与收敛 —— 不限轮次的 reviewer 会漂移，不会
     const d = parsePriorDispositions(report);
     expect(d.get("a1")).toBe("fixed");
     expect(d.get("a2")).toBe("open");
+  });
+
+  test("★ 判定 id 锚定字符集，不吞 CJK / 冒号（#6064）", () => {
+    // `(\S+)` 吃到第一个 ASCII 空白为止。CJK 没有 ASCII 空格；英文 `id: reason`
+    // 的冒号粘在 id 上。两种自然写法都会把整段吞成 id，然后 scored 为漏判。
+    const wrap = (line: string) =>
+      ["总结", "", "Prior findings:", line, "", "Full review comments:", "", "(none)"].join("\n");
+    const rows: ReadonlyArray<[string, string, Disposition]> = [
+      ["- [fixed] f57ehu1：理由如此如此，已修", "f57ehu1", "fixed"],
+      ["- [fixed] f57ehu1: reason here", "f57ehu1", "fixed"],
+      ["- [open] abc1234，还没修", "abc1234", "open"],
+      ["- [fixed] f57ehu1 ：理由", "f57ehu1", "fixed"],
+      ["- [fixed] a1 修好了", "a1", "fixed"],
+      ["- [fixed] `f57ehu1` 已修", "f57ehu1", "fixed"],
+      ["- [fixed] **f57ehu1** 已修", "f57ehu1", "fixed"],
+      ["* [fixed] f57ehu1 已修", "f57ehu1", "fixed"],
+      // wrapping `_id_` — charset must not include `_` or the capture eats the closer.
+      ["- [fixed] _f57ehu1_ 已修", "f57ehu1", "fixed"],
+    ];
+    for (const [line, id, status] of rows) {
+      const d = parsePriorDispositions(wrap(line));
+      expect([...d.keys()]).toEqual([id]);
+      expect(d.get(id)).toBe(status);
+    }
+    // compact-findings 形状（fvo0yfm / f1ituu17 / a1）不得被字符集闸掉。
+    const compact = parsePriorDispositions(
+      wrap("- [fixed] fvo0yfm ok\n- [open] f1ituu17 still\n- [regressed] a1 back"),
+    );
+    expect([...compact.keys()]).toEqual(["fvo0yfm", "f1ituu17", "a1"]);
+  });
+
+  test("★ 漏判诊断：解析出的 id 与期望 id 必须同时可见（#6064）", () => {
+    // 「reviewer 没写」与「写了但解析没对上」在只报「漏判 N」时同色。
+    const swallowed = new Map<string, Disposition>([["f57ehu1：理由如此如此，已修", "fixed"]]);
+    const parseFail = dispositionParseDiag(["f57ehu1"], swallowed);
+    expect(parseFail).toEqual({
+      expected: ["f57ehu1"],
+      parsed: ["f57ehu1：理由如此如此，已修"],
+      unmatched: ["f57ehu1"],
+    });
+    const parseFailMsg = formatDispositionParseDiag(parseFail);
+    expect(parseFailMsg).toContain("f57ehu1");
+    expect(parseFailMsg).toContain("f57ehu1：理由如此如此，已修");
+    expect(parseFailMsg).toMatch(/解析出的判定 id/);
+    // 5 leading spaces = GitHub code fence. Formatter must not indent; stderr adds its own.
+    for (const line of parseFailMsg.split("\n")) {
+      expect(line.startsWith("     ")).toBe(false);
+    }
+
+    const silent = dispositionParseDiag(["f57ehu1"], new Map());
+    expect(silent).toEqual({
+      expected: ["f57ehu1"],
+      parsed: [],
+      unmatched: ["f57ehu1"],
+    });
+    const silentMsg = formatDispositionParseDiag(silent);
+    expect(silentMsg).toContain("f57ehu1");
+    expect(silentMsg).toMatch(/\(none\)/);
+    // 两种颜色不得逐字相同 —— 否则打印机可以静静丢掉 parsed。
+    expect(silentMsg).not.toBe(parseFailMsg);
+
+    // ACCEPT：对上了就没有 unmatched，否则「永远漏判」满足上两条。
+    const ok = dispositionParseDiag(["f57ehu1"], new Map([["f57ehu1", "fixed"]]));
+    expect(ok.parsed).toEqual(["f57ehu1"]);
+    expect(ok.unmatched).toEqual([]);
+    const okMsg = formatDispositionParseDiag(ok);
+    expect(okMsg).toContain("f57ehu1");
+    expect(okMsg).toMatch(/对不上：\(none\)/);
+  });
+
+  test("★ CJK 冒号行解析后不得再漏判（#6064 实盘）", () => {
+    const report = [
+      "总结",
+      "",
+      "Prior findings:",
+      "- [fixed] f57ehu1：理由如此如此，已修",
+      "",
+      "Full review comments:",
+      "",
+      "(none)",
+    ].join("\n");
+    const dispositions = parsePriorDispositions(report);
+    const diag = dispositionParseDiag(["f57ehu1"], dispositions);
+    expect(diag.parsed).toEqual(["f57ehu1"]);
+    expect(diag.unmatched).toEqual([]);
+    const priorFinding: StateFinding = {
+      id: "f57ehu1",
+      severity: "P1",
+      title: "t",
+      file: "x.ts",
+      line: "1",
+    };
+    expect(convergence([priorFinding], dispositions, []).unadjudicated).toEqual([]);
+  });
+
+  test("★ 漏判 sticky 必须带 parsed vs expected（#6064）", () => {
+    // stderr 有诊断、PR sticky 没有 → 「reviewer 没写」与「写了但解析没对上」在评论上同色。
+    const parseDiag = {
+      expected: ["f57ehu1"],
+      parsed: ["f57ehu1：已修"],
+      unmatched: ["f57ehu1"],
+    };
+    const body = renderReviewComment({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      sha: "a".repeat(40),
+      base: "origin/main",
+      findings: [],
+      round: 2,
+      convergence: {
+        converged: false,
+        unadjudicated: ["f57ehu1"],
+        open: [],
+        regressed: [],
+        newP1: [],
+        deferred: [],
+      },
+      parseDiag,
+    });
+    expect(body).toContain("f57ehu1");
+    expect(body).toContain("f57ehu1：已修");
+    expect(body).toMatch(/期望上一轮 id/);
+    expect(body).toMatch(/解析出的判定 id/);
+    for (const line of body.split("\n")) {
+      if (line.includes("期望上一轮 id") || line.includes("解析出的判定 id")) {
+        expect(line.startsWith("     ")).toBe(false);
+      }
+    }
+  });
+
+  test("★ 漏判但无 parseDiag 时不得捏造 parsed:[]（#6064）", () => {
+    // 缺 parseDiag 时用 new Map() 会打印「解析出的判定 id：(none)」——那是「观察到空解析」，
+    // 不是「没诊断」。未提供与空解析必须不同色。
+    const body = renderReviewComment({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      sha: "a".repeat(40),
+      base: "origin/main",
+      findings: [],
+      round: 2,
+      convergence: {
+        converged: false,
+        unadjudicated: ["f57ehu1"],
+        open: [],
+        regressed: [],
+        newP1: [],
+        deferred: [],
+      },
+    });
+    expect(body).not.toContain("解析出的判定 id：(none)");
+    expect(body).toMatch(/判定诊断不可用/);
+  });
+
+  test("★ ACCEPT：无漏判时 sticky 不强制带 parse diag（否则永远带上满足上一条）", () => {
+    const body = renderReviewComment({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      sha: "a".repeat(40),
+      base: "origin/main",
+      findings: [],
+      round: 2,
+      convergence: {
+        converged: true,
+        unadjudicated: [],
+        open: [],
+        regressed: [],
+        newP1: [],
+        deferred: [],
+      },
+      parseDiag: {
+        expected: ["f57ehu1"],
+        parsed: ["ghost-parsed"],
+        unmatched: [],
+      },
+    });
+    expect(body).not.toContain("ghost-parsed");
   });
 });
 

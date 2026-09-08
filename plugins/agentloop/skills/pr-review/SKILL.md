@@ -147,7 +147,70 @@ gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment-id>/replies \
 - 任一 P1/High **OPEN** → 不得 `MERGE`。安全/正确性 → `BLOCK`;已有明确修法、该 conductor/fixer 去干 → `COMMENT`(写清 comment id + 修法)。
 - P2/Medium/Low 不必因严重级别本身阻断，但**绝不可静默修完或丢弃**：缺原 thread 回执时 verdict 至少为 `COMMENT`，`pr-sweep` 不得合入，直到该 thread 有上述结论；它们才可以附 tracking/owner/重新处理条件后 defer。
 - 最新 commit 若只是为了消一条 bot finding:核验**原来的 accept-path 还在不在**(修 A 搞出 B、来回翻,是假 addressed)。
-- 👍 / 无 inline finding → 记「bot clean」,不是「还在想」。
+
+#### ★「bot clean」的判据 —— 跑脚本,别读 summary 表(#6013)
+
+**`✅ Completed` 不是 clean 的证据。** 它只表示「这一轮 review 跑完了」。Codex 自己在同一条
+summary comment 的折叠说明里写着真正的判据:
+
+> Codex reacts with 👀 while any review is running, comments if it has suggestions, and
+> **reacts with 👍 once all reviews finish with no findings**.
+
+即 **👍 reaction(`issues/<n>/reactions` 上 vendor 的 `+1`)才是权威的「无 finding」信号**;
+`Completed` 从来不是。但 👍 单独也不够,还有两件实测出来的事:
+
+- **finding 不只在 inline face。** Codex 挂不上 diff 行时,会把整篇 review 发成**顶层
+  comment**(`### 💡 Codex Review` + P1/P2 徽章),落在 `issues/<n>/comments`——**不在**
+  `pulls/<n>/comments`。实测 #5978(P1+P2)、#6015(P2)的 inline face 都是**空的**。
+  只数 inline face,就会在一条活着的 P1 旁边印出 `botFindings=0`。
+- **👍 是挂在 PR 上的,不带 commit,而且永不清除。** 它指哪个 commit 只能从 summary 表的
+  Commit 列读。实测最近 100 个 PR:13 个有 codex 👍,其中 **5 个指向已被 rebase 掉的
+  commit**(#6070 的 👍 是给 `44b4546` 的,head 早已是 `041fce5`)。「审过这个 commit」与
+  「审过一个已经不存在的 commit」在 👍 上完全同色。
+
+**不要用眼睛读这几个面,跑判据脚本**:
+
+```bash
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/pr-review/scripts/bot-clean.ts" \
+  --pr <n> --repo <owner/name>            # 不给 --vendor 就枚举 PR 上**所有** bot 并逐个判
+# → bot-clean: vendor=… state=… botFindings=<n|UNAVAILABLE> inline=… conversation=… \
+#              thumbsUp=… summaryCompleted=… reviewedSha=…
+# → bot-clean: vendorsSeen=<n> vendors=<a,b> overall=<每个 vendor 的 state>
+# exit 0 = 全部 clean · 1 = 有 vendor 不 clean · 2 = 用法错 / 取不到面(fail-closed)
+```
+
+> `${AGENTLOOP_ROOT:-…}` 的**默认**落点是发布镜像 clone。脚本随本 skill 发布,所以在镜像
+> 发到含本文件的版本**之前**,默认路径下没有 `bot-clean.ts`(实测:镜像停在 `0.34.0`)。
+> 那之前用真相源那棵树跑,或显式设 `AGENTLOOP_ROOT`。发布之后自愈。
+
+| state | 含义 | verdict 里怎么写 |
+|---|---|---|
+| `clean` | 👍 **且**它指的 sha == head **且**没有 review 在跑 **且**两个 face 都取到且为空 | 记「bot clean」 |
+| `findings` | inline face 或顶层 comment 有 n 条该 vendor 的 finding | 按上面的 P1/High 表走,**`Completed` 不改变这一行**;顶层 comment 的 finding 与 inline 同等对待 |
+| `blocked` | vendor 说它跑不了(usage limit,实测 #5982),且**之后没有跑完一轮 head 上的 review** | **不是「还在跑」**,等下去没有结果。要么恢复额度重跑,要么写清为什么不等它。恢复额度后拿到指向 head 的 `Completed` + 👍,这条通知就被顶掉——否则 `blocked` 会变成**吸收态**:一个曾经撞过限额的 PR 永远回不到 `clean`,而它给的指示恰恰是「恢复额度重跑」 |
+| `running` | 有 👍,但**这一轮 review 还在跑**(有 👀,或 Status 格还不是 `Completed`) | **不是 clean**。那个 👍 是上一轮留下的、马上会被顶掉。等这一轮跑完 |
+| `stale` | 有 👍,但它指的 commit 不是 head | **不是 clean**。在 head 上重新触发 review,拿到新的 👍 再说 |
+| `unbound` | 有 👍,但读不到它指的 commit | 同上,fail-closed |
+| `incomplete` | vendor 在场(有 summary / 👀)但没有 👍 | 记「未完成/未知」——**不是 clean** |
+| `absent` | vendor 一个字都没说 | 「未知」。等不等由 [`epic-conductor` §6](../epic-conductor/SKILL.md) 决定,不由本步决定 |
+| `unavailable` | 某个面取失败 | **fail-closed**,不是 0。取失败 ≠ 没有 finding |
+
+- **verdict comment 必须逐字带上这一行的 `botFindings=<n>`**,含 `0`,取不到就写
+  `botFindings=UNAVAILABLE` 并降级判决。「数出来是 0」和「根本没数」不许同色。
+- **同样要带上 `vendorsSeen=`**。不给 `--vendor` 时脚本自己枚举 PR 上**已识别的** review
+  connector 并逐个判——别只判默认那一个,否则 `cursor[bot]` 挂着 5 条 finding 也不会有任何
+  东西变红。**认不出的 bot 会单独打一行 `unknownBot=`**:不判、不计数、不阻断,但也**不静默**
+  ——一个新的 review connector 如果就这么消失了,「看过、没问题」和「压根没看」就又同色了。
+  看到 `unknownBot=` 且它确实会发 finding,把它加进 `RECOGNISED_REVIEW_VENDORS`。
+
+> **为什么是脚本而不是一条纪律:** 这段话的前身(「👍 / 无 inline finding → 记 bot clean」)
+> 和 `:127` 的「取失败 ≠ 没有 finding」在两次误判**之前**就已经写在这里了,没挡住——
+> #6009 与 #6011 各自在 finding 已存在 10+ 分钟后写下「bot clean」,共漏 9 条(4 条 P1)。
+> 判据现在住在 `scripts/bot-clean.ts`,配 `bot-clean.test.ts` 的真实 PR fixture(accept 臂
+> #6097 = 真 clean 且 👍 指着 head,必须仍判 clean)与 mutation pair(把判据改回
+> 「`Completed` ⇒ clean」,六条 reject 臂必须红)。
+> **本 PR 自己的 pre-PR 对抗 review 在这个脚本上又抓到两条 P1**(顶层 comment 的 finding 看不见、
+> 👍 不绑 commit)——两条都已在实测 PR 上复现、写成 reject 臂,再修的实现。
 
 > **`agent:hold`(人类保留 = 终态冻结,不是处理冻结):** Step 0 已取到 `labels`;若见 PR 带 `agent:hold`——**显式手工 `/agentloop:pr-review <n>` 只提示不挡**(人点名就是要看;且本 skill 默认 read-only、永不 merge,风险低)。hold 的含义是"没人反馈之前别合/别关",**不是"别处理"**:review 照常做,**人类在 hold PR 上的新评论必须读并响应**(那往往是修改要求或拍板条件)。verdict 上的体现:即使全绿,也写 `MERGE (held)` 并注明"等人摘 `agent:hold` 后才可合";若人类评论给了明确修改要求 → 按 `COMMENT`/`BLOCK` 处理并把"响应人类反馈"作为下一步(--post 模式可直接在 PR 分支实现人类明确要求的改动)。真正执行合并闸拦截(带 hold 一律不合)的是 [`pr-sweep`](../pr-sweep/SKILL.md)。只人加只人摘,agent 永不自动摘。
 

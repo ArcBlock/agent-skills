@@ -40,6 +40,26 @@ export type ParseResult =
  * `exec review` 天然是这个形状；claude / grok 由提示词要求它照这个形状输出。
  * 解析器因此只有一个（`parseReviewReport`）。
  */
+/**
+ * 一次性 nonce 的指令。引擎必须原样复制它作为最后一行。
+ *
+ * arc#6123:codex 在没发现问题时**整节不写**,而 `(none)` 是解析器认「干净」的唯一
+ * 形状 —— 于是「有 finding → FAIL / 没 finding → BLOCKED」,**accept path 从来没有
+ * 成立过**。原设计拒绝相信空白是对的(空白与被截断无法区分);nonce 把那个区分补上:
+ * **nonce 在 = 这份输出完整**,于是「完整且零条」不再和「被截断」同色。
+ */
+export function reportContractWithNonce(nonce: string): string {
+  return [
+    REPORT_CONTRACT,
+    "",
+    `**最后一行**必须是这一串,单独成行、不加引号、前后不带别的字:${nonce}`,
+    "它只证明这份输出没有被截断,**不**代表没有问题——所以:",
+    "没发现问题时,**仍然必须**写出 `(none)` 那一行,再写这个结束标记。",
+    "只写散文结论而不写 `(none)`,会被判为「没跑完」而不是「审过了、干净」——",
+    "因为「审完了没问题」和「我没能审」在那种输出上无法区分。",
+  ].join("\n");
+}
+
 export const REPORT_CONTRACT = [
   "输出格式（严格遵守，不要加别的小节）：",
   "先一段两三句的总结，然后一行 `Full review comments:`，然后每条 finding 一段：",
@@ -358,7 +378,21 @@ export function requireLocalReviewSticky(
 
 /* ===== codex 产物解析 ===== */
 
-const FINDING_RE = /^-\s*\[(P\d)\]\s*(.+?)\s+—\s+(\S+?):(\d+(?:-\d+)?)\s*$/;
+/**
+ * 一条 finding。`path:line` 允许被 markdown 的行内代码包裹(arc#6153)。
+ *
+ * 为什么容忍反引号:reviewer 的输出**就是 markdown**,把路径写成 `` `a/b.ts:12` ``
+ * 是那个语境里最自然的写法,而契约的示例行本身也印在 markdown 上。实测
+ * `grok-build` 审 PR #6002 时输出了一条**完全符合契约**的 P3,只因行尾多一个反引号
+ * 就整条匹配不上;小节里没有别的可认的东西,于是判 unparseable —— **「reviewer 报了
+ * 问题」被渲染成了「reviewer 输出读不懂」**,而这两者在 `result=BLOCKED` 上同色。
+ *
+ * 容忍的边界与 {@link CLEAN_SENTINEL} 同一条:只放过**不改变「这是一条 finding」**
+ * 的包裹。缺 `— path:line` 整段、或根本不是 `- [Pn]` 开头的行,照旧认不出 ——
+ * 那条 reject 臂是本次放宽的正控,没有它,一个「什么都算一条」的正则会同样让
+ * accept 臂变绿。
+ */
+const FINDING_RE = /^-\s*\[(P\d)\]\s*(.+?)\s+—\s+`?([^\s`]+?):(\d+(?:-\d+)?)`?(\s.*)?$/;
 const SECTION = "Full review comments:";
 
 /** 单条 finding 正文的上限。超出要**说出来**，不能悄悄截。 */
@@ -398,11 +432,81 @@ export const parseCodexReview = parseReviewReport;
  */
 const CLEAN_SENTINEL = /^\(?\s*none\s*\)?\.?$/i;
 
-export function parseReviewReport(stdout: string, opts: { repoRoot?: string } = {}): ParseResult {
-  const idx = stdout.indexOf(SECTION);
-  if (idx < 0) return { ok: false, reason: "unparseable" };
+export function parseReviewReport(
+  stdout: string,
+  opts: { repoRoot?: string; nonce?: string } = {},
+): ParseResult {
+  // arc#6123。`nonce` 是**加法**:不传它,下面每一条判据逐字节不变。
+  //
+  // 它只回答一个问题——**这份输出跑完了吗**。它**不**回答「有没有问题」。
+  // codex 第 3 轮的 P1 把这条钉死了:「完整 + 没有可识别的 finding」会同时命中
+  // 「审完了、干净」和「我根本没审成」(实测:『无法读取仓库,未完成审查』、
+  // 以及编号列表 `1. [P1] …` 认不出),而干净是那个会放行合并的答案。
+  //
+  // 所以**两个方向都要正面证据**:
+  //   完整 ⟸ nonce 是最后一个非空行;干净 ⟸ 显式 `(none)` 哨兵。
+  // 缺任一 ⟹ unparseable。#6123 的真正解药在 prompt 侧(让引擎产出哨兵),
+  // 不在这里放宽。
+  //
+  // nonce 必须**独占最后一个非空行**,不能只用 `includes`:实测只写一句
+  // 「本轮的结束标记是 <nonce>,开始审查。」就会被判成完整(codex P2)。
+  let complete: boolean | undefined;
+  if (opts.nonce) {
+    const nonEmpty = stdout.split("\n").filter((l) => l.trim() !== "");
+    complete = nonEmpty.length > 0 && nonEmpty[nonEmpty.length - 1]?.trim() === opts.nonce;
+    if (!complete) return { ok: false, reason: "unparseable" };
+  }
+  // 验证在前、剥离在后 —— 顺序承重。留着它会落进下面的小节循环被计成 `unclaimed`,
+  // 于是**严格照契约输出的干净报告反而被判 unparseable**(codex 上一轮的 P1(a))。
+  // 只剥那一行,不是全文替换。
+  const text = opts.nonce
+    ? stdout
+        .split("\n")
+        .filter((l) => l.trim() !== opts.nonce)
+        .join("\n")
+    : stdout;
+  const idx = text.indexOf(SECTION);
+  if (idx < 0) {
+    // 没有小节头。**不许因为「找不到 finding」就判干净** —— 见上。
+    if (!complete) return { ok: false, reason: "unparseable" };
+    const body = text.split("\n");
+    // 「看起来像一条 finding」判得比 `- [Pn]` 宽:编号列表 `1. [P1] …`、`* [P2] …`
+    // 都算。窄了的话,一条认不出的问题行会绕过检测,让**同一份输出里的哨兵替它背书**
+    // (codex 第 4 轮的残余洞)。宽判 + 认不出就拒绝,才是 fail-closed 的那一侧。
+    const orphan = body.filter((l) => /\[P\d\]/.test(l));
+    if (orphan.length === 0) {
+      // 唯一的干净出口:显式哨兵。哨兵可以不带小节头 —— 它本身就是正面证据。
+      const sawSentinel = body.some((l) => CLEAN_SENTINEL.test(l.trim()));
+      return sawSentinel ? { ok: true, findings: [] } : { ok: false, reason: "unparseable" };
+    }
+    // 有 finding 行却没有小节头:逐条认,认不出就拒绝。**正文要跟着走** ——
+    // 只投递标题会把触发条件和修法静默丢掉(codex P2)。
+    const salvaged: ReviewFinding[] = [];
+    let cur: ReviewFinding | undefined;
+    for (const raw of body) {
+      const m = FINDING_RE.exec(raw.trimEnd());
+      const [, severity, title, file, line, trailing] = m ?? [];
+      if (severity && title && file && line) {
+        cur = {
+          severity,
+          title: title.trim(),
+          file: repoRelative(file, opts.repoRoot),
+          line,
+          body: (trailing ?? "").trim(),
+        };
+        salvaged.push(cur);
+        continue;
+      }
+      if (/\[P\d\]/.test(raw)) return { ok: false, reason: "unparseable" };
+      const t = raw.trim();
+      if (cur && t && !t.startsWith("-") && !t.startsWith("*")) {
+        cur.body = `${cur.body} ${t}`.trim().slice(0, BODY_CAP);
+      }
+    }
+    return { ok: true, findings: salvaged };
+  }
   const findings: ReviewFinding[] = [];
-  const lines = stdout.slice(idx + SECTION.length).split("\n");
+  const lines = text.slice(idx + SECTION.length).split("\n");
   let current: ReviewFinding | undefined;
   /** 小节里没被任何一条 finding 认领、也不是干净哨兵的实质内容。 */
   let unclaimed = 0;
@@ -410,13 +514,16 @@ export function parseReviewReport(stdout: string, opts: { repoRoot?: string } = 
   let sawCleanSentinel = false;
   for (const raw of lines) {
     const m = FINDING_RE.exec(raw.trimEnd());
-    if (m) {
+    const [, severity, title, file, line, trailing] = m ?? [];
+    if (severity && title && file && line) {
+      // 位置之后的注记(`(round 12)` 之类)不属于位置,但**也不许丢**——这个文件
+      // 自己的规矩是「超出要说出来,不能悄悄截」。折进正文的开头。
       current = {
-        severity: m[1],
-        title: m[2].trim(),
-        file: repoRelative(m[3], opts.repoRoot),
-        line: m[4],
-        body: "",
+        severity,
+        title: title.trim(),
+        file: repoRelative(file, opts.repoRoot),
+        line,
+        body: (trailing ?? "").trim(),
       };
       findings.push(current);
       continue;
@@ -506,6 +613,8 @@ export interface ReviewCommentInput {
   /** 上一轮的账本 —— 未了结的条目要被带进下一轮，否则它们会静默消失（#5697 P1）。 */
   prior?: readonly StateFinding[];
   unparseable?: boolean;
+  /** parsed vs expected. Sticky 漏判时带上；缺席则标明不可用，绝不捏造 parsed:[]。 */
+  parseDiag?: DispositionParseDiag;
 }
 
 export function renderReviewComment(i: ReviewCommentInput): string {
@@ -523,6 +632,13 @@ export function renderReviewComment(i: ReviewCommentInput): string {
     i.round === undefined
       ? ""
       : `${renderReviewState({ round: i.round, findings: nextRoundState(i.prior ?? [], i.convergence, i.findings) })}\n`;
+  const unadjudicated = i.convergence?.unadjudicated ?? [];
+  const parseDiagBlock =
+    unadjudicated.length === 0
+      ? ""
+      : i.parseDiag
+        ? `${formatDispositionParseDiag(i.parseDiag)}\n\n`
+        : "_判定诊断不可用。_\n\n";
   const head =
     makeMarker(i.sha, result, LOCAL_REVIEW_PREFIX) +
     "\n" +
@@ -543,7 +659,8 @@ export function renderReviewComment(i: ReviewCommentInput): string {
     (i.round === undefined ? "" : " · 第 " + i.round + " 轮") +
     " · 判决 **" +
     result +
-    "**\n\n";
+    "**\n\n" +
+    parseDiagBlock;
 
   if (i.unparseable) {
     return head + "_reviewer 的输出无法解析 —— 这不是「没发现问题」，判 BLOCKED。_\n";
@@ -739,7 +856,9 @@ export function roundPrompt(round: number, prior: readonly StateFinding[]): stri
   ].join("\n");
 }
 
-const DISPOSITION_RE = /^-\s*\[(fixed|open|regressed)\]\s+(\S+)/;
+// charset not \S+ (#6064 CJK/colon). Optional `*_ wrap + * bullets — LLM reviewers wrap ids.
+// Id class is [A-Za-z0-9]+ (findingId = f + base36). `_`/`-` in the class ate wrapping `_id_`.
+const DISPOSITION_RE = /^[-*]\s*\[(fixed|open|regressed)\]\s+[`*_]*([A-Za-z0-9]+)/;
 
 /** 判定表从报告里解析——格式是契约的一部分，不是随便写写。 */
 export function parsePriorDispositions(report: string): Map<string, Disposition> {
@@ -753,6 +872,36 @@ export function parsePriorDispositions(report: string): Map<string, Disposition>
     if (m) out.set(m[2], m[1] as Disposition);
   }
   return out;
+}
+
+/**
+ * 「漏判」的两种颜色：parsed 空 = reviewer 没写判定行；parsed 非空但对不上 = 解析没吃对。
+ * 只报「漏判 N」时两者同色（#6064）。
+ */
+export interface DispositionParseDiag {
+  expected: string[];
+  parsed: string[];
+  unmatched: string[];
+}
+
+export function dispositionParseDiag(
+  expectedIds: readonly string[],
+  dispositions: ReadonlyMap<string, unknown>,
+): DispositionParseDiag {
+  const expected = [...expectedIds];
+  const parsed = [...dispositions.keys()];
+  const unmatched = expected.filter((id) => !dispositions.has(id));
+  return { expected, parsed, unmatched };
+}
+
+export function formatDispositionParseDiag(d: DispositionParseDiag): string {
+  const list = (ids: readonly string[]) => (ids.length ? ids.join(", ") : "(none)");
+  // No leading indent — 4+ spaces is a GitHub code block. Stderr caller indents if needed.
+  return [
+    `期望上一轮 id：${list(d.expected)}`,
+    `解析出的判定 id：${list(d.parsed)}`,
+    `对不上：${list(d.unmatched)}`,
+  ].join("\n");
 }
 
 export interface Convergence {

@@ -1,0 +1,79 @@
+{
+  "name": "reject-completed-with-inline-findings",
+  "arm": "reject",
+  "vendor": "chatgpt-codex-connector[bot]",
+  "source": "ArcBlock/arc#6011",
+  "recordedAt": "2026-09-06T09:23:12Z",
+  "provenance": "Real record, time-filtered to the instant the misjudging review was posted (09:23:12Z). Codex summary says '✅ Completed'; three codex inline findings (2×P1) had existed since 09:09:37Z — 13.6 minutes earlier. No 👍 reaction. The review nevertheless recorded 'bot clean'. This is issue #6013's second measured misread.",
+  "expect": {
+    "state": "findings",
+    "botFindings": 3
+  },
+  "faces": {
+    "headSha": "daecf87510c229c694dde07e9e58cfecfb74074a",
+    "issueReactions": [],
+    "inlineComments": [
+      {
+        "id": 3943506174,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "created_at": "2026-09-06T09:09:37Z",
+        "path": "platforms/kotlin/providers/audio-analysis/src/main/kotlin/io/aigne/afs/providers/audioanalysis/MediaPipeSoundAnalysisEngine.kt",
+        "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Reject audio instead of silently truncating decoded samples**\n\nFor common 48 kHz input, `MAX_SAMPLES` is reached after only five minutes, even though the provider accepts durations up to ten minutes. Setting `sawOutputEos` here exits decoding and returns the partial buffer as a successful classification, so a v"
+      },
+      {
+        "id": 3943506176,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "created_at": "2026-09-06T09:09:37Z",
+        "path": "platforms/kotlin/providers/audio-analysis/src/main/kotlin/io/aigne/afs/providers/audioanalysis/MediaPipeSoundAnalysisEngine.kt",
+        "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Avoid boxing every decoded PCM sample**\n\nWhen callers submit the multi-minute clips explicitly allowed by the ten-minute limit, every sample is allocated as a boxed `Float` in this list before a second primitive `FloatArray` is created. A ten-minute 16 kHz clip produces 9.6 million objects, and ordinary 44.1/48"
+      },
+      {
+        "id": 3943506180,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "created_at": "2026-09-06T09:09:37Z",
+        "path": "platforms/kotlin/providers/audio-analysis/src/main/kotlin/io/aigne/afs/providers/audioanalysis/MediaPipeSoundAnalysisEngine.kt",
+        "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Let the injected classifier satisfy availability checks**\n\nWhen the instrumented accept-path tests use `engineWithRealModel()`, they inject a classifier backed by the downloaded model buffer but leave `modelAssetPath` at `yamnet.tflite`; the test APK intentionally does not contain that asset. This early return "
+      }
+    ],
+    "issueComments": [
+      {
+        "id": 5558218216,
+        "user": {
+          "login": "mave99a"
+        },
+        "created_at": "2026-09-06T09:05:50Z",
+        "body": "<!-- verification-report sha=daecf87510c229c694dde07e9e58cfecfb74074a result=PAS… [non-vendor body truncated by the recorder]"
+      },
+      {
+        "id": 5558218353,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "created_at": "2026-09-06T09:05:51Z",
+        "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-09-06T09:09:40.113488Z\">2026-09-06T09:09:40.113488Z</relative-time> | `c9f820c` | PR opened |\n\n\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.\n\n</details>"
+      },
+      {
+        "id": 5558222067,
+        "user": {
+          "login": "mave99a"
+        },
+        "created_at": "2026-09-06T09:06:35Z",
+        "body": "<!-- native-verify-report sha=daecf87510c229c694dde07e9e58cfecfb74074a result=PA… [non-vendor body truncated by the recorder]"
+      },
+      {
+        "id": 5558305561,
+        "user": {
+          "login": "mave99a"
+        },
+        "created_at": "2026-09-06T09:23:12Z",
+        "body": "<!-- pr-review-verdict --> > 🤖 AI Agent PR Review @ Roberts-Mac-mini-M4-Pro-7.l… [non-vendor body truncated by the recorder]"
+      }
+    ]
+  }
+}
