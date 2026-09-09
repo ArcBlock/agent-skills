@@ -208,6 +208,24 @@ a sandbox boundary, or payment/billing:
   [`pr-review`](../pr-review/SKILL.md)'s marker) — members' output is working material, never
   a second canonical verdict.
 
+  **Round cap per PR: 3.** A round is one re-verification at a new head SHA that refreshed
+  the verdict — whatever produced the findings (panel, bot, a red gate, a human comment).
+  Read the count, never remember it:
+
+  ```bash
+  bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/pr-review-round.ts" --pr <n>   # completed rounds
+  ```
+
+  `0`–`2` → another round is allowed. `3` or more → **no fourth round**: collapse the finding
+  into the current fix, file it as a separate issue, REJECT it with reasoning, or fail the PR
+  (stop at "open, unmerged" and hand it back). The third round's fix must be single-point /
+  mechanical — otherwise fail rather than review again. A non-zero exit means the count is
+  unknown; stop, do not read it as round 0.
+
+  Why a count and not judgement: a complex enough diff can always yield one more finding, so
+  "one more round and it's clean" reads true at every round. The cap is what separates "this
+  PR is not good enough" from "we are polishing forever" — they look identical per round.
+
 ### 5. Route findings to a fixer
 **Compact first — mandatory, no exceptions.** Before a fixer is dispatched, run the raw pile
 (independent-review findings + bot P1/High + any still-open inline comments) through
@@ -284,9 +302,11 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 Merge a PR only when ALL hold, **in this order** (do not skip to squash):
 
 1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
-2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. If the verification sticky (or sibling-location shared evidence) is already PASS at `sha=HEAD` with matching base+capabilities, **read that fact** — do not re-invoke `pre-merge.ts`. Re-invoke only when identity does not match.
+2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches — **plus a cross-engine review door that applies only when this branch has a Factory run record**, i.e. when you are running inside the Factory. Attended runs on a developer machine do not hit it, and the gate prints which of the two N/As it means). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. **One measured exception, decided by the gate and not by you**: an e2e-gate PASS whose sha is older is CARRIED FORWARD when every file changed since is off the backend surface (a Swift-only or docs-only fixer commit cannot change what a data-plane boot observed). The gate prints `e2e-gate=PASS (carried from <sha9>; …)` when it does this; it refuses — and says which of its four fail-closed conditions tripped — otherwise. The cross-engine door carries forward too but only under the strictest form of the same rule (the two commits have an **identical tree** — an amend that rewrote only the message, a clean rebase replay); `verification` never carries, because it is diff-sensitive by construction. All three decisions are the gate's, computed from git. Do not reproduce the reasoning by hand. If the verification sticky (or sibling-location shared evidence) is already PASS at `sha=HEAD` with matching base+capabilities, **read that fact** — do not re-invoke `pre-merge.ts`. Re-invoke only when identity does not match.
 3. **Every actionable inline review thread is addressed** per §6 (fixed with SHA/change/verification or REJECTed with reasoning; only P2/Medium/Low may defer with tracking/owner/re-entry condition). Any P1/High that is not fixed or REJECTed is a hard blocker; lower severity is not a risk blocker but is still never mergeable without its in-thread conclusion.
 4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
+
+5. The merge itself goes through `scripts/merge-verified-pr.sh`, which now **verifies step 2 actually happened** — it requires the verdict record `merge-gate.ts` writes on exit 0 — `merge-gate.<sha>.json` under `$ARC_MERGE_VERDICT_DIR`, else `<repo root>/.verify/` (both sides resolve that identically on purpose) — matching this PR and this head. So gate and merge must run on the same machine at the same head. Before this existed, "the gate ran" and "the gate was skipped" left identical traces, and five arc CLI epic PRs merged on stale or failed evidence.
 
 For a **security-face** PR, post a short **risk-summary** comment before merging (what it opens, why it's safe, residual risk, revert path). Then: remove `agent:hold`, squash-merge (Conventional-Commit title if branch commits drifted), delete the branch, drop the issue from the lock list. Unblock dependents and dispatch the next wave.
 

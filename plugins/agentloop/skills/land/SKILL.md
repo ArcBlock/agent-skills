@@ -241,13 +241,45 @@ gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --b
 - **inline review 线程的回执协议（含 bot findings、defer 的 owner 与再处理条件、缺回执
   是否挡合并）只有一处真相：`epic-conductor` §6。照它执行，不要在这里另立一份**——
   两份一定会漂。
-- 修完之后 gate **必须重跑**（SHA 变了，旧的绿不作数）。
+- 修完之后 gate **必须重跑**（SHA 变了，旧的绿不作数），**并且必须刷新 verdict**
+  （pr-review 的 canonical comment，原地 upsert）。两件事都做才算这一轮闭合：
+  只重跑 gate 不刷 verdict，轮次计数器就看不见这一轮——见下面「看得见什么」。
 
 #### review 轮次上限：**3 轮**（硬规矩，不是建议）
 
-**一个 PR 最多跑 3 轮 review。第 3 轮之后只有两个出口：merge，或者 fail。没有第 4 轮。**
+**一个 PR 最多跑 3 轮 review。第 3 轮之后只有两个出口：merge，或者 fail。没有第 4 轮，
+也没有任何名义的额外一轮。**
 
-一轮 = 「派 reviewer → 收 findings → 修 → 重新盖章」的一整圈。
+**一轮 = 在一个新的 head sha 上重新核验并重新盖章一次。** findings 来自哪里不影响计数：
+clean-context reviewer、bot（Codex / Bugbot）、gate 变红、人类评论——只要修完之后重新
+核验并刷新了 verdict，就是一轮。
+
+**轮次从 PR 上读出来，不从记忆里写：**
+
+```bash
+bun <plugin_root>/scripts/pr-review-round.ts --pr <PR#>          # 打印已完成的轮数
+bun <plugin_root>/scripts/pr-review-round.ts --pr <PR#> --json   # {round, traces, malformed}
+```
+
+| 脚本返回 | 还能不能再审 |
+|---|---|
+| `0` / `1` / `2` | 能 |
+| `3` 或更大 | **不能**——走下面那张表：同类塌缩 / 开新单 / REJECT / fail |
+
+**这个整数是「已完成几轮」；pr-review 那边把即将写下的那一轮记成 `1`——两种数法，别混。**
+
+计数器的两个边界，按字面读：
+
+- **纯 sha churn 不计**（机械重生成 / rebase）——`round` 只在真的重新核验时 +1，
+  否则三次上游合入就能把预算烧光而一次 review 都没发生。
+- **修完没重新盖章的回合它数不到**——那种情况本身就违反本步的规矩（修完必须重新核验
+  **并**刷新 verdict，不是只重跑 gate）。说出来是为了让「漏计」和「没发生」不同色。
+
+**脚本读不到 PR 时非零退出，不是 `0`。非零退出时停下来问，不要当成第 1 轮。**
+`0` 恰好是「可以继续审」的那个答案，所以「数错了的上限」与「没生效的上限」同色——
+这就是它必须是带测试的脚本、而不是一行内联命令的原因。
+
+这个数必须原样进最终输出的 `review_rounds=`。
 
 第 3 轮（及之后的修复）里冒出来的**新**问题，按下面处理，**不得因此再开一轮**：
 
@@ -263,21 +295,20 @@ gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --b
 **「这个 PR 还不够好」与「我们在无限精修」在每一轮的报告上完全同色**；3 轮是把这两者分开的那条线。
 
 **第 3 轮的 spin-off 仍然受 Step 6 约束**——同类必须塌缩，理由必须取自闭集，条目必须进账本。
-「拿开新单当第 4 轮的替代品」正是螺旋的另一种形态。
+「拿开新单当又一轮的替代品」正是螺旋的另一种形态。
 
-#### 一个上限自带的洞：**第 3 轮的修复没有人审**
+#### 第 3 轮的修复必须是单点/机械的，否则 fail
 
-一轮的定义是「派 reviewer → 收 findings → 修 → 重新盖章」，所以第 N 轮的**修复**只会在
-第 N+1 轮被看到。硬顶在 3 ⇒ **第 3 轮那次修改在一个「闸绿即合」的仓库里由谁都没审过就合了**，
+第 N 轮的修复只会在第 N+1 轮被重新核验，所以顶在 3 ⇒ **第 3 轮那次修改没有人审就合了**，
 而这个仓库的立身教训恰恰是**闸绿与改对是两件事**。
 
-两个出口，选一个，并在 PR 上说明选了哪个：
+所以第 3 轮的修复只能是**单点/机械**的：一行 guard、一处改名、一句文档。
+**做不到就判 fail**，停在「已开 PR、未合」，交回给人——不要为它再开一轮。
 
-- 第 3 轮的修复必须是**单点/机械**的（一行 guard、一处改名、一句文档）——否则判 **fail**；
-- 或者跑一次**确认轮**：它**只允许确认前一轮的 findings 是否闭合，不得提出新 findings**
-  （新东西一律按上表开新单）。这样的确认轮**不计入 3 轮**，因为它不能产生新的修复。
-
-不许两个都不选就合——那正好是「闸绿即合」。
+> **不要发明「只确认、不提新问题」的额外一轮。** 计数器分辨不出一轮 review 是不是
+> 「只确认」——那只存在于派工时的措辞里，而 reviewer 是 clean context，它照常会报新东西。
+> 一个计数器看不见的豁免可以被反复使用：连开三次「确认轮」与无限轮在账本上完全同色。
+> 需要更多审查 = 这个 PR 该 fail，不是该加一轮。
 
 ---
 
@@ -309,6 +340,11 @@ gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --b
    **这不是豁免**——闸**自己**跑证据、自己判定，你只负责提供 witness issue。
    `--no-verify` 和 `force` 在任何情况下都不是答案。
 4. 绿了之后按合并权限（见下）执行 `<plugin_root>/scripts/merge-verified-pr.sh <PR#>`。
+   该脚本**会检查**上一步留下的判决记录（`merge-gate.<sha>.json`，落在
+   `$ARC_MERGE_VERDICT_DIR`，否则 `<repo 根>/.verify/`；`merge_gate_entry` exit 0 时写），
+   对不上就拒绝合并——所以**闸和合并必须在同一台机器、同一个 head 上**。
+   记录缺失时不要绕过去手敲 `gh pr merge`：先把闸跑出来。确有不可抗力用
+   `--no-gate-record "<理由>"`，它会把这件事印在 stdout 上。
    **不要用裸 `gh pr merge`**：该脚本在**链接 worktree 里是安全的**（不会让 gh 去 checkout
    默认分支），而 Step 3 强制 worktree 隔离；它还带 `state=OPEN` / `mergeable` 前置
    和 head-SHA 原子提交。
@@ -494,7 +530,7 @@ gh issue list -R <repo_slug> --state all --limit 100 \
 
 | | 数什么 | 到顶了怎么办 |
 |---|---|---|
-| **Step 4 的 3 轮** | **一个 PR** 的 review 轮次 | merge 或 fail；新 finding 开新单，不再开一轮 |
+| **Step 4 的 3 轮** | **一个 PR** 的 review 轮次，从 sweep-trace 的 `round` 数出来 | merge 或 fail；新 finding 开新单，不再开一轮 |
 | **Step 6 的 3 轮** | **整个 land run** 的净未决数没下降的轮数 | 停止派工，交回给人 |
 
 一个 PR 可以 3 轮 review 之后干净地 merge，而整个 run 仍在发散（每个 PR 都在生新单）——
@@ -570,12 +606,16 @@ gate 的实际结论、review findings 的处置、以及下一条命令（如�
 
 ```
 RUN_START=<ISO 时间戳>            ← run 开始时记下，账本靠它数出来
+review_rounds=<n>（PR #<num>，已完成轮数，脚本读出，上限 3）
 开单账本：decisions=<n>（其中 issue=<i>，其余为 TODO/KNOWN MISS/正文/comment）
           因修好而关=<m>   本 run 自开且仍 OPEN=<k>
   #<num>  kind=<文件路径>:<症状动词>  理由=<闭集里的值>   ← 每条一行
 kind 家族：<f> 类 / <n> 条
 收敛判定：converging | collapsible | spiral
 ```
+
+`review_rounds` 与开单账本同理：**数出来的，不是记得的**。少印这一行，与
+「这个 PR 一轮就干净了」在读者眼里同色。
 
 `decisions` 与「仍 OPEN」是**两个不同的量**（前者含四种载体，后者只数 issue），
 分开印，不要相加。

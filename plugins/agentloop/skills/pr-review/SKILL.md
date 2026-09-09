@@ -235,8 +235,10 @@ Step 0 已拿到全部评论;取 HEAD oid,与最近一条 verdict trace(**任何
 
 ```bash
 head=$(gh pr view <n> --json headRefOid --jq .headRefOid)
-# 从已取回的会话 comments 里抓最近一条 gate:"verdict" 的 sweep-trace,读其 sha + val 字段
-# (旧格式 trace 无 sha → 一律视为 stale)
+# 从已取回的会话 comments 里抓最近一条 gate:"verdict" 的 sweep-trace,读其 sha + val + round
+# (旧格式 trace 无 sha → 一律视为 stale;无 round → 见文末 sweep-trace 一节)
+# round 也可以直接问脚本(它自带分页与 fail-closed,别手写 jq):
+#   bun <plugin_root>/scripts/pr-review-round.ts --pr <n>
 ```
 
 **★ 新鲜度键是二元组 `(sha, val)`,不是单看 sha。** `sha` 答「输入变了没」,`val`(上一轮的
@@ -543,7 +545,7 @@ fi
 每条本 skill 发出的 AI verdict comment 末尾**必须**附一行 sweep-trace HTML 注释（人不可见、grep 可查、L1 eval 复用为 golden baseline 数据来源）：
 
 ```html
-<!-- sweep-trace: {"ver":1,"pr":N,"gate":"verdict","val":"<val>","sha":"<head-oid>","run":"<ISO8601>"} -->
+<!-- sweep-trace: {"ver":1,"pr":N,"gate":"verdict","val":"<val>","sha":"<head-oid>","round":<n>,"run":"<ISO8601>"} -->
 ```
 
 字段：
@@ -552,6 +554,29 @@ fi
 - `gate`：固定值 `verdict`
 - `val`：决策值，取 pr-review 受控词表（5 类）：`MERGE` / `COMMENT` / `SUPERSEDE` / `BLOCK` / `CLOSE`
 - `sha`：本 verdict 针对的 PR HEAD（40 位 commit oid，`gh pr view <n> --json headRefOid`）——Step 0.6 跨 runner 去重/新鲜度判定的**机器键**。旧 trace 无此字段 → 一律视为 stale
+- `round`：这是**这个 PR 已经发生过的第几轮 review**。派生规则：
+  **这一轮真的重新核验了 ⇒ 上一条 trace 的 `round` + 1；否则照抄。**
+  读不到上一条 trace、或旧格式无 `round` ⇒ 本轮是 `1`。**不猜、不从记忆里写。**
+
+  按上面那张新鲜度表逐格对齐（**判据是「有没有重新核验」，不是「sha 变没变」**）：
+
+  | 新鲜度 | `round` |
+  |---|---|
+  | **fresh**（跳过 / 只并入证据） | 照抄 |
+  | **fresh + 人类新评论**（针对性处理，不重跑核验） | 照抄 |
+  | **★ 视同 fresh（机械重生成）** | **照抄——绝不 +1** |
+  | **stale**（增量复审） | **+1** |
+  | **stale 但结论不变、已升级等人**（仍做了增量复审） | **+1** |
+  | **无 verdict**（首轮） | `1` |
+
+  > **轮次记的是审查劳动，不是 commit 事件。** 一个 release-please 型 PR 的 sha 每次上游
+  > 合入都会变，按 sha 记就会三次 churn 烧光 `land` 的 3 轮预算，而一次 review 都没发生。
+  >
+  > verdict comment 是**每 PR 唯一、原地 upsert** 的（#1812），所以「审了 1 轮」和
+  > 「审了 5 轮」在 PR 上看起来完全一样——轮次落在 trace 里，下一轮才**解析得到**它，
+  > 而不是靠记忆（记忆跨 subagent / session / runner 都不存在）。
+  > 同 local-review 的 `<!-- local-review-state {"round":N} -->`。
+  > 消费方：`land` 的 review 轮次上限（Step 4）。
 - `run`：UTC 时间，`new Date().toISOString()` 格式
 
 **trace 只附在发出的 verdict comment 末尾；read-only 模式（无 `--post`）不发 comment，不附 trace。**

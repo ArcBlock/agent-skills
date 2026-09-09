@@ -27,6 +27,7 @@ import {
   ROUND_CAP,
   renderReviewComment,
   requireLocalReviewSticky,
+  rerunDiscipline,
   resolveReviewerBin,
   resolveSubjectEngine,
   reviewerArgv,
@@ -231,6 +232,90 @@ describe("parseCodexReview —— 拿真实产物解析，不是照着格式编�
       line: "415-418",
     });
     expect(found.title).not.toContain("`");
+  });
+
+  /**
+   * arc#6199 的 reject 臂 —— 放宽位置的包裹时,**不能顺手放宽「什么算一条 finding」**。
+   *
+   * 这一条是变异测试逼出来的,不是设想:把 `^-\s*\[(P\d)\]` 弱化成
+   * `^-?\s*\[?(P\d)?\]?` 之后,141 条测试**全绿**——没有任何东西钉着「必须是
+   * `- [Pn]` 开头」。一个这样被弱化的正则会把正文里随口提到 `path:line` 的散文行
+   * 提升成一条 severity 为 undefined 的 finding,而那正是 accept-path 铁律的反面:
+   * 一个「什么都算一条」的解析器满足每一条「它认出了 finding」的断言。
+   */
+  test("★ arc#6199 reject: 正文里提到 path:line 的散文行不是 finding,要归进上一条的正文", () => {
+    const report = [
+      "看过 diff 了。",
+      "",
+      "Full review comments:",
+      "",
+      "- [P2] 真的 finding — packages/core/src/a.ts:10",
+      "  上面那条的正文。",
+      // 这一行**必须带 ` — `**,否则它对 `- [Pn]` 锚点没有判别力:正则要求标题与位置
+      // 之间有破折号,不带破折号的散文行在弱化前后都匹配不上,测试会假绿。第一版就是
+      // 这么写的,变异 M3 照样全绿,是变异测试把它照出来的。
+      "顺带一提 — packages/core/src/b.ts:20 那一段没问题。",
+    ].join("\n");
+    const r = parseCodexReview(report);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // 判别项:弱化 `- [Pn]` 锚点后这里会变成 2。
+    expect(r.findings.length).toBe(1);
+    expect(r.findings[0]).toMatchObject({ severity: "P2", file: "packages/core/src/a.ts" });
+    // 那行散文不许消失——它折进正文,不被静默丢弃。
+    expect(r.findings[0]?.body ?? "").toContain("packages/core/src/b.ts:20");
+    // 且不许出现 severity 缺失的「finding」。
+    for (const f of r.findings) expect(f.severity).toMatch(/^P\d$/);
+  });
+
+  /**
+   * arc#6199 —— 第三个真实变体,也是 #6153 那次修得**不够宽**的证据。
+   *
+   * #6153 修的是 `` `path:line` ``(反引号包住整个 位置)。实盘出现的第三种写法是
+   * `` `path`:line `` —— **反引号在冒号之前就闭合了**,只包路径、行号留在外面。这同样
+   * 是 markdown 里最自然的写法之一(路径是代码,行号不是),而 `([^\s`]+?)` 这个字符类
+   * **跨不过反引号**,于是 `` ` `` 之后紧跟的不是 `:`,整条匹配失败。
+   *
+   * 实盘(PR #6112,grok-build 审,1019s):raw 产物 2419 bytes、nonce 独占最后一行、
+   * 中间是两条格式完好的 P2,而 sticky 上渲染出来的是 **`0 条 · 判决 BLOCKED`**。两条都
+   * 经人工对代码核实为真。
+   *
+   * fail-closed 那一半是对的(#6123 的不变量:认不出绝不渲染成「干净」)。坏的是另一侧:
+   * findings 只剩在 raw 文件里,而**「BLOCKED 了就再跑一次」是一次有损重试**——下一轮若
+   * 恰好写成可解析的形状,2 条就变成了 0 条,且没有任何东西会说少了什么。
+   */
+  test("★ arc#6199: `path`:line(反引号在冒号前闭合)仍是 finding,不是「读不懂」", () => {
+    const real = [
+      "先看 diff,再读被改文件的上下文。",
+      "",
+      "Full review comments:",
+      "",
+      "- [P2] Kotlin `isInternalArtifact` 只看词汇路径,list 会把指向锁目录的 symlink 当普通内容 — `platforms/kotlin/afs-files/src/main/kotlin/io/aigne/afs/files/FilesProvider.kt`:201-225",
+      "- [P2] Kotlin 的 sidecar delete/rename 测试仍断言某一种合法串行结果 — `platforms/kotlin/afs-files/src/test/kotlin/io/aigne/afs/files/FilesProviderTests.kt`:788-794",
+    ].join("\n");
+    const r = parseCodexReview(real);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // 判别项:修之前这里是 0(整份 unparseable),不是 1。
+    expect(r.findings.length).toBe(2);
+    expect(r.findings[0]).toMatchObject({
+      severity: "P2",
+      file: "platforms/kotlin/afs-files/src/main/kotlin/io/aigne/afs/files/FilesProvider.kt",
+      line: "201-225",
+    });
+    expect(r.findings[1]).toMatchObject({
+      severity: "P2",
+      file: "platforms/kotlin/afs-files/src/test/kotlin/io/aigne/afs/files/FilesProviderTests.kt",
+      line: "788-794",
+    });
+    // 只有 **file** 必须去掉反引号——留着它,贴到 PR 上的链接点不开。
+    // title 里的反引号要**保留**:`isInternalArtifact` 是正文里的行内代码,不是位置的
+    // 包裹。这条断言最初照抄了 #6153 那条(那次的 title 恰好不含反引号),于是把
+    // 「剥掉位置的包裹」写成了「剥掉一切反引号」——会毁掉 finding 正文的可读性。
+    for (const f of r.findings) {
+      expect(f.file).not.toContain("`");
+    }
+    expect(r.findings[0]?.title).toContain("`isInternalArtifact`");
   });
 
   /**
@@ -1845,5 +1930,77 @@ describe("★ requireLocalReviewSticky —— 闸接线（独立性按 heading�
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/PASS/i);
+  });
+
+  test("★★ FAIL 的失败详情必须说「先修，别重跑」—— 提示自己是 #6255 循环的引擎", () => {
+    const failed = renderReviewComment({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      sha: SHA40,
+      base: "origin/main",
+      round: 1,
+      findings: [{ severity: "P1", title: "真问题", file: "a.ts", line: "1", body: "详情" }],
+    });
+    const r = requireLocalReviewSticky(
+      "6255",
+      SHA40,
+      "bun …/local-review.ts --pr 6255 --post",
+      runnerOf({ body: failed, user: { login: "coder" } }),
+      { prAuthor: "coder", coderEngine: "claude" },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.detail).toMatch(/重跑不会改变它/);
+  });
+});
+
+describe("★★ rerunDiscipline —— 「该重跑」与「重跑没有用」必须分色", () => {
+  const marker = (result: string, round: number) =>
+    `<!-- local-review sha=${SHA40} result=${result} -->\n` +
+    `<!-- local-review-state {"round":${round},"findings":[]} -->\n## 本地 review`;
+
+  test("★ ACCEPT：sha 陈旧但判决 PASS、轮次未到顶 —— 这次确实该重跑，不加噪音", () => {
+    // 正控：这个函数必须**有沉默的时候**。一个对每种失败都开口的实现，
+    // 与一个真的在区分的实现，在「FAIL 时有提示」这条断言上完全同色。
+    expect(rerunDiscipline(marker("PASS", 1))).toBeUndefined();
+  });
+
+  test("★ FAIL ⇒ 先修 findings", () => {
+    expect(rerunDiscipline(marker("FAIL", 1))).toMatch(/重跑不会改变它/);
+  });
+
+  test("★ 到顶 ⇒ 停止重跑、交给人（第 4 轮不会变绿）", () => {
+    const d = rerunDiscipline(marker("BLOCKED", ROUND_CAP));
+    expect(d).toMatch(/escalate/);
+    expect(d).toMatch(new RegExp(`第 ${ROUND_CAP} 轮`));
+  });
+
+  test("★★ 到顶但已 PASS ⇒ 沉默：这时闸红的原因是 sha 陈旧，正确动作就是重跑", () => {
+    // 只看 round 会在这里说「到顶了，停止重跑，交给人」——把一次正常的增量复审
+    // 误导成升级。第 3 轮收敛成 PASS、之后又推了一个 commit，是完全正常的形态。
+    expect(rerunDiscipline(marker("PASS", ROUND_CAP))).toBeUndefined();
+    expect(rerunDiscipline(marker("PASS", ROUND_CAP + 2))).toBeUndefined();
+  });
+
+  test("★ 读不到 result 但已到顶 ⇒ 仍然按未收敛处理（不知道 ≠ 收敛过）", () => {
+    const noResult = `<!-- local-review sha=${SHA40} -->\n<!-- local-review-state {"round":${ROUND_CAP},"findings":[]} -->`;
+    expect(rerunDiscipline(noResult)).toMatch(/escalate/);
+  });
+
+  test("★ 边界取 >=：ROUND_CAP 那一轮本身就到顶", () => {
+    // 同 reviewResultForRound 的 `>=` 边界（#5697 P2）：声明的上限必须在它自己
+    // 那一轮生效，否则「到顶了」与「还没到顶」在边界那一轮同色。
+    expect(rerunDiscipline(marker("BLOCKED", ROUND_CAP - 1))).toBeUndefined();
+    expect(rerunDiscipline(marker("BLOCKED", ROUND_CAP))).toBeDefined();
+  });
+
+  test("★ 两条同时成立时都要说 —— FAIL 且到顶", () => {
+    const d = rerunDiscipline(marker("FAIL", ROUND_CAP));
+    expect(d).toMatch(/重跑不会改变它/);
+    expect(d).toMatch(/escalate/);
+  });
+
+  test("★ 读不到 body ⇒ 沉默（不猜）", () => {
+    expect(rerunDiscipline(undefined)).toBeUndefined();
+    expect(rerunDiscipline("")).toBeUndefined();
   });
 });

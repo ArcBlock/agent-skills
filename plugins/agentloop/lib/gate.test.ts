@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { HTML_DECODE_JQ, MARKER_PREFIX, shQuote } from "./comment.ts";
-import { requireStickyGate } from "./gate.ts";
+import { carryForwardStickyGate, requireStickyGate } from "./gate.ts";
 
 const HEAD = "a".repeat(40);
 const OTHER = "b".repeat(40);
@@ -346,5 +346,105 @@ describe("requireStickyGate", () => {
       expect(r.code).toBe(0);
       expect(r.out.trim()).toBe(tricky);
     });
+  });
+});
+
+describe("carryForwardStickyGate — 失效键是「主体变没变」，不是「sha 变没变」", () => {
+  /** A stale-sticky failure exactly as requireStickyGate produces one. */
+  const staleFail = (commentResult = "PASS") =>
+    requireStickyGate(
+      "1",
+      HEAD,
+      MARKER_PREFIX,
+      "e2e-gate",
+      HINT,
+      withComment(sticky(MARKER_PREFIX, OTHER, commentResult)),
+    ) as Extract<ReturnType<typeof requireStickyGate>, { ok: false }>;
+
+  // identicalTrees 是 DeltaOk 的一部分：一个不报它的 delta 就不是这个契约的实现。
+  const delta =
+    (files: string[], identicalTrees = false) =>
+    () => ({ ok: true as const, files, identicalTrees });
+  const NEVER = () => false;
+  const ALWAYS = () => true;
+
+  it("★ ACCEPT：delta 碰不到主体 ⇒ 旧证据继续覆盖当前 head", () => {
+    // 没有这一臂，整个函数可以恒返回 carried:false 而所有 REJECT 断言照样全绿 ——
+    // accept-path 铁律用在这个原语自己身上。
+    const r = carryForwardStickyGate(staleFail(), HEAD, {
+      delta: delta(["README.md", "docs/x.md"]),
+      unaffected: ALWAYS,
+    });
+    expect(r).toEqual({ carried: true, result: "PASS", fromSha: OTHER, deltaFiles: 2 });
+  });
+
+  it("★ REJECT：delta 碰到主体 ⇒ 必须重跑", () => {
+    const r = carryForwardStickyGate(staleFail(), HEAD, {
+      delta: delta(["runtimes/node/src/x.ts"]),
+      unaffected: NEVER,
+    });
+    expect(r.carried).toBe(false);
+  });
+
+  it("★★ REJECT：delta 算不出来 ⇒ 保持陈旧（「查不了」绝不读成「没变」）", () => {
+    const r = carryForwardStickyGate(staleFail(), HEAD, {
+      delta: () => ({ ok: false, reason: "shallow clone" }),
+      unaffected: ALWAYS, // 即使谓词说「随便」，算不出 delta 也不许放行
+    });
+    expect(r.carried).toBe(false);
+    if (!r.carried) expect(r.why).toMatch(/shallow clone/);
+  });
+
+  it("★ ACCEPT：空 delta 但树相同 ⇒ 搬运（amend 只改 commit message）", () => {
+    const r = carryForwardStickyGate(staleFail(), HEAD, {
+      delta: delta([], true),
+      unaffected: ALWAYS,
+    });
+    expect(r).toMatchObject({ carried: true, deltaFiles: 0 });
+  });
+
+  it("★★ REJECT：两个不同 sha 之间 delta 为空**且树不同** ⇒ 不信（空枚举必须大声）", () => {
+    // 一个「什么都枚举不到」的 delta 满足每一条「没有变化」的断言。这正是
+    // maskLiterals/#5637 的形状：仪器瞎了与「查过、没问题」同色。
+    const r = carryForwardStickyGate(staleFail(), HEAD, {
+      delta: delta([]),
+      unaffected: ALWAYS,
+    });
+    expect(r.carried).toBe(false);
+    if (!r.carried) expect(r.why).toMatch(/EMPTY/);
+  });
+
+  it("★ REJECT：不是「陈旧」的失败一律不可搬运（缺席 / FAIL / 读不懂）", () => {
+    const missing = requireStickyGate("1", HEAD, MARKER_PREFIX, "e2e-gate", HINT, () => ({
+      code: 0,
+      out: "",
+      ms: 0,
+    })) as Extract<ReturnType<typeof requireStickyGate>, { ok: false }>;
+    expect(missing.stale).toBeUndefined();
+    expect(
+      carryForwardStickyGate(missing, HEAD, { delta: delta(["a"]), unaffected: ALWAYS }),
+    ).toMatchObject({ carried: false });
+  });
+
+  it("★ REJECT：陈旧但判决不是 PASS ⇒ 不可搬运（NA/BLOCKED 不能洗成答案）", () => {
+    for (const result of ["NA", "BLOCKED", "FAIL"]) {
+      const g = staleFail(result);
+      // FAIL/BLOCKED 在 result 检查处就失败了，根本不带 stale；NA 带。两条路都不许搬。
+      const r = carryForwardStickyGate(g, HEAD, { delta: delta(["a"]), unaffected: ALWAYS });
+      expect(r.carried).toBe(false);
+    }
+  });
+
+  it("★ 正控：这四种拒绝理由互不相同 —— 否则「为什么没搬」不可诊断", () => {
+    const whys = [
+      carryForwardStickyGate(staleFail(), HEAD, { delta: delta([]), unaffected: ALWAYS }),
+      carryForwardStickyGate(staleFail(), HEAD, {
+        delta: () => ({ ok: false, reason: "boom" }),
+        unaffected: ALWAYS,
+      }),
+      carryForwardStickyGate(staleFail(), HEAD, { delta: delta(["a"]), unaffected: NEVER }),
+      carryForwardStickyGate(staleFail("NA"), HEAD, { delta: delta(["a"]), unaffected: ALWAYS }),
+    ].map((r) => (r.carried ? "carried" : r.why));
+    expect(new Set(whys).size).toBe(4);
   });
 });

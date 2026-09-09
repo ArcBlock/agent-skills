@@ -334,6 +334,49 @@ type Runner = (cmd: string) => { code: number; out: string; ms: number };
  * Gate 6 的完整 sticky 检查：sha/result=PASS（不收 NA）+ heading 引擎已注册
  * 且与 coder 跨引擎。GitHub login 只作审计，不是独立性证明。
  */
+/**
+ * 闸失败时**该不该重跑 reviewer** —— 从既有 sticky 的实际状态推出来，不是套话。
+ *
+ * 这道门以前对每一种失败都打印同一句 `Re-run: <命令>`，包括这两种它**帮不上忙**的：
+ *
+ * - `result=FAIL` 是 reviewer 报了真实 finding。**重跑不会改变它**（代码没变，
+ *   下一轮读的还是同一份 diff）。而提示字面上就是「再跑一次」，于是 agent 照做。
+ * - `round >= ROUND_CAP` 且未收敛，语义是 `escalate` —— 交给人。再跑一轮只会把
+ *   round 推到 4、5、6，判决**恒为 BLOCKED**（`reviewResultForRound`）。
+ *
+ * 「该重跑」（sha 陈旧、没有 sticky）与「重跑没有用」在同一句提示上同色，是
+ * arc#6255 那一小时三轮的直接原因。返回 `undefined` 表示这次失败确实该重跑。
+ *
+ * ## 触顶那一条必须同时看 `result`
+ *
+ * `round >= ROUND_CAP` **不等于**「未收敛」。第 3 轮完全可以是 `PASS`（收敛了），
+ * 之后有人推了一个新 commit —— 这时闸失败的原因是 **sha 陈旧**，正确动作恰恰是
+ * **对新 commit 重跑**。只看轮次就会打印「到顶了，停止重跑，交给人」，把一次正常的
+ * 增量复审误导成升级。这与本函数要根除的病是同一个：**在一个还没确定它走没走到的
+ * 分支上给结论**。所以触顶提示只在判决**不是** PASS 时给。
+ */
+export function rerunDiscipline(body: string | undefined): string | undefined {
+  if (!body) return undefined;
+  const result = /^<!-- local-review [^>]*result=([A-Z]+)/m.exec(body)?.[1];
+  const round = parseReviewState(body)?.round;
+  const lines: string[] = [];
+  if (result === "FAIL") {
+    lines.push(
+      "⚠ 上一份 review 的判决是 FAIL —— 那是 reviewer 报了真实 finding。**重跑不会改变它**：" +
+        "先修掉 findings（或在 PR 上回复 REJECT 并说明理由），改完再跑。",
+    );
+  }
+  // `result !== "PASS"` 而不是 `result === "BLOCKED"`：读不到 result（marker 漂了）
+  // 时也不该假定它收敛过 —— 那是「不知道」，按未收敛处理才是 fail-closed 的一侧。
+  if (typeof round === "number" && round >= ROUND_CAP && result !== "PASS") {
+    lines.push(
+      `⚠ 已经跑到第 ${round} 轮（上限 ${ROUND_CAP}）且未收敛 —— 这是 escalate，不是「再跑一轮」。` +
+        "停止重跑，把账本交给人：到顶仍未收敛时判决恒为 BLOCKED，第 4 轮不会变绿。",
+    );
+  }
+  return lines.length ? lines.join("\n") : undefined;
+}
+
 export function requireLocalReviewSticky(
   pr: string,
   prHead: string,
@@ -366,7 +409,10 @@ export function requireLocalReviewSticky(
     wrap,
     { accept: ["PASS"] },
   );
-  if (!gate.ok) return gate;
+  if (!gate.ok) {
+    const discipline = rerunDiscipline(captured?.body);
+    return discipline ? { ...gate, detail: `${gate.detail ?? ""}\n${discipline}`.trim() } : gate;
+  }
   return attestLocalReview({
     body: captured?.body ?? "",
     author: captured?.user?.login,
@@ -391,8 +437,15 @@ export function requireLocalReviewSticky(
  * 的包裹。缺 `— path:line` 整段、或根本不是 `- [Pn]` 开头的行,照旧认不出 ——
  * 那条 reject 臂是本次放宽的正控,没有它,一个「什么都算一条」的正则会同样让
  * accept 臂变绿。
+ *
+ * arc#6199 —— 上一次放宽得**不够宽**。它接受 `` `path:line` ``(反引号包住整个位置),
+ * 却接不住 `` `path`:line ``(反引号在冒号**之前**就闭合,只包路径)。后者同样是
+ * markdown 里最自然的写法之一——路径是代码,行号不是——而 `[^\s`]+?` 这个字符类跨不过
+ * 反引号,于是 `` ` `` 之后遇到的不是 `:`,整条失配。实盘代价:PR #6112 上一份 2419 bytes、
+ * nonce 独占末行、含**两条经人工核实为真的 P2** 的报告,被渲染成 `0 条 · 判决 BLOCKED`。
+ * 所以路径两侧各允许一个可选反引号,而不是只允许包住整体的那一对。
  */
-const FINDING_RE = /^-\s*\[(P\d)\]\s*(.+?)\s+—\s+`?([^\s`]+?):(\d+(?:-\d+)?)`?(\s.*)?$/;
+const FINDING_RE = /^-\s*\[(P\d)\]\s*(.+?)\s+—\s+`?([^\s`]+?)`?:(\d+(?:-\d+)?)`?(\s.*)?$/;
 const SECTION = "Full review comments:";
 
 /** 单条 finding 正文的上限。超出要**说出来**，不能悄悄截。 */
@@ -1061,28 +1114,56 @@ export interface CoderEngineClaim {
  *    别处来的 PR 它不知道，**如实说 claimed，不假装 attested**。
  */
 /**
- * 这道跨引擎 review 闸**适不适用**于这条 PR —— 抽成纯函数，因为它的两个输入
- * 强度完全不同，而合成它们的那行逻辑以前埋在 `merge-gate.ts` 的主流程里、测不到。
+ * 这道跨引擎 review 闸**适不适用**于这条 PR —— 抽成纯函数，因为它的输入强度完全
+ * 不同，而合成它们的那行逻辑以前埋在 `merge-gate.ts` 的主流程里、测不到。
  *
  * - `authored` 读的是 **PR 正文**的身份行 —— 被审方自己写的，一条
  *   `gh pr edit --body` 就能删。
  * - `claim.source === "run-record"` 读的是**工厂写的 run 记录** —— 被审方碰不到。
+ * - `factoryVisible` 是**这个进程能不能看见工厂 run 记录**（arc 侧
+ *   `resolveStateDirs().length > 0`）。它不判定任何 PR，只区分下面那两种「不适用」。
  *
- * #5700 用 run 记录拦住了「篡改成另一个引擎」，却漏了更简单的一手：**把身份行整行
- * 删掉**。那时 `authored.required` 是 false，整道闸直接不适用 ——
- * **「不是 agent 写的」与「是 agent 写的但把证据删了」在那个布尔上同色。**
- * （#5697 自己的 cross-engine review 抓到的 P1。）
+ *   来源是**进程身份，不是机器配置**：工厂 spawn 一个 code agent 时由
+ *   `code-agents` 的 `childEnv()` 注入 `ARC_CODE_AGENT_STATE_DIR`，并对嵌套的
+ *   非工厂进程主动删除它。所以「看得见」≡「我是工厂派出的那个 agent」。
+ *   在开发机上手跑（`land` / 本机 `epic-conductor`）自然看不见——**那是设计，
+ *   不是配置缺失**。别照着开发机上的一次 `resolveStateDirs() == []` 就推断这道门坏了。
  *
- * 所以适用范围取**两者的并**：正文说是，**或者** run 记录说是。`why` 让报告能说清
- * 是哪一边认定的 —— 两种「适用」不该看起来一样。
+ * ## 适用范围 = 只有工厂派出去的活（收窄自「正文 ∪ run 记录」）
+ *
+ * 跨引擎 review 买的是**没有人在看的时候的外部视角**。attended 的路径（`land` /
+ * 本机 `epic-conductor`）人就在旁边，那份视角人已经提供了；而在那里强制它，
+ * 代价是实测过的：merge-gate 缺 sticky → 失败提示直接给出 reviewer 命令 → 跑一轮
+ * （整个 diff 交给另一个引擎）→ 报 finding → fixer 提交 → **push 让 sticky 的 sha
+ * 陈旧** → 提示又是同一条命令 → 再跑。**每一次修复都作废发现它的那份证据**，
+ * 循环没有自然终点。arc#6255 实测：02:32→03:32 一小时三轮，一条 finding 都没关掉，
+ * 判决 BLOCKED，53 秒后照样合并 —— 成本全付，保证为零。
+ *
+ * 所以范围键取**不可伪造的那一侧**：工厂的 run 记录。**不取 `skill:` 字段**——
+ * 那和身份行一样住在 PR 正文里，等于把闸的适用范围交给被审方决定。
+ *
+ * ## 收窄之后必须补的洞：「不是工厂的」不能和「看不见工厂」同色
+ *
+ * run 记录靠 `ARC_WORKER_HOMES` / `ARC_CODE_AGENT_STATE_DIR` 才找得到。这两个 env
+ * 没设时 `claim.source` 永远不是 `run-record`，于是**整道闸对所有人静默 N/A**——
+ * 「这条 PR 不归它管」与「这台机器根本没在数」读起来一模一样，正是本仓库度量纪律
+ * 反对的那件事。`factory-not-visible` 让它们分色；调用方据此把两种 N/A 印成不同的话。
+ *
+ * 判定顺序是刻意的：人写的 PR 在**任何** runner 上都读 `not-agent-authored`，
+ * 不会因为这台机器看不见工厂就被标成「工厂不可见」——那会让真正的盲区淹没在噪声里。
  */
 export function reviewGateApplies(
   authored: { required: boolean },
   claim: CoderEngineClaim,
-): { required: boolean; why: "run-record" | "pr-body" | "not-agent-authored" } {
+  factoryVisible: boolean,
+): {
+  required: boolean;
+  why: "run-record" | "not-agent-authored" | "not-factory" | "factory-not-visible";
+} {
   if (claim.source === "run-record") return { required: true, why: "run-record" };
-  if (authored.required) return { required: true, why: "pr-body" };
-  return { required: false, why: "not-agent-authored" };
+  if (!authored.required) return { required: false, why: "not-agent-authored" };
+  if (!factoryVisible) return { required: false, why: "factory-not-visible" };
+  return { required: false, why: "not-factory" };
 }
 
 export function coderEngineClaim(
