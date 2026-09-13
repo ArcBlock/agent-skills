@@ -1,0 +1,11 @@
+{
+  "name": "arc",
+  "version": "0.1.1",
+  "description": "ARC agent plugin for Claude Code, Codex CLI, and Grok Build: AFS, blocklets, local MCP (stdio), and idempotent CLI bootstrap (ensure-arc.sh). Install from ArcBlock/agent-skills; v1 is local-only — remote MCP is #6432.",
+  "author": {
+    "name": "ArcBlock Team",
+    "email": "engineering@arcblock.io"
+  },
+  "license": "MIT",
+  "keywords": ["arc", "afs", "blocklet", "mcp", "agent"]
+}

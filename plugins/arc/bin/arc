@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Thin PATH shim shipped with the arc plugin (arc#6443).
+# Ensures the real CLI is installed, then execs it. Uses CLAUDE_PLUGIN_ROOT when
+# set (Claude Code); otherwise derives the plugin root from this file's location.
+set -euo pipefail
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$HERE/.." && pwd)}"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
+"$PLUGIN_ROOT/scripts/ensure-arc.sh"
+INSTALL_DIR="${ARC_INSTALL_DIR:-${HOME:-/tmp}/.arc}"
+if [ -x "${INSTALL_DIR}/current/arc" ]; then
+  exec "${INSTALL_DIR}/current/arc" "$@"
+fi
+# Fall back to any non-self arc on PATH (avoid recursion into this shim).
+if command -v arc >/dev/null 2>&1; then
+  REAL=""
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    case "$candidate" in
+      "$HERE/arc") continue ;;
+      *) REAL="$candidate"; break ;;
+    esac
+  done <<PATHS
+$(type -a -p arc 2>/dev/null || true)
+PATHS
+  if [ -n "$REAL" ] && [ -x "$REAL" ]; then
+    exec "$REAL" "$@"
+  fi
+fi
+printf '✗ arc plugin bin shim: ensure-arc finished but no arc binary found\n' >&2
+exit 1

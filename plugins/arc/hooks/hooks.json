@@ -1,0 +1,27 @@
+{
+  "description": "Idempotent arc CLI bootstrap on Setup / SessionStart (arc#6443). Uses ${CLAUDE_PLUGIN_ROOT}; --soft so a failed install degrades (skills remain usable) instead of crashing the session.",
+  "hooks": {
+    "Setup": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-arc.sh --soft",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-arc.sh --soft",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
