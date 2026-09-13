@@ -1,0 +1,6 @@
+{
+  "arc-local": {
+    "command": "arc",
+    "args": ["mcp"]
+  }
+}

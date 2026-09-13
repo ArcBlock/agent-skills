@@ -182,6 +182,23 @@
         "skill-routing",
         "content-workflow"
       ]
+    },
+    {
+      "name": "arc",
+      "description": "ARC agent plugin for Claude Code, Codex CLI, and Grok Build: AFS, blocklets, local MCP (stdio), and idempotent CLI bootstrap (ensure-arc.sh). Install from ArcBlock/agent-skills; v1 is local-only — remote MCP is #6432.",
+      "version": "0.1.1",
+      "author": {
+        "name": "ArcBlock Team"
+      },
+      "source": "./plugins/arc",
+      "category": "developer-tools",
+      "keywords": [
+        "arc",
+        "afs",
+        "blocklet",
+        "mcp",
+        "agent"
+      ]
     }
   ]
 }
