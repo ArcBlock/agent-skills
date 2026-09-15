@@ -13,6 +13,19 @@
         "authentication": "ON_USE"
       },
       "category": "Engineering"
+    },
+    {
+      "name": "arc",
+      "description": "ARC agent plugin for Claude Code, Codex CLI, and Grok Build: AFS, blocklets, local MCP (stdio), and idempotent CLI bootstrap (ensure-arc.sh). Install from ArcBlock/agent-skills; v1 is local-only - remote MCP is #6432.",
+      "source": {
+        "source": "local",
+        "path": "./plugins/arc"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Engineering"
     }
   ]
 }
