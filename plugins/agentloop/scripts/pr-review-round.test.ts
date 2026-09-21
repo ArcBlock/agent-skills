@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { prReviewRound, roundsFromComments } from "./pr-review-round.ts";
 
 const trace = (o: Record<string, unknown>) => `<!-- sweep-trace: ${JSON.stringify(o)} -->`;
@@ -93,5 +97,239 @@ describe("prReviewRound —— 「读不到」必须与「第 0 轮」分色", (
 
   it("★ 空评论列表 ⇒ ok:true round=0（这是真的第一轮）", () => {
     expect(prReviewRound("1", ok(""))).toMatchObject({ ok: true, round: 0, traces: 0 });
+  });
+});
+
+/**
+ * #6334 — the 14 injected-runner tests above were all green while the live `gh`
+ * command emitted raw multiline bodies, so every PR with a real comment
+ * fail-closed. Coverage of the transport itself lives here.
+ *
+ * Fixtures are a 2026-09-18 recording of ArcBlock/synthetic multiline PR (the issue's
+ * own repro):
+ *   gh api --paginate repos/ArcBlock/Discoverful/issues/34/comments --jq '.[].body | @json'
+ *   gh api --paginate repos/ArcBlock/Discoverful/issues/34/comments --jq '.[].body'
+ * After the token fix that PR returns {ok:true, round:1, traces:1, malformed:0}.
+ *
+ * `gh --jq` is raw-output (like `jq -r`): without `@json`, a body that contains
+ * newlines is several lines, and the first line is not JSON.parse-able.
+ */
+const SCRIPT = fileURLToPath(new URL("./pr-review-round.ts", import.meta.url));
+const FIXTURE_DIR = fileURLToPath(new URL("./fixtures/pr-review-round", import.meta.url));
+const AT_JSON_FIXTURE = join(FIXTURE_DIR, "synthetic-multiline.body-at-json.txt");
+const RAW_FIXTURE = join(FIXTURE_DIR, "synthetic-multiline.body-raw.txt");
+
+function jqFilterIn(src: string): string {
+  const m = src.match(/--jq\s+'([^']+)'/);
+  if (!m?.[1]) throw new Error("pr-review-round.ts: no --jq '<filter>' on the gh command");
+  return m[1];
+}
+
+function loadAtJsonLines(text: string): string[] {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    throw new Error("enumerated ZERO gh @json lines — refusing to report green");
+  }
+  return lines;
+}
+
+function decodeBodies(atJson: string): string[] {
+  return loadAtJsonLines(atJson).map((l) => {
+    const v: unknown = JSON.parse(l);
+    if (typeof v !== "string") throw new Error("fixture line is not a JSON string");
+    return v;
+  });
+}
+
+/** Fake `gh` that mimics `gh --jq`: `@json`/`tojson` → one JSON string per line; else raw. */
+function withFakeGh(opts: { atJson?: string; raw?: string; ghExit?: number }): {
+  bin: string;
+  dir: string;
+  cleanup: () => void;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "pr-review-round-gh-"));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const at = join(dir, "at-json.txt");
+  const raw = join(dir, "raw.txt");
+  writeFileSync(at, opts.atJson ?? "");
+  writeFileSync(raw, opts.raw ?? "");
+  const ghExit = opts.ghExit ?? 0;
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env bash
+AT=${JSON.stringify(at)}
+RAW=${JSON.stringify(raw)}
+if [[ ${ghExit} -ne 0 ]]; then
+  echo "gh: simulated failure" >&2
+  exit ${ghExit}
+fi
+jq_filter=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--jq" ]]; then
+    jq_filter="\${2-}"
+    shift 2
+    continue
+  fi
+  shift
+done
+if [[ "$jq_filter" == *@json* || "$jq_filter" == *tojson* ]]; then
+  cat "$AT"
+else
+  cat "$RAW"
+fi
+`,
+    { mode: 0o755 },
+  );
+  return { bin, dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function runCli(
+  fake: ReturnType<typeof withFakeGh>,
+  args: string[],
+  script = SCRIPT,
+): { code: number; stdout: string; stderr: string } {
+  const p = Bun.spawnSync(["bun", script, ...args], {
+    cwd: fake.dir,
+    env: { ...process.env, PATH: `${fake.bin}:${process.env.PATH}`, GH_NO_COLOR: "1" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return {
+    code: p.exitCode ?? 1,
+    stdout: p.stdout.toString(),
+    stderr: p.stderr.toString(),
+  };
+}
+
+describe("pr-review-round 真实传输层 (#6334)", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const atJson = readFileSync(AT_JSON_FIXTURE, "utf8");
+  const raw = readFileSync(RAW_FIXTURE, "utf8");
+
+  it("PC：录制 fixture 看得到多行 body + 一条真实 sweep-trace（空枚举不许绿）", () => {
+    const bodies = decodeBodies(atJson);
+    expect(bodies).toHaveLength(3);
+    expect(bodies.some((b) => b.includes("\n"))).toBe(true);
+    expect(bodies.filter((b) => /sweep-trace/.test(b))).toHaveLength(1);
+    expect(roundsFromComments(bodies)).toEqual({ round: 1, traces: 1, malformed: 0 });
+    expect(raw.split("\n").length).toBeGreaterThan(bodies.length);
+    expect(raw.trimStart().startsWith('"')).toBe(false);
+  });
+
+  it("★★ 命令契约：gh --jq 必须 | @json（或 tojson）—— 否则多行评论不是一行 JSON", () => {
+    let cmd = "";
+    prReviewRound("34", (c) => {
+      cmd = c;
+      return { code: 0, out: "" };
+    });
+    expect(cmd).toContain("--paginate");
+    expect(cmd).toMatch(/issues\/34\/comments/);
+    expect(jqFilterIn(cmd)).toMatch(/@json|tojson/);
+    expect(jqFilterIn(src)).toMatch(/@json|tojson/);
+  });
+
+  it("★ ACCEPT 真实传输：录制的 gh @json 输出读出 round:1（synthetic multiline PR）", () => {
+    const r = prReviewRound("34", () => ({ code: 0, out: atJson }));
+    expect(r).toEqual({ ok: true, round: 1, traces: 1, malformed: 0 });
+  });
+
+  it("★ REJECT 真实传输：录制的 gh 裸 body 输出（无 @json）fail-closed", () => {
+    const r = prReviewRound("34", () => ({ code: 0, out: raw }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/not a JSON string/);
+  });
+
+  it("★★ ACCEPT CLI：假 gh 按真实 --jq 语义吐 fixture，有 sweep-trace 的 PR 返回 round:1", () => {
+    const fake = withFakeGh({ atJson, raw });
+    try {
+      const res = runCli(fake, ["--pr", "34", "--json"]);
+      expect(res.code).toBe(0);
+      expect(JSON.parse(res.stdout)).toEqual({
+        ok: true,
+        round: 1,
+        traces: 1,
+        malformed: 0,
+      });
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  it("★ CLI：0 条 trace（仍是跨行评论）→ exit 0 round:0，不是读失败", () => {
+    const bodies = decodeBodies(atJson).filter((b) => !/sweep-trace/.test(b));
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(bodies.some((b) => b.includes("\n"))).toBe(true);
+    const zeroAt = `${bodies.map((b) => JSON.stringify(b)).join("\n")}\n`;
+    const zeroRaw = `${bodies.join("\n")}\n`;
+    const fake = withFakeGh({ atJson: zeroAt, raw: zeroRaw });
+    try {
+      const res = runCli(fake, ["--pr", "35", "--json"]);
+      expect(res.code).toBe(0);
+      expect(JSON.parse(res.stdout)).toMatchObject({ ok: true, round: 0, traces: 0 });
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  it("★ CLI：gh 读失败 → 非零退出（「读不到」不是 round 0）", () => {
+    const fake = withFakeGh({ atJson, raw, ghExit: 1 });
+    try {
+      const res = runCli(fake, ["--pr", "34", "--json"]);
+      expect(res.code).not.toBe(0);
+      expect(`${res.stdout}${res.stderr}`).toMatch(/cannot read/);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  it("★★ 真实 jq：源里的 --jq 滤镜对 REST comments 页跑 jq -r（= gh --jq）后能 parse", () => {
+    const filter = jqFilterIn(src);
+    expect(filter).toMatch(/@json|tojson/);
+    const page = JSON.stringify(decodeBodies(atJson).map((body, i) => ({ id: i + 1, body })));
+    const proc = Bun.spawnSync(["jq", "-r", filter], {
+      stdin: Buffer.from(page),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.exitCode).toBe(0);
+    const r = prReviewRound("34", () => ({ code: 0, out: proc.stdout.toString() }));
+    expect(r).toEqual({ ok: true, round: 1, traces: 1, malformed: 0 });
+  });
+
+  it("弄坏复现：拿掉 @json → 有跨行评论的 PR 非 0", () => {
+    expect(jqFilterIn(src)).toMatch(/@json|tojson/);
+    const brokenSrc = src.replace(/\s*\|\s*@json/g, "").replace(/\s*\|\s*tojson/g, "");
+    expect(jqFilterIn(brokenSrc)).not.toMatch(/@json|tojson/);
+
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-round-mut-"));
+    mkdirSync(join(dir, "lib"));
+    mkdirSync(join(dir, "scripts"));
+    writeFileSync(
+      join(dir, "lib", "report.ts"),
+      `import { spawnSync } from "node:child_process";
+export function run(cmd: string) {
+  const r = spawnSync("bash", ["-c", cmd], { encoding: "utf8", env: process.env });
+  return { code: r.status ?? 1, out: \`\${r.stdout ?? ""}\${r.stderr ?? ""}\` };
+}
+`,
+    );
+    writeFileSync(join(dir, "scripts", "pr-review-round.ts"), brokenSrc);
+    const fake = withFakeGh({ atJson, raw });
+    try {
+      const res = runCli(
+        fake,
+        ["--pr", "34", "--json"],
+        join(dir, "scripts", "pr-review-round.ts"),
+      );
+      expect(res.code).not.toBe(0);
+      expect(`${res.stdout}${res.stderr}`).toMatch(/not a JSON string|cannot read/);
+    } finally {
+      fake.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

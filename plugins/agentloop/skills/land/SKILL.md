@@ -215,7 +215,11 @@ gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --b
 - 仓库的硬性纪律：**严格 TDD**（先写失败测试）、**accept-path 铁律**
   （只测「坏输入被拒」等于没测——一个全拒的实现满足所有 reject 断言）、
   **变异验证**（把实现改坏，确认对应测试真的变红，再恢复）
-- 分支名含 `issue-<N>`（便于 PR↔issue 关联），PR 正文 `Fixes #<N>` + 身份行
+- 分支名含 `issue-<N>`（便于 PR↔issue 关联），PR 正文 `Fixes #<N>` + 身份行。
+  身份行由 `agent_identity_script` 生成。**往已有 PR 正文上写时必须带
+  `--prior-engines <现有 engine: 集合>`**，后来的引擎追加进集合而不是覆盖
+  （arc#6184：覆盖会让另一个 coder 引擎的 reviewer 拿到假 PASS）。新开的 PR 没有
+  先前集合，不传该旗。评论身份是本 session，不要把 coder 集合写进评论行。
 - push 前跑 `verification_entry`，全绿再 push；**永远不要 `--no-verify`**
 - 开 PR 后立刻 `<verification_entry> --comment <PR#>`——**「跑」和「贴」是焊在一起的**，
   不能只跑不贴，也不能用 `tsc` / 单项 build 命令代替

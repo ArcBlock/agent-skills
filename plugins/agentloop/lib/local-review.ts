@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { makeMarker } from "./comment.ts";
 import { type GateFail, type GatePass, requireStickyGate } from "./gate.ts";
 import { stripAnsi } from "./report.ts";
@@ -10,8 +12,10 @@ import { stripAnsi } from "./report.ts";
  * install，而 review 是每个 PR 都要发生的事。这就是 coder 与 reviewer 同 worker 的
  * 全部理由——跨 worker 就等于跨树。只读沙箱不是可选项：能写就可能改坏被审的代码。
  *
- * ## 不变量：`reviewer.engine ≠ coder.engine`
+ * ## 不变量：`reviewer.engine ∉ coderEngines`
  *
+ * coder 引擎是**集合**（arc#6184），不是每条 PR 一个值。一条分支被两个引擎先后写过
+ * 时，独立性是 reviewer 不在这个集合里，不是「跟正文里那一个字段不等」。
  * 唯一的硬约束是**引擎类型不同**，不是「哪个引擎当 reviewer」。codex 当 reviewer 是
  * 当前的测试配置，所以引擎走**注册表**——认不出的引擎抛错，绝不「认不出就当 codex」。
  *
@@ -29,9 +33,166 @@ export interface ReviewFinding {
   body: string;
 }
 
-export type ParseResult =
-  | { ok: true; findings: ReviewFinding[] }
-  | { ok: false; reason: "unparseable" };
+/**
+ * 解析失败的**颜色**。BLOCKED 是对的；把四种失败压成一句「无法解析 · 0 条」是错的
+ * （arc#6165 / #6172）。
+ *
+ * - `empty`            模型原文一个字都没有
+ * - `missing-section`  没有 `Full review comments:` 小节（codex 干净时常这样）
+ * - `unrecognised`     有小节，但 finding 行认不出
+ * - `incomplete`       结束标记（nonce）缺失 —— 输出可能被截断，但中间也许有真 finding
+ */
+export type UnparseableKind = "empty" | "missing-section" | "unrecognised" | "incomplete";
+
+export type ParseFailure = {
+  ok: false;
+  reason: "unparseable";
+  kind: UnparseableKind;
+  /** 即使总体失败，已经认得出的 finding 也要带上 —— 绞死它们就是 #6165。 */
+  findings: ReviewFinding[];
+  excerpt: string;
+};
+
+export type ParseResult = { ok: true; findings: ReviewFinding[] } | ParseFailure;
+
+export const REVIEW_EXCERPT_CAP = 1200;
+
+/** 截断必须说出来。空串保持空，不拿占位符冒充原文。 */
+export function reviewExcerpt(text: string, cap = REVIEW_EXCERPT_CAP): string {
+  const t = text.trim();
+  if (!t) return "";
+  if (t.length <= cap) return t;
+  return `${t.slice(0, cap)}\n… （原文 ${t.length} 字节，已截断）`;
+}
+
+function unparseable(
+  kind: UnparseableKind,
+  raw: string,
+  findings: readonly ReviewFinding[] = [],
+): ParseFailure {
+  return {
+    ok: false,
+    reason: "unparseable",
+    kind,
+    findings: [...findings],
+    excerpt: reviewExcerpt(raw),
+  };
+}
+
+export interface CollectedReviewOutput {
+  /** 交给解析器的那一份 —— 模型原文，不是事件流。 */
+  text: string;
+  stdout: string;
+  stderr: string;
+  outFileText: string;
+  source: "outFile" | "stdout" | "stderr" | "empty";
+}
+
+/**
+ * 从引擎的三条管子里挑模型原文。
+ *
+ * grok-build / claude 声明 `outputMode: "stdout"`，但实测 grok 有时把答案打到
+ * stderr，stdout 是空的（#6172：24 行日志、无模型输出）。只读声明的那条 fd，
+ * 「什么都没说」与「说了但打到另一条管子」同色。
+ *
+ * 优先级：file 模式 outFile → stdout → stderr；stdout 模式 stdout → stderr。
+ * **非空的首选赢**，避免把事件流/工具日志拼进解析器。
+ */
+export function collectReviewOutput(opts: {
+  outputMode: "file" | "stdout";
+  stdout: string;
+  stderr: string;
+  outFileText?: string;
+}): CollectedReviewOutput {
+  const stdout = opts.stdout ?? "";
+  const stderr = opts.stderr ?? "";
+  const outFileText = opts.outFileText ?? "";
+  const pick = (): { text: string; source: CollectedReviewOutput["source"] } => {
+    if (opts.outputMode === "file" && outFileText.trim()) {
+      return { text: outFileText, source: "outFile" };
+    }
+    if (stdout.trim()) return { text: stdout, source: "stdout" };
+    if (stderr.trim()) return { text: stderr, source: "stderr" };
+    return { text: "", source: "empty" };
+  };
+  const { text, source } = pick();
+  return { text, stdout, stderr, outFileText, source };
+}
+
+export function formatReviewRawArtifact(
+  collected: CollectedReviewOutput,
+  meta: { engine: string },
+): string {
+  const orEmpty = (s: string) => (s.trim() ? s : "(empty)");
+  return [
+    `# local-review raw · ${meta.engine}`,
+    `engine: ${meta.engine}`,
+    `source: ${collected.source}`,
+    `bytes: ${Buffer.byteLength(collected.text, "utf8")}`,
+    "",
+    "## model",
+    orEmpty(collected.text),
+    "",
+    "## stdout",
+    orEmpty(collected.stdout),
+    "",
+    "## stderr",
+    orEmpty(collected.stderr),
+    "",
+    "## outFile",
+    orEmpty(collected.outFileText),
+    "",
+  ].join("\n");
+}
+
+export interface ReviewRawPersist {
+  path: string;
+  bytes: number;
+  /** 模型原文非空 **且** 写盘成功。空文件 / 只有头 ≠ 已保留（#6172 铁律）。 */
+  preserved: boolean;
+  error?: string;
+}
+
+/**
+ * 无条件落盘。`preserved` 看的是**模型原文**，不是文件是否被创建。
+ */
+export function persistReviewRaw(opts: {
+  destPath: string;
+  modelText: string;
+  artifact: string;
+  mkdir?: (dir: string) => void;
+  writeFile?: (path: string, data: string) => void;
+}): ReviewRawPersist {
+  const bytes = Buffer.byteLength(opts.modelText, "utf8");
+  const hasModel = opts.modelText.trim().length > 0;
+  try {
+    const mkdir = opts.mkdir ?? ((dir: string) => mkdirSync(dir, { recursive: true }));
+    const write = opts.writeFile ?? ((p: string, d: string) => writeFileSync(p, d));
+    mkdir(dirname(opts.destPath));
+    write(opts.destPath, opts.artifact);
+    return { path: opts.destPath, bytes, preserved: hasModel };
+  } catch (e) {
+    return {
+      path: opts.destPath,
+      bytes,
+      preserved: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+export function parseKindLabel(kind: UnparseableKind): string {
+  switch (kind) {
+    case "empty":
+      return "原文为空";
+    case "missing-section":
+      return "没有 `Full review comments:` 小节";
+    case "unrecognised":
+      return "有小节但 finding 认不出";
+    case "incomplete":
+      return "输出不完整（结束标记缺失）";
+  }
+}
 
 /**
  * 报告契约 —— **所有引擎共用同一份**。
@@ -70,6 +231,44 @@ export const REPORT_CONTRACT = [
 ].join("\n");
 
 /**
+ * 报告契约的 JSON 编码。给会兑现 `--output-schema` 的引擎（codex `exec`）。
+ *
+ * openai/codex#38545：`exec review` 接受该 flag 但忽略它，退出 0 并写出散文——
+ * 那正是平凡 diff 上 #6187 被随机 BLOCKED 的形状。schema 必须走会强制兑现的
+ * `codex exec`，不能靠模型在自由文本末尾自觉贴哨兵。
+ *
+ * 空 `findings` 就是结构化的 `(none)`。nonce 字段就是结构化的结束证明。
+ * 两者都缺的散文，解析器仍然 unparseable（#6123 不许退回去）。
+ *
+ * OpenAI structured outputs 要求 strict：每个 object 都 `additionalProperties: false`，
+ * `required` 列出全部键。
+ */
+export const REVIEW_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "findings", "nonce"],
+  properties: {
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["severity", "title", "file", "line", "body"],
+        properties: {
+          severity: { type: "string", enum: ["P1", "P2", "P3"] },
+          title: { type: "string" },
+          file: { type: "string" },
+          line: { type: "string" },
+          body: { type: "string" },
+        },
+      },
+    },
+    nonce: { type: "string" },
+  },
+} as const;
+
+/**
  * 一个引擎怎么被**无头只读**地调起来。
  *
  * **这里只有契约，没有引擎表。** 引擎的身份（id / bin / fallbackBins）是消费仓库
@@ -88,7 +287,14 @@ export interface ReviewerEngine {
   bin: string;
   fallbackBins?: string[];
   /** 不含 bin 的参数。必须是只读姿态。prompt 由调用方给——引擎不知道报告长什么样。 */
-  args(opts: { prompt: string; base: string; title?: string; outFile?: string }): string[];
+  args(opts: {
+    prompt: string;
+    base: string;
+    title?: string;
+    outFile?: string;
+    /** 报告契约的 JSON Schema 文件。引擎不支持则忽略。 */
+    schemaFile?: string;
+  }): string[];
   /** `file` = 写进 `outFile`；`stdout` = 直接打到标准输出。 */
   outputMode: "file" | "stdout";
 }
@@ -148,7 +354,7 @@ export function resolveReviewerBin(
 
 export function reviewerArgv(
   engine: string,
-  opts: { prompt: string; base: string; title?: string; outFile?: string },
+  opts: { prompt: string; base: string; title?: string; outFile?: string; schemaFile?: string },
   which?: (cmd: string) => string | null,
 ): string[] {
   const e = assertReviewerEngine(engine);
@@ -182,6 +388,47 @@ function normalizeEngine(v: string | undefined): string {
   return ABSENT_ENGINE.has(t) ? "" : t;
 }
 
+/**
+ * 把身份行 / run 记录里的 coder 引擎收成集合（arc#6184）。
+ *
+ * `engine:grok-build+claude` 与多个 `engine:` 字段是同一种意思。`/<model>` 只属于
+ * 单引擎身份，混写时丢掉 —— 独立性比的是 kind。
+ */
+export function parseEngineSet(v: string | readonly string[] | undefined): string[] {
+  if (v === undefined) return [];
+  const parts = typeof v === "string" ? [v] : [...v];
+  const out: string[] = [];
+  for (const item of parts) {
+    if (!item) continue;
+    for (const token of item.split("+")) {
+      const kind = normalizeEngine(token.split("/")[0]);
+      if (kind && !out.includes(kind)) out.push(kind);
+    }
+  }
+  return out;
+}
+
+/** 追加而不是覆盖。改成 `return n ? [n] : [...prior]` 就是 #6184 的假 PASS。 */
+export function unionCoderEngines(prior: readonly string[], next: string): string[] {
+  const n = normalizeEngine(next.split("/")[0]);
+  if (!n) return [...prior];
+  return prior.includes(n) ? [...prior] : [...prior, n];
+}
+
+/**
+ * 往已有 PR 正文的身份行追加一个 coder 引擎。没有身份行就原样返回——不发明一行。
+ */
+export function appendCoderEngine(prBody: string, nextEngine: string): string {
+  const prior = parseEngineSet(agentAuthored(prBody).coderEngine);
+  const engines = unionCoderEngines(prior, nextEngine);
+  const joined = engines.join("+");
+  if (!joined) return prBody;
+  const identity = /^>\s*🤖\s*AI Agent\b.*$/m.exec(prBody);
+  if (!identity) return prBody;
+  const stripped = identity[0].replace(/(?:\s*·\s*)?engine:[^\s·]+/g, "");
+  return prBody.replace(identity[0], `${stripped} · engine:${joined}`);
+}
+
 function registeredIds(table: ReviewerTable = TABLE): ReadonlySet<string> {
   return new Set(
     Object.keys(table)
@@ -208,16 +455,21 @@ export function canonicalizeEngine(v: string | undefined, table: ReviewerTable =
  * 硬不变量。**「不知道」不等于「独立」**——缺 subjectEngine 时不得放行（#5352：
  * absence is unknown independence, never inferred as cross-engine）。
  *
- * 两侧都先对注册表 canonicalize；任一未注册 → `unknown`，不是 cross-engine。
+ * coder 是集合（arc#6184）：`reviewer ∈ coderEngines` → same-engine；
+ * reviewer 已注册且不在集合里 → cross-engine。未注册 → `unknown`，不是 cross-engine。
  */
 export function crossEngineVerdict(
   reviewerEngine: string | undefined,
-  subjectEngine: string | undefined,
+  subjectEngine: string | readonly string[] | undefined,
 ): { ok: boolean; reason: CrossEngineReason } {
   const a = canonicalizeEngine(reviewerEngine);
-  const b = canonicalizeEngine(subjectEngine);
-  if (!a || !b) return { ok: false, reason: "unknown" };
-  return a === b ? { ok: false, reason: "same-engine" } : { ok: true, reason: "cross-engine" };
+  const subjects = parseEngineSet(subjectEngine)
+    .map((s) => canonicalizeEngine(s))
+    .filter(Boolean);
+  if (!a || subjects.length === 0) return { ok: false, reason: "unknown" };
+  return subjects.includes(a)
+    ? { ok: false, reason: "same-engine" }
+    : { ok: true, reason: "cross-engine" };
 }
 
 /**
@@ -227,14 +479,17 @@ export function crossEngineVerdict(
  * coder 未注册 / 表里没有第二个引擎 → `undefined`（调用方 fail-closed，不猜）。
  */
 export function pickDefaultReviewer(
-  coderEngine: string | undefined,
+  coderEngine: string | readonly string[] | undefined,
   table: ReviewerTable = TABLE,
 ): string | undefined {
-  const coder = canonicalizeEngine(coderEngine, table);
-  if (!coder) return undefined;
+  const coders = parseEngineSet(coderEngine)
+    .map((s) => canonicalizeEngine(s, table))
+    .filter(Boolean);
+  if (coders.length === 0) return undefined;
+  const coderSet = new Set(coders);
   for (const id of Object.keys(table)) {
     const canonical = canonicalizeEngine(id, table);
-    if (canonical && canonical !== coder) return canonical;
+    if (canonical && !coderSet.has(canonical)) return canonical;
   }
   return undefined;
 }
@@ -242,7 +497,7 @@ export function pickDefaultReviewer(
 /** merge-gate 印在失败提示里的重跑命令。必须带 `--engine`，否则默认又撞上 coder。 */
 export function localReviewRerunHint(
   pr: string,
-  coderEngine: string | undefined,
+  coderEngine: string | readonly string[] | undefined,
   table: ReviewerTable = TABLE,
 ): string {
   const picked = pickDefaultReviewer(coderEngine, table);
@@ -329,6 +584,66 @@ export function attestLocalReview(i: LocalReviewAttestation): GatePass | GateFai
 }
 
 type Runner = (cmd: string) => { code: number; out: string; ms: number };
+
+const SHA40_RE = /^[0-9a-f]{40}$/;
+
+export type ReviewHeadGate =
+  | { ok: true; sha: string; prHead: string }
+  | { ok: false; reason: string };
+
+/**
+ * `--pr N` 的审查范围是 **PR N 的 head**，不是调用方 cwd 碰巧在的 HEAD。
+ *
+ * 未强制这条时：从别的 worktree 调用会认真 review 另一份 diff，输出带 nonce、
+ * 格式合法，于是「审过这个 PR」与「审的是别的东西」同色（arc#6195）。
+ * nonce 证明输出没被截断，不证明输入是对的。
+ *
+ * **必须在 spawn 引擎之前调用。** `--post` 不是唯一入口——不带 `--post` 时
+ * 操作者同样会拿到一份看起来完全合法的错 review。读不到 PR head 也停：
+ * 「读不到」不是「就是当前 HEAD」。
+ */
+export function assertCwdIsPrHead(opts: {
+  pr: string;
+  localSha: string;
+  cwd: string;
+  runner: Runner;
+}): ReviewHeadGate {
+  const local = opts.localSha.trim();
+  if (!SHA40_RE.test(local)) {
+    return {
+      ok: false,
+      reason:
+        `✗ 本地 HEAD 不是 40 位 SHA（${local || "(empty)"}）—— cwd 必须是被审的工作树\n` +
+        `  cwd ${opts.cwd}`,
+    };
+  }
+  const fetched = opts.runner(
+    `gh api "repos/{owner}/{repo}/pulls/${opts.pr}" --jq .head.sha 2>/dev/null`,
+  );
+  const prHead = fetched.code === 0 ? fetched.out.trim() : "";
+  if (!SHA40_RE.test(prHead)) {
+    return {
+      ok: false,
+      reason:
+        `✗ 取不到 PR #${opts.pr} 的 head sha（gh 退出 ${fetched.code}）—— 停。\n` +
+        `  「读不到」不是「就是当前 HEAD」：猜错了会审错范围，而判决看起来一切正常。\n` +
+        `  本地 HEAD  ${local}\n` +
+        `  cwd        ${opts.cwd}`,
+    };
+  }
+  if (prHead !== local) {
+    return {
+      ok: false,
+      reason:
+        `✗ 本地 HEAD 不是 PR #${opts.pr} 的 head —— 拒绝审这份 diff。\n` +
+        `  本地 HEAD  ${local}\n` +
+        `  PR head    ${prHead}\n` +
+        `  cwd        ${opts.cwd}\n` +
+        `  请在该 PR 的 worktree 里运行（那棵树的 HEAD 必须是 PR head）。`,
+    };
+  }
+  return { ok: true, sha: local, prHead };
+}
 
 /**
  * Gate 6 的完整 sticky 检查：sha/result=PASS（不收 NA）+ heading 引擎已注册
@@ -485,21 +800,177 @@ export const parseCodexReview = parseReviewReport;
  */
 const CLEAN_SENTINEL = /^\(?\s*none\s*\)?\.?$/i;
 
+type BodyResult =
+  | { ok: true; findings: ReviewFinding[] }
+  | { ok: false; kind: Exclude<UnparseableKind, "incomplete">; findings: ReviewFinding[] };
+
+function parseFindingLine(raw: string, opts: { repoRoot?: string }): ReviewFinding | undefined {
+  const m = FINDING_RE.exec(raw.trimEnd());
+  const [, severity, title, file, line, trailing] = m ?? [];
+  if (!severity || !title || !file || !line) return undefined;
+  return {
+    severity,
+    title: title.trim(),
+    file: repoRelative(file, opts.repoRoot),
+    line,
+    body: (trailing ?? "").trim(),
+  };
+}
+
+function parseReviewBody(
+  text: string,
+  opts: { repoRoot?: string },
+  complete: boolean | undefined,
+): BodyResult {
+  if (!text.trim()) return { ok: false, kind: "empty", findings: [] };
+  const idx = text.indexOf(SECTION);
+  if (idx < 0) {
+    // 没有小节头。**不许因为「找不到 finding」就判干净**。
+    const body = text.split("\n");
+    const orphan = body.filter((l) => /\[P\d\]/.test(l));
+    const salvaged: ReviewFinding[] = [];
+    let cur: ReviewFinding | undefined;
+    let unrecognised = false;
+    for (const raw of body) {
+      const hit = parseFindingLine(raw, opts);
+      if (hit) {
+        cur = hit;
+        salvaged.push(cur);
+        continue;
+      }
+      if (/\[P\d\]/.test(raw)) {
+        unrecognised = true;
+        break;
+      }
+      const t = raw.trim();
+      if (cur && t && !t.startsWith("-") && !t.startsWith("*")) {
+        cur.body = `${cur.body} ${t}`.trim().slice(0, BODY_CAP);
+      }
+    }
+    if (complete) {
+      if (orphan.length === 0) {
+        const sawSentinel = body.some((l) => CLEAN_SENTINEL.test(l.trim()));
+        return sawSentinel
+          ? { ok: true, findings: [] }
+          : { ok: false, kind: "missing-section", findings: [] };
+      }
+      if (unrecognised) return { ok: false, kind: "unrecognised", findings: salvaged };
+      return { ok: true, findings: salvaged };
+    }
+    // 不完整 / 没传 nonce：ok 永远是 false，但认得出的 finding 要带走（#6165）。
+    return {
+      ok: false,
+      kind: unrecognised ? "unrecognised" : "missing-section",
+      findings: salvaged,
+    };
+  }
+  const findings: ReviewFinding[] = [];
+  const lines = text.slice(idx + SECTION.length).split("\n");
+  let current: ReviewFinding | undefined;
+  let unclaimed = 0;
+  let sawCleanSentinel = false;
+  for (const raw of lines) {
+    const hit = parseFindingLine(raw, opts);
+    if (hit) {
+      current = hit;
+      findings.push(current);
+      continue;
+    }
+    const line = raw.trim();
+    if (!line) continue;
+    if (current && !line.startsWith("-") && !line.startsWith("*")) {
+      if (current.body.length < BODY_CAP) {
+        current.body = `${current.body} ${line}`.trim();
+        if (current.body.length >= BODY_CAP) {
+          current.body = `${current.body.slice(0, BODY_CAP)}… （正文过长，已截断）`;
+        }
+      }
+      continue;
+    }
+    if (CLEAN_SENTINEL.test(line)) sawCleanSentinel = true;
+    else unclaimed++;
+  }
+  if (findings.length === 0 && (!sawCleanSentinel || unclaimed > 0)) {
+    return { ok: false, kind: "unrecognised", findings: [] };
+  }
+  return { ok: true, findings };
+}
+
+function parseWholeJsonObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const fence = /^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
+  const body = (fence ? fence[1] : trimmed).trim();
+  if (!body.startsWith("{")) return undefined;
+  try {
+    const v: unknown = JSON.parse(body);
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function structuredFinding(item: unknown, repoRoot?: string): ReviewFinding | undefined {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const rec = item as Record<string, unknown>;
+  const { severity, title, file, line, body } = rec;
+  if (typeof severity !== "string" || !/^P\d$/.test(severity)) return undefined;
+  if (typeof title !== "string" || !title.trim()) return undefined;
+  if (typeof file !== "string" || !file.trim()) return undefined;
+  if (typeof line !== "string") return undefined;
+  if (typeof body !== "string") return undefined;
+  return {
+    severity,
+    title: title.trim(),
+    file: repoRelative(file, repoRoot),
+    ...(line.trim() ? { line: line.trim() } : {}),
+    body: body.trim().slice(0, BODY_CAP),
+  };
+}
+
+/**
+ * 整份输出是报告契约的 JSON 编码时走这里。不是 JSON、或没有 `findings` 数组
+ * → `undefined`，落到 markdown 解析器（grok-build / claude 的路径一字不改）。
+ *
+ * 一旦认成结构化，缺 nonce / 缺字段 / 一条 finding 形状不对都是 unparseable，
+ * **不许**再当散文去「猜干净」。空 `findings` 才是结构化的 `(none)`。
+ * 失败结果带 kind / 已捞回的 findings（#6165），不把结构化失败压成「0 条」。
+ */
+function tryParseStructuredReview(
+  stdout: string,
+  opts: { repoRoot?: string; nonce?: string },
+): ParseResult | undefined {
+  const obj = parseWholeJsonObject(stdout);
+  if (!obj || !("findings" in obj)) return undefined;
+  if (!Array.isArray(obj.findings)) return unparseable("unrecognised", stdout);
+  const findings: ReviewFinding[] = [];
+  for (const item of obj.findings) {
+    const f = structuredFinding(item, opts.repoRoot);
+    if (!f) return unparseable("unrecognised", stdout, findings);
+    findings.push(f);
+  }
+  if (opts.nonce) {
+    if (typeof obj.nonce !== "string" || obj.nonce !== opts.nonce) {
+      return unparseable("incomplete", stdout, findings);
+    }
+  }
+  return { ok: true, findings };
+}
+
 export function parseReviewReport(
   stdout: string,
   opts: { repoRoot?: string; nonce?: string } = {},
 ): ParseResult {
-  // arc#6123。`nonce` 是**加法**:不传它,下面每一条判据逐字节不变。
+  // arc#6187：JSON 编码的 nonce 在字段里，不在最后一行。必须先于「末行 nonce」
+  // 那条 markdown 判据，否则一份合法的结构化干净报告会被 `}` 挡成 unparseable。
+  const structured = tryParseStructuredReview(stdout, opts);
+  if (structured !== undefined) return structured;
+  // arc#6123。`nonce` 是**加法**:不传它,下面每一条判据的 **ok** 逐字节不变。
   //
   // 它只回答一个问题——**这份输出跑完了吗**。它**不**回答「有没有问题」。
-  // codex 第 3 轮的 P1 把这条钉死了:「完整 + 没有可识别的 finding」会同时命中
-  // 「审完了、干净」和「我根本没审成」(实测:『无法读取仓库,未完成审查』、
-  // 以及编号列表 `1. [P1] …` 认不出),而干净是那个会放行合并的答案。
-  //
-  // 所以**两个方向都要正面证据**:
-  //   完整 ⟸ nonce 是最后一个非空行;干净 ⟸ 显式 `(none)` 哨兵。
-  // 缺任一 ⟹ unparseable。#6123 的真正解药在 prompt 侧(让引擎产出哨兵),
-  // 不在这里放宽。
+  // 缺 nonce ⟹ unparseable（不能 PASS）。#6165 补的是另一侧：unparseable 时
+  // 已经认得出的 finding 必须跟着失败结果走，不能在 nonce 检查处整份扔掉。
   //
   // nonce 必须**独占最后一个非空行**,不能只用 `includes`:实测只写一句
   // 「本轮的结束标记是 <nonce>,开始审查。」就会被判成完整(codex P2)。
@@ -507,8 +978,8 @@ export function parseReviewReport(
   if (opts.nonce) {
     const nonEmpty = stdout.split("\n").filter((l) => l.trim() !== "");
     complete = nonEmpty.length > 0 && nonEmpty[nonEmpty.length - 1]?.trim() === opts.nonce;
-    if (!complete) return { ok: false, reason: "unparseable" };
   }
+  if (!stdout.trim()) return unparseable("empty", stdout);
   // 验证在前、剥离在后 —— 顺序承重。留着它会落进下面的小节循环被计成 `unclaimed`,
   // 于是**严格照契约输出的干净报告反而被判 unparseable**(codex 上一轮的 P1(a))。
   // 只剥那一行,不是全文替换。
@@ -518,97 +989,12 @@ export function parseReviewReport(
         .filter((l) => l.trim() !== opts.nonce)
         .join("\n")
     : stdout;
-  const idx = text.indexOf(SECTION);
-  if (idx < 0) {
-    // 没有小节头。**不许因为「找不到 finding」就判干净** —— 见上。
-    if (!complete) return { ok: false, reason: "unparseable" };
-    const body = text.split("\n");
-    // 「看起来像一条 finding」判得比 `- [Pn]` 宽:编号列表 `1. [P1] …`、`* [P2] …`
-    // 都算。窄了的话,一条认不出的问题行会绕过检测,让**同一份输出里的哨兵替它背书**
-    // (codex 第 4 轮的残余洞)。宽判 + 认不出就拒绝,才是 fail-closed 的那一侧。
-    const orphan = body.filter((l) => /\[P\d\]/.test(l));
-    if (orphan.length === 0) {
-      // 唯一的干净出口:显式哨兵。哨兵可以不带小节头 —— 它本身就是正面证据。
-      const sawSentinel = body.some((l) => CLEAN_SENTINEL.test(l.trim()));
-      return sawSentinel ? { ok: true, findings: [] } : { ok: false, reason: "unparseable" };
-    }
-    // 有 finding 行却没有小节头:逐条认,认不出就拒绝。**正文要跟着走** ——
-    // 只投递标题会把触发条件和修法静默丢掉(codex P2)。
-    const salvaged: ReviewFinding[] = [];
-    let cur: ReviewFinding | undefined;
-    for (const raw of body) {
-      const m = FINDING_RE.exec(raw.trimEnd());
-      const [, severity, title, file, line, trailing] = m ?? [];
-      if (severity && title && file && line) {
-        cur = {
-          severity,
-          title: title.trim(),
-          file: repoRelative(file, opts.repoRoot),
-          line,
-          body: (trailing ?? "").trim(),
-        };
-        salvaged.push(cur);
-        continue;
-      }
-      if (/\[P\d\]/.test(raw)) return { ok: false, reason: "unparseable" };
-      const t = raw.trim();
-      if (cur && t && !t.startsWith("-") && !t.startsWith("*")) {
-        cur.body = `${cur.body} ${t}`.trim().slice(0, BODY_CAP);
-      }
-    }
-    return { ok: true, findings: salvaged };
+  const inner = parseReviewBody(text, opts, complete);
+  if (opts.nonce && !complete) {
+    return unparseable("incomplete", stdout, inner.findings);
   }
-  const findings: ReviewFinding[] = [];
-  const lines = text.slice(idx + SECTION.length).split("\n");
-  let current: ReviewFinding | undefined;
-  /** 小节里没被任何一条 finding 认领、也不是干净哨兵的实质内容。 */
-  let unclaimed = 0;
-  /** 是否见到过明确的「这一轮没有 finding」。零条**必须**由它证明。 */
-  let sawCleanSentinel = false;
-  for (const raw of lines) {
-    const m = FINDING_RE.exec(raw.trimEnd());
-    const [, severity, title, file, line, trailing] = m ?? [];
-    if (severity && title && file && line) {
-      // 位置之后的注记(`(round 12)` 之类)不属于位置,但**也不许丢**——这个文件
-      // 自己的规矩是「超出要说出来,不能悄悄截」。折进正文的开头。
-      current = {
-        severity,
-        title: title.trim(),
-        file: repoRelative(file, opts.repoRoot),
-        line,
-        body: (trailing ?? "").trim(),
-      };
-      findings.push(current);
-      continue;
-    }
-    const text = raw.trim();
-    if (!text) continue;
-    if (current && !text.startsWith("-") && !text.startsWith("*")) {
-      // 上限是防御性的第二道：即使有一天 reviewer 又把日志混进正文，也不会撑爆交付面。
-      if (current.body.length < BODY_CAP) {
-        current.body = `${current.body} ${text}`.trim();
-        if (current.body.length >= BODY_CAP) {
-          current.body = `${current.body.slice(0, BODY_CAP)}… （正文过长，已截断）`;
-        }
-      }
-      continue;
-    }
-    if (CLEAN_SENTINEL.test(text)) sawCleanSentinel = true;
-    else unclaimed++;
-  }
-  // **零条不等于干净。** 小节里有实质内容却一条都认不出，说明 reviewer 的输出格式
-  // 漂了，而不是这一轮没问题——后者会走成 PASS。这是「解析器没看懂」与「审过了、
-  // 干净」在小节内部的同色，只在小节头上把关拦不住它（本地 codex 自审时报的 P2）。
-  // 零条必须由**明确的哨兵**证明，不能靠「没看见别的东西」推出来：小节头之后什么
-  // 都没有（截断的响应、只打了标题就退出的 reviewer）会让 unclaimed 也是 0，
-  // 于是「没审完」与「审完了、干净」同色 —— 而干净是那个会放行合并的答案。
-  // 这是同一个洞的第三次变形（前两次：没有小节头 / 小节里有认不出的内容）。
-  // 两个条件都要：没有哨兵 → 「没看懂」；哨兵之后还有认不出的内容 → 同样是没看懂
-  // （否则 `(none)` 后面跟一条格式漂了的 P1 会走成干净）。
-  if (findings.length === 0 && (!sawCleanSentinel || unclaimed > 0)) {
-    return { ok: false, reason: "unparseable" };
-  }
-  return { ok: true, findings };
+  if (inner.ok) return inner;
+  return unparseable(inner.kind, stdout, inner.findings);
 }
 
 /**
@@ -621,6 +1007,54 @@ function repoRelative(p: string, repoRoot?: string): string {
   if (!repoRoot) return p;
   const root = repoRoot.endsWith("/") ? repoRoot : `${repoRoot}/`;
   return p.startsWith(root) ? p.slice(root.length) : p;
+}
+
+export interface ReviewAttempt {
+  stdout: string;
+  failed: boolean;
+}
+
+/**
+ * 把「解析一次；不行再按契约追问一次」收成可测的兑现路径。
+ *
+ * 进程失败（超时 / 非零）**不**重试——那是 reviewer 没跑完，与「跑完了但只出散文」
+ * 不同色。散文不合规才追问一次；追问仍不合规 → 仍 unparseable，绝不读成干净。
+ */
+export function fulfillReviewContract(opts: {
+  nonce: string;
+  repoRoot?: string;
+  first: ReviewAttempt;
+  retry?: () => ReviewAttempt;
+}): {
+  parsed: ParseResult;
+  stdout: string;
+  failed: boolean;
+  retried: boolean;
+} {
+  const parseRun = (run: ReviewAttempt) => ({
+    parsed: parseReviewReport(run.stdout, { nonce: opts.nonce, repoRoot: opts.repoRoot }),
+    stdout: run.stdout,
+    failed: run.failed,
+  });
+  const first = parseRun(opts.first);
+  // 进程失败仍带着解析结果（#6165 捞回），但不重试——超时/非零与散文不合规不同色。
+  if (first.failed) return { ...first, retried: false };
+  if (first.parsed.ok) return { ...first, retried: false };
+  if (!opts.retry) return { ...first, retried: false };
+  const second = parseRun(opts.retry());
+  return { ...second, retried: true };
+}
+
+/** 第一次输出无法解析时的追问。点名缺的是契约，不是「再随便写一句没问题」。 */
+export function contractRetryPrompt(nonce: string, originalPrompt?: string): string {
+  const reminder = [
+    "你上一轮的输出无法解析。这不是「没发现问题」，是没按契约输出。",
+    "缺少 `Full review comments:`、`(none)` 哨兵、或结束标记。",
+    "现在重新输出。只输出契约要求的格式，不要解释、不要道歉。",
+    "",
+    reportContractWithNonce(nonce),
+  ].join("\n");
+  return originalPrompt ? `${originalPrompt}\n\n—— 更正 ——\n${reminder}` : reminder;
 }
 
 /* ===== sticky comment —— 复用既有 gate 原语，不另造一套 ===== */
@@ -668,6 +1102,12 @@ export interface ReviewCommentInput {
   unparseable?: boolean;
   /** parsed vs expected. Sticky 漏判时带上；缺席则标明不可用，绝不捏造 parsed:[]。 */
   parseDiag?: DispositionParseDiag;
+  /** 解析失败的颜色。缺席时仍 BLOCKED，但不假装分过类。 */
+  parseKind?: UnparseableKind;
+  /** 原文摘录。有捞回的 finding 时可以不展示，但 0 条时必须让人看见模型说过什么。 */
+  excerpt?: string;
+  /** 原文落盘结果。preserved=false 与 preserved=true 必须不同色（#6172）。 */
+  raw?: ReviewRawPersist;
 }
 
 export function renderReviewComment(i: ReviewCommentInput): string {
@@ -678,7 +1118,7 @@ export function renderReviewComment(i: ReviewCommentInput): string {
   const result = reviewResultForRound({ ...i, round: i.round ?? 1 }).result;
   const indep = v.ok
     ? "独立性 **" + v.reason + "**"
-    : "独立性 **" + v.reason + "** —— 不满足 `reviewer.engine ≠ coder.engine`，不构成可合并证据";
+    : "独立性 **" + v.reason + "** —— 不满足 `reviewer.engine ∉ coderEngines`，不构成可合并证据";
   // 轮次账本紧跟 marker：JSON 藏在 HTML 注释里是**真相**，下面渲染出来的是派生的
   // （同 comment.ts 的 verify-history 先例——人改了正文不会污染序列）。
   const state =
@@ -715,11 +1155,6 @@ export function renderReviewComment(i: ReviewCommentInput): string {
     "**\n\n" +
     parseDiagBlock;
 
-  if (i.unparseable) {
-    return head + "_reviewer 的输出无法解析 —— 这不是「没发现问题」，判 BLOCKED。_\n";
-  }
-  if (!i.findings.length) return head + "_本轮无 finding。_\n";
-
   const one = (f: ReviewFinding) =>
     "- **[" +
     f.severity +
@@ -731,6 +1166,29 @@ export function renderReviewComment(i: ReviewCommentInput): string {
     (f.line ?? "") +
     "`\n  " +
     f.body;
+
+  if (i.unparseable) {
+    const kindLine = i.parseKind ? `**失败类型：** ${parseKindLabel(i.parseKind)}\n\n` : "";
+    const rawLine = i.raw
+      ? i.raw.preserved
+        ? `**原文已保留** \`${i.raw.path}\`（${i.raw.bytes} 字节）—— 有内容可读，不要当成「没东西」扔掉。\n\n`
+        : `**原文未保留**${i.raw.path ? `（尝试写入 \`${i.raw.path}\`）` : ""} —— 没接到模型输出，必须重跑；这与「说了但解析失败」不同色。\n\n`
+      : "";
+    const salvage =
+      i.findings.length > 0
+        ? `**捞回 ${i.findings.length} 条**（解析失败但仍认得出；判决仍是 BLOCKED，因为无法证明完整）：\n\n${i.findings.map(one).join("\n\n")}\n`
+        : i.excerpt
+          ? `原文摘录：\n\n\`\`\`\n${i.excerpt}\n\`\`\`\n`
+          : "";
+    return (
+      head +
+      "_reviewer 的输出无法解析 —— 这不是「没发现问题」，判 BLOCKED。_\n\n" +
+      kindLine +
+      rawLine +
+      salvage
+    );
+  }
+  if (!i.findings.length) return head + "_本轮无 finding。_\n";
 
   // 交付面有硬上限（GitHub 65536）。**截断必须说出来**，否则「只有 3 条」与
   // 「其余被悄悄丢了」同色；marker 在第一行，无论如何不能被切掉——它是闸唯一读的东西。
@@ -763,12 +1221,20 @@ export function renderReviewComment(i: ReviewCommentInput): string {
  * **有身份行但没声明引擎，仍然要求**：放行会让「去掉 engine 字段」成为绕过这道门的
  * 办法。认不出 coder 引擎不是放行的理由——判决本来就由 reviewer 自己编进 `result`。
  */
-export function agentAuthored(prBody: string): { required: boolean; coderEngine?: string } {
+export function agentAuthored(prBody: string): {
+  required: boolean;
+  coderEngine?: string;
+  coderEngines?: string[];
+} {
   const identity = /^>\s*🤖\s*AI Agent\b.*$/m.exec(prBody ?? "");
   if (!identity) return { required: false };
-  const engine = normalizeEngine(/\bengine:([A-Za-z0-9._-]+)/.exec(identity[0])?.[1]);
+  const tokens = [...identity[0].matchAll(/\bengine:([A-Za-z0-9._+-]+)/g)].map((m) => m[1] ?? "");
+  const engines = parseEngineSet(tokens);
   // engine:unknown 与「没有 engine 字段」同义 —— 都不是一个可以拿来比对的引擎名。
-  return { required: true, ...(engine ? { coderEngine: engine } : {}) };
+  return {
+    required: true,
+    ...(engines.length ? { coderEngine: engines.join("+"), coderEngines: engines } : {}),
+  };
 }
 
 /**
@@ -791,16 +1257,24 @@ export function resolveSubjectEngine(
   override: string | undefined,
 ): { ok: true; engine: string } | { ok: false; reason: string } {
   const recorded = prBody === undefined ? undefined : agentAuthored(prBody).coderEngine;
-  if (!recorded) {
+  const recordedSet = parseEngineSet(recorded);
+  if (recordedSet.length === 0) {
     return {
       ok: false,
       reason: "PR 没有记录 coder 引擎（身份行缺失或没有 engine: 字段），无从核对 —— 覆盖值不算数",
     };
   }
-  if (override && override !== recorded) {
-    return { ok: false, reason: `--subject-engine ${override} 与 PR 记录的 ${recorded} 矛盾` };
+  if (override) {
+    const o = normalizeEngine(override.split("/")[0]);
+    if (!o || !recordedSet.includes(o)) {
+      return {
+        ok: false,
+        reason: `--subject-engine ${override} 与 PR 记录的 ${recordedSet.join("+")} 矛盾`,
+      };
+    }
   }
-  return { ok: true, engine: recorded };
+  // 覆盖只能确认集合里有这一员，不能把混合作者塌成单值（arc#6184）。
+  return { ok: true, engine: recordedSet.join("+") };
 }
 
 /* ===== 轮次与收敛 ===== */
@@ -1089,6 +1563,8 @@ export type EngineSource = "run-record" | "pr-body" | "none";
 
 export interface CoderEngineClaim {
   engine?: string;
+  /** 与 `engine` 同一集合，拆开的形式。单引擎 PR 是单元素。 */
+  engines?: string[];
   source: EngineSource;
   /** 由**被审者改不到的**来源证实。false = 只是它自己的声明。 */
   attested: boolean;
@@ -1170,14 +1646,36 @@ export function coderEngineClaim(
   attestedEngine: string | undefined,
   prBody: string | undefined,
 ): CoderEngineClaim {
-  const attested = normalizeEngine(attestedEngine);
-  const claimed = normalizeEngine(
+  const attestedSet = parseEngineSet(attestedEngine);
+  const claimedSet = parseEngineSet(
     prBody === undefined ? undefined : agentAuthored(prBody).coderEngine,
   );
-  if (attested && claimed && attested !== claimed) {
-    return { source: "run-record", attested: false, conflict: { attested, claimed } };
+  if (attestedSet.length && claimedSet.length) {
+    const claimedNames = new Set(claimedSet);
+    const disjoint = attestedSet.every((e) => !claimedNames.has(e));
+    if (disjoint) {
+      return {
+        source: "run-record",
+        attested: false,
+        conflict: { attested: attestedSet.join("+"), claimed: claimedSet.join("+") },
+      };
+    }
   }
-  if (attested) return { engine: attested, source: "run-record", attested: true };
-  if (claimed) return { engine: claimed, source: "pr-body", attested: false };
+  if (attestedSet.length) {
+    return {
+      engine: attestedSet.join("+"),
+      engines: attestedSet,
+      source: "run-record",
+      attested: true,
+    };
+  }
+  if (claimedSet.length) {
+    return {
+      engine: claimedSet.join("+"),
+      engines: claimedSet,
+      source: "pr-body",
+      attested: false,
+    };
+  }
   return { source: "none", attested: false };
 }

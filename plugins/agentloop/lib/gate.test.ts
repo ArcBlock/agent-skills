@@ -6,7 +6,7 @@
  * `.claude/verify/merge-gate.test.ts`.
  */
 import { describe, expect, it } from "bun:test";
-import { HTML_DECODE_JQ, MARKER_PREFIX, shQuote } from "./comment.ts";
+import { anchoredMarkerLookupJq, HTML_DECODE_JQ, MARKER_PREFIX, shQuote } from "./comment.ts";
 import { carryForwardStickyGate, requireStickyGate } from "./gate.ts";
 
 const HEAD = "a".repeat(40);
@@ -328,10 +328,7 @@ describe("requireStickyGate", () => {
 
     it("postOnce's lookup command string parses and returns a numeric id under bash -c", () => {
       const body = sticky(MARKER_PREFIX, HEAD, "PASS");
-      const firstLineTest =
-        `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
-        `test("^${MARKER_PREFIX}")`;
-      const filter = `[.[] | select(${firstLineTest})][-1].id // empty`;
+      const filter = anchoredMarkerLookupJq(MARKER_PREFIX, "id");
       const stdin = JSON.stringify([{ id: 42, body }]);
       const cmd = `echo ${shQuote(stdin)} | jq ${shQuote(filter)}`;
       const r = bashRun(cmd);

@@ -104,6 +104,22 @@ export interface CheckResult {
    * tolerates (taxonomy R2).
    */
   failure?: CheckFailure;
+  /**
+   * Opt out of cross-host reuse for this round's answer (#6420).
+   *
+   * Only `false` is a value — omitting the field is the default (reusable).
+   * This is NOT `ENV_GAP`. `ENV_GAP` means "the host lacks a capability";
+   * `reusable: false` means "this round's answer must not be transplanted",
+   * which is only knowable after the check ran (a true timeout, a
+   * machine-bound measurement). Lying `ENV_GAP` to get the withhold was the
+   * hole this field closes.
+   *
+   * Publish-time only. It does not recolour the check, does not change
+   * `passed()` / `deriveResult`, and does not widen `requireStickyGate`'s
+   * {PASS, NA} accept set (taxonomy R2). The local cache still writes so this
+   * host's own push gate does not livelock.
+   */
+  reusable?: false;
 }
 
 /** Monotonic within one process — enough to keep concurrent `run()`s apart. */
@@ -119,6 +135,31 @@ function newPgidFile(): string {
 function newOutputFile(): string {
   pgidFileSeq += 1;
   return join(tmpdir(), `agentloop-output-${process.pid}-${pgidFileSeq}.log`);
+}
+
+/** Out-of-band sibling of the redirected log. Observed stdout cannot mint this. */
+function noOutputStallPath(outputFile: string): string {
+  return `${outputFile}.stalled`;
+}
+
+/**
+ * Did THIS call's no-output wrapper write its stall flag? Presence of the
+ * documented sentinel in captured output is not evidence (arc#6406): a check
+ * that prints a PR body documenting the marker used to be rewritten to
+ * `code=124`. Only the wrapper creates this file, and only when it actually
+ * reaped the silent group.
+ */
+function consumeNoOutputStall(outputFile: string | undefined): boolean {
+  if (outputFile === undefined) return false;
+  const stallFile = noOutputStallPath(outputFile);
+  try {
+    readFileSync(stallFile);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(stallFile, { force: true });
+  }
 }
 
 /**
@@ -151,6 +192,11 @@ function wrapInOwnGroup(
   if (noOutputTimeoutMs === undefined || outputFile === undefined) {
     return [
       "set -m",
+      // Job-control monitor mode is required for a fresh process group.
+      // `notify` off stops bash from writing `[1] Done { … }` into the
+      // captured stream (arc#6090). `set +m` below turns monitor mode
+      // back off once the group exists.
+      "set +o notify 2>/dev/null || true",
       "{",
       cmd,
       "} &",
@@ -169,6 +215,7 @@ function wrapInOwnGroup(
   const noOutputTimeoutSeconds = Math.max(1, Math.ceil(noOutputTimeoutMs / 1000));
   return [
     "set -m",
+    "set +o notify 2>/dev/null || true",
     `__agentloop_log=${JSON.stringify(outputFile)}`,
     "{",
     cmd,
@@ -187,6 +234,9 @@ function wrapInOwnGroup(
     "  fi",
     "  __agentloop_now=$(date +%s)",
     `  if [ $((__agentloop_now - __agentloop_last_change)) -ge ${noOutputTimeoutSeconds} ]; then`,
+    // Write the stall flag BEFORE the kill (arc#6406). The marker in the log
+    // is a human breadcrumb; classification reads this file, not stdout.
+    `    : > "$__agentloop_log.stalled"`,
     '    kill -KILL -- "-$__agentloop_job" 2>/dev/null || true',
     "    __agentloop_stalled=1",
     "    break",
@@ -242,6 +292,22 @@ export function stripAnsi(s: string): string {
   // ESC assembled at runtime — a regex literal `\u001B` trips biome's
   // noControlCharactersInRegex, and this is the byte `gh` actually emits.
   return s.replace(new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[ -/]*[@-~]`, "g"), "");
+}
+
+/**
+ * Strip bash job-control status lines from captured output (arc#6090).
+ *
+ * `wrapInOwnGroup` turns monitor mode on to own a process group. Even with
+ * `set +o notify` / `set +m`, a loaded machine still sometimes emits
+ * `[1] Done { echo hi; }` into the combined stream, which then fails
+ * callers that assert exact stdout (`echo hi` → `"hi"`). The wrapper must
+ * be invisible; stripping here is that contract, not a test-side filter.
+ */
+export function stripJobControlNoise(s: string): string {
+  return s.replace(
+    /^\s*\[\d+\][+-]?\s+(Done|Exit|Running|Stopped|Terminated|Killed)\b.*(?:\r?\n|$)/gm,
+    "",
+  );
 }
 
 /**
@@ -312,9 +378,9 @@ export function run(
     }
     rmSync(outputFile, { force: true });
   }
-  out = stripAnsi(out);
+  out = stripJobControlNoise(stripAnsi(out));
   const nativeTimedOut = (r.error as (Error & { code?: string }) | undefined)?.code === "ETIMEDOUT";
-  const noOutputTimedOut = out.includes(NO_OUTPUT_TIMEOUT_MARKER);
+  const noOutputTimedOut = consumeNoOutputStall(outputFile);
   const timedOut = nativeTimedOut || noOutputTimedOut;
   // The no-output wrapper already killed AND waited for its job group while it
   // still owned that exact PGID. Reaping it again here could hit a recycled
@@ -493,6 +559,13 @@ const dur = (ms: number | undefined): string =>
  * look identical to one that started instantly — the gap between the two numbers
  * IS the diagnostic. Optional for the same backward-compatibility reason as
  * `notice`: omitting it leaves the Overall line byte-identical to before.
+ *
+ * `opts.derived` is the already-adjudicated aggregate (#6197). The table rows
+ * stay the raw checks (a foreign-flaky red stays red); Overall is the verdict
+ * written to `.result`, not a re-sum of those rows. TIMEOUT still renders as
+ * ❌ FAIL and a green partial still renders as ✅ PASS — those colours are
+ * unchanged; the finer token lives on the sticky marker / `.result`. Omit
+ * only in unit tests that are not about attribution.
  */
 export function renderReport(
   results: CheckResult[],
@@ -510,10 +583,12 @@ export function renderReport(
      * installed loader (empty by default — unknown, never silently would-pass).
      */
     skipHistory?: SkipHistory;
+    /** Adjudicated verdict. Do not recompute from `passed(results)` (#6197). */
+    derived?: "PASS" | "FAIL" | "TIMEOUT";
   },
 ): string {
   const history = opts.skipHistory ?? skipHistoryLoader();
-  const ok = passed(results);
+  const ok = opts.derived === undefined ? passed(results) : opts.derived === "PASS";
   const total = results.reduce((a, r) => a + (r.durationMs ?? 0), 0);
   const rows = results
     .map((r) => `| ${r.title} | ${icon(r, history)} | ${statsStr(r)} | ${dur(r.durationMs)} |`)
@@ -598,4 +673,124 @@ export function trimFullLogsSection(report: string, sha?: string): string {
   // route left to the dropped output, so it should not make the reader guess.
   const cacheRef = `\`.verify/${sha ?? "<sha>"}.md\``;
   return `${report.slice(0, start)}\n\n### Full Logs\n\nOmitted — the full report exceeded this environment's PR-comment size gate (issue #1922). Full output is in the ${cacheRef} cache on the machine that generated this report.${rest}`;
+}
+
+const REPO_GIT = "<repo>/.git";
+const GIT_COMMON_DIR = "<git-common-dir>";
+
+function isLocalAbsPath(p: string): boolean {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function lastPathSegment(p: string): string {
+  const segs = p
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
+    .filter(Boolean);
+  return segs[segs.length - 1] || "root";
+}
+
+function looksLikeGitDir(p: string): boolean {
+  return /(?:^|[\\/])\.git$/.test(p.replace(/[\\/]+$/, ""));
+}
+
+/** Undo `shQuote`: `'foo'\''bar'` → `foo'bar`. Unquoted tokens pass through. */
+function posixUnquote(token: string): string {
+  let i = 0;
+  let out = "";
+  let inQuote = false;
+  while (i < token.length) {
+    const c = token[i];
+    if (inQuote) {
+      if (c === "'") {
+        inQuote = false;
+        i += 1;
+        continue;
+      }
+      out += c;
+      i += 1;
+      continue;
+    }
+    if (c === "'") {
+      inQuote = true;
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < token.length) {
+      out += token[i + 1];
+      i += 2;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Public form of a producer filesystem path (#6401).
+ *
+ *   tree          → basename (worktree folder name)
+ *   host clone    → `<repo>/.git`
+ *   shared record → `<git-common-dir>/agentloop/verification/…/by-location/<slot>`
+ *
+ * The slot id is already a non-reversible digest; it is the identity. The OS
+ * username and checkout layout are not.
+ */
+function publicEvidencePath(absPath: string): string {
+  const p = absPath.trim();
+  if (!p || p === "unknown") return p;
+
+  const byLoc = p.match(/by-location[\\/]([^\\/]+)[\\/]?$/);
+  if (/agentloop[\\/]verification/.test(p) || byLoc) {
+    const slot = byLoc ? `by-location/${byLoc[1]}` : "by-location/<slot>";
+    return `${GIT_COMMON_DIR}/agentloop/verification/…/${slot}`;
+  }
+  if (looksLikeGitDir(p)) return REPO_GIT;
+  if (isLocalAbsPath(p)) return lastPathSegment(p);
+  return p;
+}
+
+function redactForceCommand(cmd: string): string {
+  const m = cmd.match(/^(rm -rf \.verify\/\S+\s+)([\s\S]*)$/);
+  if (!m) return cmd;
+  const prefix = m[1];
+  const rest = m[2];
+  if (prefix === undefined || rest === undefined) return cmd;
+  const decoded = posixUnquote(rest.trim());
+  if (isLocalAbsPath(decoded) || /agentloop[\\/]verification/.test(decoded)) {
+    return `${prefix}'${publicEvidencePath(decoded)}'`;
+  }
+  return cmd;
+}
+
+/**
+ * Strip absolute local filesystem paths from a verification report before it is
+ * posted as a public PR comment (#6401).
+ *
+ * Local stdout and `.verify/*.md` keep the producer-supplied strings — tree
+ * root, host clone, shared-record path, pasteable `rm -rf`. The public form
+ * keeps the diagnostic (basename, `<repo>/.git`, `by-location/<slot>`) and
+ * drops the OS username and checkout layout.
+ *
+ * Scoped to provenance fields so a Failures tail that cites a source file
+ * under `$HOME` is not rewritten. Idempotent.
+ */
+export function redactPublicEvidencePaths(text: string): string {
+  let out = text.replace(/tree `([^`]+)`/g, (all, tree: string) => {
+    if (!isLocalAbsPath(tree)) return all;
+    return `tree \`${publicEvidencePath(tree)}\``;
+  });
+  out = out.replace(/host clone `([^`]+)`/g, (all, host: string) => {
+    if (host === "unknown" || !isLocalAbsPath(host)) return all;
+    return `host clone \`${publicEvidencePath(host)}\``;
+  });
+  out = out.replace(/> Shared record: `([^`]+)`/g, (all, rec: string) => {
+    if (!isLocalAbsPath(rec) && !/agentloop[\\/]verification/.test(rec)) return all;
+    return `> Shared record: \`${publicEvidencePath(rec)}\``;
+  });
+  out = out.replace(/> Force a real re-run here: `([^`]+)`/g, (_all, cmd: string) => {
+    return `> Force a real re-run here: \`${redactForceCommand(cmd)}\``;
+  });
+  return out;
 }

@@ -21,15 +21,19 @@
  *                          stale-identity / missing, carried in
  *                          AGENTLOOP_CACHE_STATE= and in the exit code
  *                          (0/1 current green/red, 5 stale-identity, 1 missing).
+ *                          A miss with leftover files for a *different*
+ *                          scenario names that leftover (#6239) instead of
+ *                          looking like a blank "no cache".
  *   --retry-failed         explicitly retry a cached FAIL/TIMEOUT full gate
  *   --only a,b,c           run only these check ids (unknown id → hard error)
  *   --skip x,y             run all but these check ids
  *
- * Coverage is part of the record, not just identity (#5067): every cached and
- * published record carries `fullScenario` + the executed check ids, and a GREEN
- * scoped run is stamped `PARTIAL` rather than `PASS` so no consumer can read it
- * as a gate token. The report itself is still written — it is the diagnostic
- * artifact (PR #3062) — it just stops being currency.
+ * Coverage is part of the record, not just identity (#5067 / #6399): every cached
+ * and published record carries `fullScenario` + the check ids that actually
+ * executed, and a GREEN run that did not execute every selected check is stamped
+ * `PARTIAL` rather than `PASS` so no consumer can read it as a gate token. The
+ * report itself is still written — it is the diagnostic artifact (PR #3062) — it
+ * just stops being currency.
  */
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
@@ -50,6 +54,7 @@ import {
   type CommentArgs,
   deliverComment,
   MARKER_PREFIX,
+  type MarkerExtras,
   parseCommentArgs,
   type RunMeta,
   shQuote,
@@ -184,6 +189,41 @@ export interface ScenarioConfig {
    * So a claim forces the same one real retry `--retry-failed` does.
    */
   attributionClaimed?: (argv: string[]) => boolean;
+  /**
+   * Extra working-tree paths that do not make HEAD evidence unpublishable
+   * (#6405). The engine always exempts `.verify/` (its own artifacts).
+   * Everything else is dirty unless the consuming repo lists it here.
+   *
+   * Strings match the porcelain path exactly; RegExps are tested against it
+   * (`g` is ignored so a global pattern cannot skip every other file).
+   *
+   * Optional: omitting it is the repo-agnostic default. A coincidental
+   * filename in a non-arc repo is never silently treated as a runner artifact.
+   */
+  evidenceExemptPaths?: readonly (string | RegExp)[];
+  /**
+   * Scenarios whose PASS/NA record may stand in for THIS scenario's, when it
+   * answers the same question.
+   *
+   * The scenario name was an identity axis, so pre-merge at (sha, base=B) could
+   * never see pre-pr's PASS at the same (sha, B) — and when merge-base equals
+   * the origin/main tip those two runs are the same checks over the same diff
+   * on the same tree. Measured on one machine's store: 33 of 88 pre-merge runs
+   * were exactly that (pre-pr already PASS, same base; all 33 came back PASS).
+   *
+   * Naming a donor here is NOT a blanket alias. The engine still requires, per
+   * record: same sha, same resolved base, no capability drift, `fullScenario`,
+   * a PASS (a FAIL is never inherited across scenarios; an `--na` exemption is
+   * local-only and never enters the shared store, so it cannot be a donor), and
+   * the donor's executed check ids must cover every check THIS scenario would
+   * select at that base. A check added to this scenario that the donor lacks
+   * turns the inheritance off by itself instead of silently passing.
+   *
+   * One-way by construction: pre-merge naming "pre-pr" lets pre-merge inherit;
+   * nothing lets pre-pr inherit back (pre-merge's PASS is not a push token,
+   * #6239). Omit it and the scenario behaves exactly as before.
+   */
+  equivalentEvidenceFrom?: readonly string[];
 }
 
 /**
@@ -221,6 +261,121 @@ export interface AttributionOutcome {
  * "attribute nothing, ever" satisfies every rejection assertion, so the test
  * that matters is the one proving a FAIL really does become a PASS here.
  */
+/**
+ * One archived attempt on the same SHA (#6158 / #6213). Disclosure, never keyed.
+ * `flaky` is true when that attempt's live report carried 🟡 FLAKY.
+ */
+export interface RetryAttempt {
+  result: VerifyResult;
+  failureClass?: FailureClass;
+  flaky: boolean;
+}
+
+/**
+ * The trail `--retry-failed` consumes from the archived prior and writes onto
+ * the new record. `attempts` is the count INCLUDING the run about to land,
+ * so a first retry is 2. An implementation that writes attempts=1 after
+ * overwrite is the mutation #6158 names.
+ */
+export interface RetryTrail {
+  attempts: number;
+  priorResult: VerifyResult;
+  priorFailureClass?: FailureClass;
+  priorFlaky: boolean;
+  excerpt?: string;
+  history: RetryAttempt[];
+}
+
+/** Live-report tokens a same-SHA retry must not erase (#6213). */
+export const RETRY_FLAKY_MARK = "🟡 FLAKY";
+export const RETRY_FLAKY_SECTION = "### Flaky — batch red, solo green";
+export const RETRY_HISTORY_SECTION = "### Retry history — not a first-green";
+
+export function reportShowsFlaky(report: string): boolean {
+  return report.includes(RETRY_FLAKY_MARK) || report.includes(RETRY_FLAKY_SECTION);
+}
+
+export function extractFlakyExcerpt(report: string): string | undefined {
+  const start = report.indexOf(RETRY_FLAKY_SECTION);
+  if (start === -1) return report.includes(RETRY_FLAKY_MARK) ? RETRY_FLAKY_MARK : undefined;
+  const rest = report.slice(start);
+  const next = rest.indexOf("\n### ", 1);
+  const excerpt = (next === -1 ? rest : rest.slice(0, next)).trim();
+  return excerpt.length > 2000 ? `${excerpt.slice(0, 2000)}\n…` : excerpt;
+}
+
+export function consumeRetryTrail(prior: {
+  result: VerifyResult;
+  failureClass?: FailureClass;
+  report: string;
+  attempts?: number;
+  retryHistory?: RetryAttempt[];
+}): RetryTrail {
+  const flaky = reportShowsFlaky(prior.report);
+  const thisAttempt: RetryAttempt = {
+    result: prior.result,
+    ...(prior.failureClass ? { failureClass: prior.failureClass } : {}),
+    flaky,
+  };
+  const history = [...(prior.retryHistory ?? []), thisAttempt];
+  const priorAttempts =
+    typeof prior.attempts === "number" && Number.isFinite(prior.attempts) && prior.attempts >= 1
+      ? prior.attempts
+      : 1;
+  return {
+    attempts: priorAttempts + 1,
+    priorResult: prior.result,
+    ...(prior.failureClass ? { priorFailureClass: prior.failureClass } : {}),
+    priorFlaky: flaky,
+    excerpt: extractFlakyExcerpt(prior.report),
+    history,
+  };
+}
+
+export function renderRetryHistoryNotice(trail: RetryTrail): string {
+  const flakyBit = trail.priorFlaky ? ` ${RETRY_FLAKY_MARK}` : "";
+  const lines = [
+    RETRY_HISTORY_SECTION,
+    "",
+    `> ℹ️ This run is attempt ${trail.attempts} of ${trail.attempts}. Attempt ${trail.attempts - 1} was ${trail.priorResult}${flakyBit}.`,
+    "> first-green and retry-then-green are different colours (ArcBlock/arc#6158, #6213).",
+  ];
+  if (trail.excerpt) {
+    lines.push(
+      "",
+      `#### Attempt ${trail.attempts - 1} — ${trail.priorResult}${flakyBit}`,
+      "",
+      trail.excerpt,
+    );
+  } else if (trail.priorFlaky) {
+    lines.push("", RETRY_FLAKY_MARK);
+  }
+  return lines.join("\n");
+}
+
+function trailFields(trail: RetryTrail | undefined): {
+  attempts: number;
+  priorResult?: VerifyResult;
+  priorFailureClass?: FailureClass;
+  retryHistory: RetryAttempt[];
+} {
+  if (!trail) return { attempts: 1, retryHistory: [] };
+  return {
+    attempts: trail.attempts,
+    priorResult: trail.priorResult,
+    ...(trail.priorFailureClass ? { priorFailureClass: trail.priorFailureClass } : {}),
+    retryHistory: trail.history,
+  };
+}
+
+function markerExtrasFrom(args: {
+  attempts?: number;
+  priorResult?: VerifyResult;
+}): MarkerExtras | undefined {
+  if (args.attempts === undefined || args.attempts < 2) return undefined;
+  return { attempts: args.attempts, ...(args.priorResult ? { prev: args.priorResult } : {}) };
+}
+
 export function applyAttribution(
   derived: "PASS" | "FAIL" | "TIMEOUT",
   hook: ScenarioConfig["attribution"],
@@ -685,7 +840,13 @@ const EVIDENCE_SCHEMA_VERSION = 4;
  * to `pre-push` and `--deliver-cached`.
  */
 interface EvidenceCoverage {
-  /** true only for an unscoped run: no `--only`, no `--skip` */
+  /**
+   * true only when the invocation was unscoped (`--only`/`--skip` absent) AND
+   * every *selected* check actually ran. A `failFastSkip` jump is incomplete
+   * execution, so this is false even with a clean argv (#6399). A `when` gate
+   * is applicability (the check was never selected), not a skip of selected
+   * work — those ids are simply absent from {@link checks}.
+   */
   fullScenario: boolean;
   /** the check ids that actually executed, in run order */
   checks: string[];
@@ -715,6 +876,16 @@ interface SharedEvidence extends EvidenceCoverage {
    * say.
    */
   checkFailures?: Array<{ check: string; class: FailureClass }>;
+  /**
+   * Same-SHA retry trail (#6158 / #6213 / taxonomy §7.4). Disclosure, never
+   * keyed. Always written (`attempts: 1` + `retryHistory: []` on a first
+   * attempt) so "counted one" and "old record that never counted" stay
+   * different colours. `priorResult` is omitted on a first-green.
+   */
+  attempts?: number;
+  priorResult?: VerifyResult;
+  priorFailureClass?: FailureClass;
+  retryHistory?: RetryAttempt[];
   sourceHead: string;
   sourceClean: true;
   completedAt: string;
@@ -776,6 +947,89 @@ export function classifyLocalCache(args: {
   return CACHE_STATE.missing;
 }
 
+/**
+ * Leftover local metadata for a SHA, without identity validation (#6239).
+ *
+ * `--deliver-cached` already classifies a foreign-scenario leftover as
+ * `missing` (#5635: retiring it would livelock ENV_GAP / `--na` / PARTIAL).
+ * A blank miss hides that a *different* scenario's PASS is sitting on disk
+ * — which is how "only ran pre-merge then push" looked like "no report".
+ */
+export interface LocalCachePeek {
+  scenario: string;
+  result: string;
+  base?: string;
+  fullScenario?: boolean;
+  checks?: string[];
+}
+
+export function peekLocalCacheMeta(sha: string): LocalCachePeek | undefined {
+  const metadataFile = `.verify/${sha}.metadata.json`;
+  if (!existsSync(metadataFile)) return undefined;
+  try {
+    const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Partial<SharedEvidence>;
+    if (typeof metadata.scenario !== "string" || metadata.scenario.length === 0) return undefined;
+    let result = "";
+    const resultFile = `.verify/${sha}.result`;
+    if (existsSync(resultFile)) {
+      result = readFileSync(resultFile, "utf8").trim();
+    }
+    return {
+      scenario: metadata.scenario,
+      result,
+      base: typeof metadata.base === "string" ? metadata.base : undefined,
+      fullScenario: typeof metadata.fullScenario === "boolean" ? metadata.fullScenario : undefined,
+      checks: Array.isArray(metadata.checks)
+        ? metadata.checks.filter((c): c is string => typeof c === "string")
+        : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Extra `--deliver-cached` miss lines when leftover files belong to another
+ * scenario. Empty when there is no leftover, or it is the same scenario
+ * (those go through stale-identity / current-red, not this notice).
+ *
+ * Pure: "always name leftover" would invent a foreign scenario on a genuine
+ * miss. Naming is not accepting — the caller still exits missing.
+ */
+export function foreignScenarioMissNotice(args: {
+  wanted: string;
+  leftover: LocalCachePeek | undefined;
+}): string[] {
+  if (!args.leftover || args.leftover.scenario === args.wanted) return [];
+  const resultBit = args.leftover.result ? ` (result=${args.leftover.result})` : "";
+  return [
+    `  Found a leftover ${args.leftover.scenario} record for this SHA${resultBit}. That is a different scenario identity, not a ${args.wanted} token.`,
+    `  It cannot satisfy pre-push. If you need to push, run: bun .claude/verify/${args.wanted}.ts`,
+  ];
+}
+
+/**
+ * #6239 — notice that THIS scenario will not mint a push token.
+ *
+ * Printed BEFORE lane admission so the constraint is visible at zero cost.
+ * Silent when the push-scenario cache is already present, and silent when
+ * this scenario IS the push scenario (that run is the token).
+ */
+export function pushTokenMissingNotice(args: {
+  thisScenario: string;
+  pushScenario: string;
+  pushTokenPresent: boolean;
+}): string | undefined {
+  if (args.pushTokenPresent) return undefined;
+  if (args.thisScenario === args.pushScenario) return undefined;
+  return [
+    `${args.thisScenario}: this run will NOT satisfy pre-push.`,
+    `  pre-push requires a current ${args.pushScenario} cache for this HEAD; ${args.thisScenario} is a different scenario identity, not a substitute.`,
+    `  If you need to push, run first: bun .claude/verify/${args.pushScenario}.ts`,
+    `  Correct order: ${args.pushScenario} → push → ${args.thisScenario} (merge-readiness).`,
+  ].join("\n");
+}
+
 export interface CachedEvidence {
   report: string;
   result: VerifyResult;
@@ -803,9 +1057,20 @@ export interface CachedEvidence {
    * never keyed. Always an array (possibly empty) on records this version writes.
    */
   checkFailures?: Array<{ check: string; class: FailureClass }>;
+  /** Same-SHA retry trail (#6158). Disclosure; see SharedEvidence. */
+  attempts?: number;
+  priorResult?: VerifyResult;
+  priorFailureClass?: FailureClass;
+  retryHistory?: RetryAttempt[];
+  /**
+   * Set when this record was produced by a DIFFERENT scenario and inherited via
+   * `ScenarioConfig.equivalentEvidenceFrom`. Disclosure for the notice and the
+   * local cache; never keyed. Absent on a same-scenario record.
+   */
+  equivalentFrom?: string;
 }
 
-/** An unscoped run of every check the config declares. */
+/** An unscoped run whose selected checks all executed (NA: empty executed set). */
 const FULL_COVERAGE = (checks: string[]): EvidenceCoverage => ({ fullScenario: true, checks });
 
 function isCoverage(m: Partial<SharedEvidence>): boolean {
@@ -986,6 +1251,45 @@ function parseFailureClass(value: unknown): FailureClass | undefined {
   return typeof value === "string" && isFailureClass(value) ? value : undefined;
 }
 
+const VERIFY_RESULTS: readonly VerifyResult[] = [
+  "PASS",
+  "FAIL",
+  "NA",
+  "BLOCKED",
+  "TIMEOUT",
+  "PARTIAL",
+];
+
+function parseVerifyResult(value: unknown): VerifyResult | undefined {
+  return typeof value === "string" && (VERIFY_RESULTS as readonly string[]).includes(value)
+    ? (value as VerifyResult)
+    : undefined;
+}
+
+function parseAttempts(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1
+    ? Math.floor(value)
+    : undefined;
+}
+
+function parseRetryHistory(value: unknown): RetryAttempt[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: RetryAttempt[] = [];
+  for (const row of value) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as { result?: unknown; failureClass?: unknown; flaky?: unknown };
+    const result = parseVerifyResult(rec.result);
+    if (!result) continue;
+    const failureClass = parseFailureClass(rec.failureClass);
+    out.push({
+      result,
+      ...(failureClass ? { failureClass } : {}),
+      flaky: rec.flaky === true,
+    });
+  }
+  return out;
+}
+
 /**
  * Non-PASS, non-skip checks and the class each one carries. R0: a red with no
  * named class is CODE. The ENTRY exists because `pass === false`, not because
@@ -1087,6 +1391,25 @@ export function observedEnvGaps(results: readonly CheckResult[]): string[] {
   return [...ids].sort();
 }
 
+/**
+ * Checks that opted out of cross-host reuse (#6420).
+ *
+ * Publish-time, never an identity input — same structural reason as
+ * {@link observedEnvGaps}: the answer is only known after the run. Unlike env
+ * gaps, this is NOT "the host lacks a capability". A check can PASS, the host
+ * can have every probed capability, and the answer can still be host-local.
+ * Lying `ENV_GAP` to get the withhold was the hole this field closes.
+ *
+ * Returns the check ids, sorted, so a withhold message can name them without
+ * claiming a missing capability.
+ */
+export function observedNonReusable(results: readonly CheckResult[]): string[] {
+  return results
+    .filter((r) => r.reusable === false)
+    .map((r) => r.check)
+    .sort();
+}
+
 /** Observed gaps this repo never declared as capabilities — the loud residual. */
 export function undeclaredEnvGaps(gaps: readonly string[], declared: CapabilitySet): string[] {
   return gaps.filter((id) => !(id in declared));
@@ -1183,6 +1506,7 @@ function readOwnerRecord(path: string): OwnerRecord | undefined {
     const parsed = JSON.parse(readFileSync(`${path}/owner.json`, "utf8")) as {
       pid?: unknown;
       processStartedAt?: unknown;
+      startTimeSource?: unknown;
       startedAt?: unknown;
     };
     // `>= 1`, not `> 1`: inside a container the gate genuinely runs as pid 1,
@@ -1195,6 +1519,12 @@ function readOwnerRecord(path: string): OwnerRecord | undefined {
       pid: parsed.pid,
       processStartedAt:
         typeof parsed.processStartedAt === "number" ? parsed.processStartedAt : undefined,
+      // Forward the instrument pin (#5829). Dropping it here made every lease look
+      // like a pre-#5829 record, so route 1 never verified even when /proc worked.
+      startTimeSource:
+        parsed.startTimeSource === "ps" || parsed.startTimeSource === "proc"
+          ? parsed.startTimeSource
+          : undefined,
       startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
     };
   } catch {
@@ -1477,6 +1807,10 @@ function readSharedEvidence(
       envGaps: disclosed,
       failureClass: parseFailureClass(metadata.failureClass),
       checkFailures: metadata.checkFailures,
+      attempts: parseAttempts(metadata.attempts),
+      priorResult: parseVerifyResult(metadata.priorResult),
+      priorFailureClass: parseFailureClass(metadata.priorFailureClass),
+      retryHistory: parseRetryHistory(metadata.retryHistory),
     };
   } catch {
     return undefined;
@@ -1521,6 +1855,125 @@ function findReusableSharedEvidence(
       SIBLING_REUSABLE_RESULTS,
     );
     if (sibling) return { cached: sibling, record: dir };
+  }
+  return undefined;
+}
+
+/**
+ * How a scenario may inherit another scenario's record (see
+ * `ScenarioConfig.equivalentEvidenceFrom`). `required` is what THIS scenario
+ * would run at this base — computed lazily because it costs one `git diff`
+ * plus the `when` predicates, and most lookups never reach it.
+ */
+interface EvidenceEquivalence {
+  root: string;
+  donors: readonly string[];
+  required: () => readonly string[];
+}
+
+/**
+ * The check ids an unscoped run of `config` would select at `base`: every check
+ * without a `when`, plus those whose `when` says yes for this diff. Same
+ * `changedFiles` construction as the live run, so a donor is judged against
+ * exactly the set this run would have executed.
+ */
+export function requiredCheckIds(config: ScenarioConfig, base: string, sha: string): string[] {
+  const changedFiles = run(`git diff --name-only ${base}..HEAD 2>/dev/null`).out;
+  const ctx: RunContext = { base, sha, changedFiles };
+  return config.checks.filter((c) => !c.when || c.when(ctx)).map((c) => c.id);
+}
+
+/**
+ * Does `donor` (a record of another scenario, same sha/base/capabilities) cover
+ * every check this scenario would run? Pure, exported for the discriminator
+ * test: an implementation that returns `true` for any full PASS satisfies every
+ * accept assertion, so the test that matters is the one where a missing check
+ * id turns this false.
+ */
+export function coversRequiredChecks(
+  donor: EvidenceCoverage,
+  required: readonly string[],
+): { covered: true } | { covered: false; missing: string[] } {
+  if (!donor.fullScenario) return { covered: false, missing: [...required] };
+  const have = new Set(donor.checks);
+  const missing = required.filter((id) => !have.has(id));
+  return missing.length ? { covered: false, missing } : { covered: true };
+}
+
+/**
+ * A PASS/NA of a donor scenario for the same (sha, base, capabilities) whose
+ * executed checks cover this scenario's required set. Own slot and sibling
+ * slots alike are restricted to {@link SIBLING_REUSABLE_RESULTS}: a donor's
+ * FAIL is never this scenario's answer. A donor found but not covering is said
+ * out loud on stderr — "ran anyway" and "no donor existed" must not be the
+ * same silence — once per (donor, sha, base) per process: one run consults the
+ * store up to three times (lane peek, pre-lock, post-lock).
+ */
+const announcedNonCovering = new Set<string>();
+
+function findEquivalentSharedEvidence(
+  sha: string,
+  base: string,
+  location: EvidenceLocation,
+  capabilities: CapabilitySet,
+  equivalence: EvidenceEquivalence | undefined,
+): { cached: CachedEvidence; record: string } | undefined {
+  if (!equivalence || !equivalence.donors.length) return undefined;
+  let required: readonly string[] | undefined;
+  for (const donor of equivalence.donors) {
+    const coordination = sharedDir(equivalence.root, sha, donor, base);
+    const ownDir = evidenceDir(coordination, location, capabilities);
+    let found: { cached: CachedEvidence; record: string } | undefined;
+    const own = readSharedEvidence(
+      ownDir,
+      sha,
+      donor,
+      base,
+      location,
+      capabilities,
+      SIBLING_REUSABLE_RESULTS,
+    );
+    if (own) found = { cached: own, record: ownDir };
+    if (!found) {
+      let slots: string[] = [];
+      try {
+        slots = readdirSync(resolve(coordination, "by-location"));
+      } catch {
+        slots = [];
+      }
+      const mine = locationId(location, capabilities);
+      for (const slot of slots) {
+        if (slot === mine) continue;
+        const dir = resolve(coordination, "by-location", slot);
+        const sibling = readSharedEvidence(
+          dir,
+          sha,
+          donor,
+          base,
+          undefined,
+          capabilities,
+          SIBLING_REUSABLE_RESULTS,
+        );
+        if (sibling) {
+          found = { cached: sibling, record: dir };
+          break;
+        }
+      }
+    }
+    if (!found) continue;
+    required ??= equivalence.required();
+    const coverage = coversRequiredChecks(found.cached.coverage, required);
+    if (!coverage.covered) {
+      const key = `${donor}@${sha}@${base}`;
+      if (!announcedNonCovering.has(key)) {
+        announcedNonCovering.add(key);
+        console.error(
+          `ℹ ${donor} evidence for ${sha.slice(0, 9)} at the same base does not cover: ${coverage.missing.join(", ")} — not equivalent; this scenario needs its own run.`,
+        );
+      }
+      continue;
+    }
+    return { cached: { ...found.cached, equivalentFrom: donor }, record: found.record };
   }
   return undefined;
 }
@@ -1630,6 +2083,16 @@ function writeLocalCache(
       // #5573: per-check non-PASS outcomes. Always an array so [] (counted
       // zero) and a missing field (never counted) stay distinguishable.
       checkFailures: cached.checkFailures ?? [],
+      // #6158 / #6213: same-SHA retry trail. Always written so attempts=1
+      // (counted first-green) and a missing field (old record) stay different
+      // colours. priorResult is omitted on a first attempt (`undefined` drops).
+      attempts: cached.attempts ?? 1,
+      priorResult: cached.priorResult,
+      priorFailureClass: cached.priorFailureClass,
+      retryHistory: cached.retryHistory ?? [],
+      // Inherited from another scenario's record (`equivalentEvidenceFrom`)?
+      // Disclosure only; `undefined` drops out on a same-scenario record.
+      equivalentFrom: cached.equivalentFrom,
     })}\n`,
   );
 }
@@ -1669,6 +2132,7 @@ function readLocalCache(
     ) {
       return undefined;
     }
+    const inherited = (metadata as { equivalentFrom?: unknown }).equivalentFrom;
     return {
       report: readFileSync(reportFile, "utf8"),
       result,
@@ -1681,6 +2145,11 @@ function readLocalCache(
       envGaps: disclosed,
       failureClass: parseFailureClass(metadata.failureClass),
       checkFailures: metadata.checkFailures,
+      attempts: parseAttempts(metadata.attempts),
+      priorResult: parseVerifyResult(metadata.priorResult),
+      priorFailureClass: parseFailureClass(metadata.priorFailureClass),
+      retryHistory: parseRetryHistory(metadata.retryHistory),
+      equivalentFrom: typeof inherited === "string" ? inherited : undefined,
     };
   } catch {
     return undefined;
@@ -1696,6 +2165,11 @@ function sharedWaitMs(): number {
  * Join the repository-global, SHA-scoped single-flight broker.  A runner can
  * either own the expensive work, reuse completed evidence, or wait for the
  * known live owner.  It never starts a second check tree for the same key.
+ *
+ * `opts.reuse: false` (#6209) still takes the lock and runs: a dirty worktree
+ * must not inherit a same-SHA green, and must not fall through to a private
+ * local lease. Publish stays gated on cleanliness, so a declined reuse does
+ * not overwrite the banked record.
  */
 function acquireSharedScenarioLease(
   root: string,
@@ -1704,8 +2178,14 @@ function acquireSharedScenarioLease(
   base: string,
   location: EvidenceLocation,
   capabilities: CapabilitySet,
+  opts: { reuse?: boolean; equivalence?: EvidenceEquivalence } = {},
 ): ScenarioLease | CachedEvidence | undefined {
+  const allowReuse = opts.reuse !== false;
   const coordination = sharedDir(root, sha, scenario, base);
+  // Own scenario first; a declared donor scenario's covering PASS/NA second.
+  const reusableHere = () =>
+    findReusableSharedEvidence(coordination, sha, scenario, base, location, capabilities) ??
+    findEquivalentSharedEvidence(sha, base, location, capabilities, opts.equivalence);
   const dir = evidenceDir(coordination, location, capabilities);
   const lock = `${coordination}/lease.lock`;
   const deadline = Date.now() + sharedWaitMs();
@@ -1722,38 +2202,33 @@ function acquireSharedScenarioLease(
   const startTimeMs = memoizedStartTimeReader();
 
   for (;;) {
-    const reusable = findReusableSharedEvidence(
-      coordination,
-      sha,
-      scenario,
-      base,
-      location,
-      capabilities,
-    );
-    if (reusable) return reusable.cached;
+    // #6209: dirty trees skip reuse. Mutation verification does not change HEAD.
+    if (allowReuse) {
+      const reusable = reusableHere();
+      if (reusable) return reusable.cached;
+    }
     try {
       createLeaseLock(lock, identity);
       // A completed writer may have released immediately before our create.
       // Re-check while holding the lock; if so we only reuse it and do not run.
       // Sibling PASS/NA is the same fact (#5875): location must not split the slot.
-      const completed = findReusableSharedEvidence(
-        coordination,
-        sha,
-        scenario,
-        base,
-        location,
-        capabilities,
-      );
-      if (completed) {
-        rmSync(lock, { recursive: true, force: true });
-        return completed.cached;
+      if (allowReuse) {
+        const completed = reusableHere();
+        if (completed) {
+          rmSync(lock, { recursive: true, force: true });
+          return completed.cached;
+        }
       }
       mkdirSync(dir, { recursive: true });
       // A crashed publisher may have left report/result without the atomic
       // metadata commit, or a corrupt metadata file.  It is evidence-shaped
       // but untrustworthy; replacing it with a fresh run would turn ambiguity
       // into a false green. Preserve it and require explicit repair instead.
-      if (hasPartialSharedEvidence(dir)) {
+      //
+      // When reuse is declined (#6209), complete own-slot files are the banked
+      // clean-tree answer we are choosing not to inherit — not a crash. Skip
+      // the refuse so the dirty tree can run; publish is still gated off.
+      if (allowReuse && hasPartialSharedEvidence(dir)) {
         rmSync(lock, { recursive: true, force: true });
         console.error(
           `❌ ${scenario}@${sha.slice(0, 9)} has unreadable shared verification evidence; refusing to overwrite it with a duplicate gate.`,
@@ -1915,6 +2390,11 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
     failureClass: cached.failureClass,
     // #5573: per-check non-PASS list. Always written, including `[]`.
     checkFailures: cached.checkFailures ?? [],
+    // #6158 / #6213: same-SHA retry trail. Always written, including attempts=1.
+    attempts: cached.attempts ?? 1,
+    priorResult: cached.priorResult,
+    priorFailureClass: cached.priorFailureClass,
+    retryHistory: cached.retryHistory ?? [],
     sourceHead: sha,
     sourceClean: true,
     completedAt: new Date().toISOString(),
@@ -1962,8 +2442,15 @@ export function provenanceNotice(
     : "";
   const sibling = here !== undefined && !sameLocation(cached.location, here);
   const where = sibling ? "a sibling location in this git common-dir store" : "this same location";
+  // Inherited across scenarios (`equivalentEvidenceFrom`): say which scenario
+  // actually ran, and why that counts — same commit, same resolved base, every
+  // check this scenario would run was executed there. A reader comparing the
+  // report title to the scenario that delivered it must not have to guess.
+  const equivalent = cached.equivalentFrom
+    ? `> ♻️ **Equivalent evidence** — this is the \`${cached.equivalentFrom}\` run for this commit at the same resolved base; it executed every check this scenario would have selected, so no separate run was started.\n`
+    : "";
   return (
-    `> ℹ **Reused evidence** — produced by an earlier run at ${where}, under the ` +
+    `${equivalent}> ℹ **Reused evidence** — produced by an earlier run at ${where}, under the ` +
     "same declared capabilities, for this same commit — not by the invocation that " +
     "delivered it.\n" +
     `> Produced at tree \`${at.worktree}\` · host clone \`${at.hostClone}\`` +
@@ -2127,6 +2614,17 @@ function isVerifyPath(path: string): boolean {
   return path === ".verify" || path.startsWith(".verify/");
 }
 
+function pathMatchesExempt(path: string, rule: string | RegExp): boolean {
+  if (typeof rule === "string") return path === rule;
+  const flags = rule.flags.replaceAll("g", "");
+  return new RegExp(rule.source, flags).test(path);
+}
+
+function isEvidenceExemptPath(path: string, extra: readonly (string | RegExp)[] = []): boolean {
+  if (isVerifyPath(path)) return true;
+  return (extra ?? []).some((rule) => pathMatchesExempt(path, rule));
+}
+
 function unquotePorcelainPath(path: string): string {
   if (path.length >= 2 && path.startsWith('"') && path.endsWith('"')) {
     return path.slice(1, -1).replace(/\\(.)/g, "$1");
@@ -2136,7 +2634,8 @@ function unquotePorcelainPath(path: string): string {
 
 /**
  * Paths on one porcelain line that make HEAD evidence unpublishable.
- * Empty = this line is exempt (`.verify/` artifact or untracked FACTORY_TASK.md).
+ * Empty = this line is exempt (`.verify/` artifact, or a path the consuming
+ * repo listed on `ScenarioConfig.evidenceExemptPaths`).
  *
  * Rename/copy (`R`/`C`) must inspect BOTH source and destination: a rename
  * *out of* `.verify/` into the tree is dirty and names the destination.
@@ -2144,9 +2643,11 @@ function unquotePorcelainPath(path: string): string {
  * `R  .verify/tracked.txt -> src/escaped.ts` as clean — same colour as a
  * real clean tree (#5669 P1).
  */
-export function dirtyPorcelainFiles(line: string): string[] {
+export function dirtyPorcelainFiles(
+  line: string,
+  evidenceExemptPaths: readonly (string | RegExp)[] = [],
+): string[] {
   if (line.length === 0) return [];
-  if (/^\?\? FACTORY_TASK\.md$/.test(line)) return [];
   const xy = line.slice(0, 2);
   const rest = line.length > 3 ? line.slice(3) : "";
   const renameOrCopy = xy.includes("R") || xy.includes("C");
@@ -2159,7 +2660,7 @@ export function dirtyPorcelainFiles(line: string): string[] {
           unquotePorcelainPath(rest.slice(sepAt + sep.length).trim()),
         ]
       : [unquotePorcelainPath(rest.trim())];
-  const dirty = parsed.filter((p) => p.length > 0 && !isVerifyPath(p));
+  const dirty = parsed.filter((p) => p.length > 0 && !isEvidenceExemptPath(p, evidenceExemptPaths));
   if (dirty.length > 0) {
     // Destination first — that is the path now in the tree.
     return sepAt >= 0 && dirty.length === 2 ? [dirty[1], dirty[0]] : dirty;
@@ -2168,20 +2669,26 @@ export function dirtyPorcelainFiles(line: string): string[] {
   // `{clean:true, files:[]}` the way the source-prefix filter did.
   if (renameOrCopy && sepAt < 0) {
     const fallback = unquotePorcelainPath(rest.trim());
-    return fallback.length > 0 && !isVerifyPath(fallback) ? [fallback] : [];
+    return fallback.length > 0 && !isEvidenceExemptPath(fallback, evidenceExemptPaths)
+      ? [fallback]
+      : [];
   }
   return [];
 }
 
 /**
  * Working-tree dirtiness that blocks publishing reusable evidence for HEAD.
- * `.verify/` and untracked `FACTORY_TASK.md` are exempt (runner artifacts /
- * factory brief) only when every parsed path is still under `.verify/`.
+ * `.verify/` is always exempt (runner artifacts). Any other path is dirty
+ * unless the consuming repo listed it on `evidenceExemptPaths` (#6405).
  * Returns the file list, not only a boolean — a dirty refusal that cannot
  * name the files is indistinguishable from a gate that always refuses (#5669).
  */
-export function cleanForEvidence(): EvidenceDirtiness {
-  const files = run("git status --porcelain").out.split("\n").flatMap(dirtyPorcelainFiles);
+export function cleanForEvidence(
+  evidenceExemptPaths: readonly (string | RegExp)[] = [],
+): EvidenceDirtiness {
+  const files = run("git status --porcelain")
+    .out.split("\n")
+    .flatMap((line) => dirtyPorcelainFiles(line, evidenceExemptPaths));
   return { clean: files.length === 0, files };
 }
 
@@ -2191,8 +2698,9 @@ export function cleanForEvidence(): EvidenceDirtiness {
  * Consulted BEFORE lane admission (arc#5833) so a zero-work reuse does not
  * queue behind a live holder. Same identity as {@link runScenario}'s reuse
  * path (sha, scenario, base, capabilities; a sibling-location PASS/NA is a
- * hit, #5875). A miss here must not skip the lane, because a false hit would
- * run the full gate unadmitted.
+ * hit, #5875). A dirty worktree is a miss (#6209): mutation does not change
+ * HEAD, and a same-SHA green is not an answer for this tree. A miss here must
+ * not skip the lane, because a false hit would run the full gate unadmitted.
  *
  * Returns the reusable record, or `undefined` when this invocation would
  * actually run checks (or cannot decide). `--help`/`--na`/`--deliver-cached`
@@ -2208,6 +2716,7 @@ export function peekReusableSharedEvidence(
   const skip = parseSelect(argv, "--skip");
   if (only || skip) return undefined;
   if (resolveRetryFailed(argv, config)) return undefined;
+  if (!cleanForEvidence(config.evidenceExemptPaths).clean) return undefined;
   const sha = head();
   const base = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
   const here = evidenceLocation();
@@ -2215,8 +2724,36 @@ export function peekReusableSharedEvidence(
   const root = sharedRoot();
   if (!root) return undefined;
   const coordination = sharedDir(root, sha, config.scenario, base);
-  return findReusableSharedEvidence(coordination, sha, config.scenario, base, here, capabilities)
-    ?.cached;
+  return (
+    findReusableSharedEvidence(coordination, sha, config.scenario, base, here, capabilities) ??
+    findEquivalentSharedEvidence(
+      sha,
+      base,
+      here,
+      capabilities,
+      evidenceEquivalence(config, root, base, sha),
+    )
+  )?.cached;
+}
+
+/** The equivalence lookup for `config`, or undefined when it declares no donors. */
+function evidenceEquivalence(
+  config: ScenarioConfig,
+  root: string,
+  base: string,
+  sha: string,
+): EvidenceEquivalence | undefined {
+  const donors = config.equivalentEvidenceFrom ?? [];
+  if (!donors.length) return undefined;
+  let required: string[] | undefined;
+  return {
+    root,
+    donors,
+    required: () => {
+      required ??= requiredCheckIds(config, base, sha);
+      return required;
+    },
+  };
 }
 
 /**
@@ -2283,6 +2820,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   }
 
   let lease: ScenarioLease | undefined;
+  /** Set only when this invocation actually consumes a cached FAIL/TIMEOUT. */
+  let retryTrail: RetryTrail | undefined;
 
   // Exit code that also surfaces a DELIVERY failure. A gate that verified fine but whose
   // report was requested (--comment/--post) and never posted must not exit 0 — a caller
@@ -2365,16 +2904,24 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     const coordination = root ? sharedDir(root, sha, config.scenario, base) : undefined;
     let record = coordination ? evidenceDir(coordination, here, declaredCapabilities) : undefined;
     if (!cached) {
-      const shared = coordination
-        ? findReusableSharedEvidence(
-            coordination,
-            sha,
-            config.scenario,
-            base,
-            here,
-            declaredCapabilities,
-          )
-        : undefined;
+      const shared =
+        coordination && root
+          ? (findReusableSharedEvidence(
+              coordination,
+              sha,
+              config.scenario,
+              base,
+              here,
+              declaredCapabilities,
+            ) ??
+            findEquivalentSharedEvidence(
+              sha,
+              base,
+              here,
+              declaredCapabilities,
+              evidenceEquivalence(config, root, base, sha),
+            ))
+          : undefined;
       if (shared) {
         writeLocalCache(sha, config.scenario, base, shared.cached);
         cached = shared.cached;
@@ -2389,6 +2936,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         wallMs: gateWallMs(),
         checksMs: null,
         reused: true,
+        attempts: cached.attempts,
+        prev: cached.priorResult,
       });
       // Diagnostics are reusable, but only PASS/NA are gate tokens.
       finalExit(
@@ -2421,11 +2970,23 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     console.error(
       `--deliver-cached: no current ${config.scenario} cache for ${sha.slice(0, 9)} at base ${base.slice(0, 9)}. Run the scenario first.`,
     );
+    // #6239: a leftover foreign-scenario PASS is still a miss (not a token),
+    // but a blank miss hides that the other scenario's record is on disk.
+    for (const line of foreignScenarioMissNotice({
+      wanted: config.scenario,
+      leftover: peekLocalCacheMeta(sha),
+    })) {
+      console.error(line);
+    }
     process.exit(DELIVER_CACHED_EXIT.missing);
   }
 
-  const fullScenario = !only && !skip;
-  if (retryFailed && !fullScenario) {
+  // Argv scope is known before the loop. Execution coverage is not: `when` and
+  // `failFastSkip` decide that while checks run (#6399). Keep the two apart —
+  // broker admission / --retry-failed / attribution eligibility are about the
+  // invocation, not about whether a later check got jumped.
+  const unscoped = !only && !skip;
+  if (retryFailed && !unscoped) {
     console.error(
       "❌ --retry-failed requires a full scenario; do not combine it with --only or --skip.",
     );
@@ -2436,9 +2997,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // pre-merge resolves origin/main at execution time, so a sibling merge must
   // create a new verification identity even while the PR head stays unchanged.
   const baseForBroker = config.resolveBase ? config.resolveBase() : mergeBase(config.baseBranch);
-  const dirtyAtAdmission = cleanForEvidence();
+  const dirtyAtAdmission = cleanForEvidence(config.evidenceExemptPaths);
   const cleanAtAdmission = dirtyAtAdmission.clean;
-  const brokerRoot = fullScenario ? sharedRoot() : undefined;
+  const brokerRoot = unscoped ? sharedRoot() : undefined;
   const brokerCoordination = brokerRoot
     ? sharedDir(brokerRoot, shaForBroker, config.scenario, baseForBroker)
     : undefined;
@@ -2450,6 +3011,10 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // never fall back to its local lease: an existence check on the shared lock
   // has a TOCTOU window, and two dirty linked worktrees would otherwise each
   // acquire their own local lock and duplicate the expensive gate.
+  //
+  // #6209: dirty trees also must not reuse a same-SHA record. Mutation does
+  // not change HEAD; inheriting the clean tree's green is the same colour as
+  // "this dirty tree is green". They still take the shared lease and run.
   if (brokerRoot) {
     const admission = acquireSharedScenarioLease(
       brokerRoot,
@@ -2458,12 +3023,18 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       baseForBroker,
       here,
       declaredCapabilities,
+      {
+        reuse: cleanAtAdmission,
+        equivalence: evidenceEquivalence(config, brokerRoot, baseForBroker, shaForBroker),
+      },
     );
     if (!admission) process.exit(3);
     if ("report" in admission && !(retryFailed && ["FAIL", "TIMEOUT"].includes(admission.result))) {
       writeLocalCache(shaForBroker, config.scenario, baseForBroker, admission);
       console.error(
-        `ℹ reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}; no duplicate gate started.`,
+        admission.equivalentFrom
+          ? `ℹ reused shared ${admission.equivalentFrom} evidence as ${config.scenario} for ${shaForBroker.slice(0, 9)} (same sha, same resolved base ${baseForBroker.slice(0, 9)}, required checks covered); no duplicate gate started.`
+          : `ℹ reused shared ${config.scenario} evidence for ${shaForBroker.slice(0, 9)}; no duplicate gate started.`,
       );
       // A cached red is a verdict, not a fact of nature: #5339 watched one flake become
       // this sha's permanent answer because nothing on screen said the retry existed.
@@ -2472,11 +3043,16 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
           `ℹ that cached verdict is ${admission.result}. It is NOT re-run automatically (single-flight, #5060) — pass --retry-failed to force one real retry here.`,
         );
       }
+      // An inherited record lives under the DONOR scenario's coordination dir;
+      // naming this scenario's dir would print a path that does not exist.
+      const reusedCoordination = admission.equivalentFrom
+        ? sharedDir(brokerRoot, shaForBroker, admission.equivalentFrom, baseForBroker)
+        : brokerCoordination;
       const reused = provenanceNotice(
         admission,
         shaForBroker,
-        brokerCoordination
-          ? evidenceDir(brokerCoordination, admission.location, admission.capabilities)
+        reusedCoordination
+          ? evidenceDir(reusedCoordination, admission.location, admission.capabilities)
           : brokerRecord,
         here,
       );
@@ -2485,6 +3061,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         wallMs: gateWallMs(),
         checksMs: null,
         reused: true,
+        attempts: admission.attempts,
+        prev: admission.priorResult,
       });
       finalExit(
         admission.result === "PASS" || admission.result === "NA" ? 0 : 1,
@@ -2520,6 +3098,8 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
           wallMs: gateWallMs(),
           checksMs: null,
           reused: true,
+          attempts: retry.attempts,
+          prev: retry.priorResult,
         });
         finalExit(
           retry.result === "PASS" || retry.result === "NA" ? 0 : 1,
@@ -2528,6 +3108,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         );
       }
       lease = retry;
+      retryTrail = consumeRetryTrail(admission);
       console.error(
         `ℹ retrying cached ${admission.result} evidence for ${config.scenario}@${shaForBroker.slice(0, 9)} under a new shared lease.`,
       );
@@ -2580,6 +3161,10 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
 
   const skipAfterFail = new Set(config.failFastSkip ?? []);
   const results: CheckResult[] = [];
+  // Appended only when the check actually ran. A fail-fast skip writes a stub
+  // CheckResult (report row + log) but must not appear here (#6399): the field's
+  // comment is "the check ids that actually executed, in run order".
+  const executed: string[] = [];
   let blockingFailed = false;
   for (const c of selected) {
     if (blockingFailed && skipAfterFail.has(c.id)) {
@@ -2602,14 +3187,23 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     // rather than taking the whole run down with no CheckResult at all (#5591).
     const ran = persistCheckLog(sha, runCheckGuarded(c, ctx));
     results.push(ran);
+    executed.push(c.id);
     if (!isSkipped(ran) && ran.blocking && !ran.pass) blockingFailed = true;
   }
 
-  const coverage: EvidenceCoverage = { fullScenario, checks: selected.map((c) => c.id) };
+  // Execution coverage, not argv. `unscoped && selected === executed` is the
+  // issue's derivation: a jumped check makes this false even with a clean argv.
+  const fullScenario = unscoped && executed.length === selected.length;
+  const coverage: EvidenceCoverage = { fullScenario, checks: executed };
   // Disclosure, not key (#5386) — see `observedEnvGaps`. The identity was fixed before
   // the checks ran; what they reported about the environment travels ON the record.
   const envGaps = observedEnvGaps(results);
   const undeclaredGaps = undeclaredEnvGaps(envGaps, declaredCapabilities);
+  // #6420 — the OTHER publish-time withhold. Not an env gap: a check that
+  // already ran can still say its answer must not travel. Same footing as
+  // envGaps (known after the run, never keyed) and a different field so a
+  // host-local PASS does not have to lie `ENV_GAP` to stay undonated.
+  const nonReusable = observedNonReusable(results);
   // #5626 — the run's class, on the SAME footing as `envGaps`: derived from what the
   // checks reported, disclosed on the record, and read by no gate. It is computed
   // BEFORE attribution on purpose. `applyAttribution` changes the aggregate verdict
@@ -2628,7 +3222,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     deriveResult(results),
     config.attribution,
     { argv, results, base, sha },
-    fullScenario,
+    unscoped,
   );
   const derived = attribution.derived;
   const ok = derived === "PASS";
@@ -2660,7 +3254,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const result: VerifyResult = fullScenario || derived !== "PASS" ? derived : "PARTIAL";
   const partialNotice = fullScenario
     ? undefined
-    : `> ⚠️ **PARTIAL VERIFICATION — NOT A GATE.** ${selected.length} of ${config.checks.length} checks ran (\`${coverage.checks.join("`, `")}\`). ` +
+    : `> ⚠️ **PARTIAL VERIFICATION — NOT A GATE.** ${coverage.checks.length} of ${config.checks.length} checks ran (\`${coverage.checks.join("`, `")}\`). ` +
       "The rest were never executed, so this report cannot satisfy the pre-push or merge gate. It is a diagnostic artifact.";
   // Measured ONCE and shared by the report line and the history row, so the two
   // can never disagree. Taken here rather than after delivery on purpose: the
@@ -2679,8 +3273,9 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   if (envDrift) console.error(envDrift);
   const undeclared = undeclaredEnvGapNotice(undeclaredGaps);
   if (undeclared) console.error(undeclared);
+  const retryNotice = retryTrail ? renderRetryHistoryNotice(retryTrail) : undefined;
   const notice =
-    [partialNotice, envDrift, undeclared, elsewhere, attribution.notice]
+    [partialNotice, envDrift, undeclared, elsewhere, retryNotice, attribution.notice]
       .filter(Boolean)
       .join("\n\n") || undefined;
   const report = renderReport(results, {
@@ -2691,6 +3286,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     origin: originNotice(here, config.scenario, base),
     notice,
     wallMs,
+    derived,
   });
 
   if (argv.includes("--json")) {
@@ -2698,9 +3294,17 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   } else {
     // Plain stdout carries the upsert marker so a gh-less agent can paste it via
     // MCP and a later run can still find/upsert it.
-    console.log(stickyBody(report, sha, result));
+    console.log(
+      stickyBody(report, sha, result, MARKER_PREFIX, markerExtrasFrom(trailFields(retryTrail))),
+    );
   }
-  const delivery = deliver(report, sha, result, { wallMs, checksMs });
+  const trail = trailFields(retryTrail);
+  const delivery = deliver(report, sha, result, {
+    wallMs,
+    checksMs,
+    attempts: trail.attempts,
+    prev: trail.priorResult,
+  });
 
   // Cache a PASS for the pre-push gate — only when the tree is clean, so the
   // cached sha matches exactly what was verified.
@@ -2714,7 +3318,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   // on the one run that needed it. Real loss, arc PR #3062.
   // The runner's own lease/report artifacts live under `.verify/`; they must
   // not make an otherwise clean commit ineligible for a same-SHA PASS cache.
-  const cleanAtCompletion = cleanForEvidence().clean;
+  const cleanAtCompletion = cleanForEvidence(config.evidenceExemptPaths).clean;
   if (ok ? cleanAtAdmission && cleanAtCompletion : true) {
     mkdirSync(".verify", { recursive: true });
     // A partial run still lands here — deliberately. It is the diagnostic artifact, and
@@ -2729,28 +3333,31 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       envGaps,
       failureClass,
       checkFailures,
+      ...trail,
     });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
   // partial `--only` run can never satisfy the full merge gate, and a dirty
   // tree can never prove the commit named by its HEAD.
   //
-  // …and neither can a run an environment gap helped decide (#5386). Disclosure alone
-  // was not enough: the notice is prose, while `requireStickyGate` parses `result=`
-  // (`gate.ts:115`), so a host that HAS the capability would inherit — and the merge
-  // gate, `pre-push` and `--deliver-cached` would all accept — a green this gate never
-  // measured there. A gate must not report a colour it did not measure.
+  // …and neither can a run an environment gap helped decide (#5386), nor a run a
+  // check marked `reusable: false` (#6420). Disclosure alone was not enough: the
+  // notice is prose, while `requireStickyGate` parses `result=` (`gate.ts:115`),
+  // so a host that HAS the capability — or that would have measured a different
+  // host-local answer — would inherit a green this gate never measured there.
+  // A gate must not report a colour it did not measure.
   //
-  // This is a PUBLISH-time decision, not an identity input, so it does not contradict
+  // These are PUBLISH-time decisions, not identity inputs, so they do not contradict
   // "an identity must be computable before the run": the answer is known exactly when
   // it is needed. The in-file precedent is the dirty tree a few lines above — run under
-  // the shared lease, publish nothing reusable.
+  // the shared lease, publish nothing reusable. `reusable: false` is the same shape
+  // without lying `ENV_GAP`: "this host lacks a capability" and "this round's answer
+  // must not travel" are two facts, two fields.
   //
-  // The price is real and one-sided: a gapped host loses reuse and re-runs every time.
-  // A host missing a capability its own checks need is by definition an unhealthy host,
-  // and losing reuse there is the cheaper half of the trade. The LOCAL cache above is
-  // deliberately still written — that is this host's own answer for its own push gate,
-  // and withholding it is what livelocked `pre-push` (#5600 round 1).
+  // The price is real and one-sided: a gapped or host-local host loses reuse and
+  // re-runs every time. The LOCAL cache above is deliberately still written — that
+  // is this host's own answer for its own push gate, and withholding it is what
+  // livelocked `pre-push` (#5600 round 1).
   const publishable = fullScenario && cleanAtAdmission && cleanAtCompletion;
   if (publishable && envGaps.length) {
     console.error(
@@ -2759,7 +3366,14 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         "Declare them in `capabilities` to make this answer reusable within that environment.",
     );
   }
-  if (publishable && !envGaps.length) {
+  if (publishable && nonReusable.length) {
+    console.error(
+      `ℹ ${config.scenario}@${sha.slice(0, 9)} marked check(s) ${nonReusable.join(", ")} not reusable across hosts; ` +
+        "running under the shared coordination lease without publishing reusable evidence. " +
+        "This is not an environment-capability gap — the verdict is host-local.",
+    );
+  }
+  if (publishable && !envGaps.length && !nonReusable.length) {
     publishSharedEvidence(lease, {
       report,
       result,
@@ -2769,6 +3383,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       envGaps,
       failureClass,
       checkFailures,
+      ...trail,
     });
   }
 

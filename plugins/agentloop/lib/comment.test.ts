@@ -4,24 +4,28 @@
  * dependency is injected, so no `gh` / network is touched.
  */
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
+  anchoredMarkerLookupJq,
   attributeShaToPr,
   type CommentArgs,
   decodeHtmlEntities,
   deliverComment,
   HISTORY_CAP,
   HISTORY_MARKER,
-  HTML_DECODE_JQ,
   MARKER_PREFIX,
   makeMarker,
   parseCommentArgs,
   parseRunHistory,
   postComment,
+  postOnce,
   readDeliveredSha,
   readStickyBody,
   renderRunHistory,
   resolvePr,
   stickyBody,
+  VERDICT_MARKER_PREFIX,
   type VerifyRunEntry,
 } from "./comment.ts";
 import { trimFullLogsSection } from "./report.ts";
@@ -104,6 +108,37 @@ describe("stickyBody", () => {
   });
 });
 
+describe("makeMarker retry trail (#6158)", () => {
+  it("ACCEPT: a first-green marker has no attempts=/prev= — absent is not 1", () => {
+    const m = makeMarker(SHA, RESULT);
+    expect(m).toBe(`${MARKER_PREFIX} sha=${SHA} result=PASS -->`);
+    expect(m).not.toContain("attempts=");
+    expect(m).not.toContain("prev=");
+  });
+
+  it("弄坏: retry extras must land on the marker, and result= must still parse as PASS", () => {
+    const m = makeMarker(SHA, "PASS", MARKER_PREFIX, { attempts: 2, prev: "FAIL" });
+    expect(m).toContain("result=PASS");
+    expect(m).toContain("attempts=2");
+    expect(m).toContain("prev=FAIL");
+    // gate.ts: `markerLine.match(/result=([A-Z]+)/)` — first match must stay PASS.
+    // Naming the prior `priorResult=` would collide (`result=FAIL` is a substring).
+    expect(m.match(/result=([A-Z]+)/)?.[1]).toBe("PASS");
+    expect(m).not.toContain("priorResult=");
+  });
+
+  it("stickyBody forwards extras onto line 1", () => {
+    const b = stickyBody("## Report\nok", SHA, "PASS", MARKER_PREFIX, {
+      attempts: 2,
+      prev: "FAIL",
+    });
+    const line1 = b.split("\n")[0] ?? "";
+    expect(line1).toContain("attempts=2");
+    expect(line1).toContain("prev=FAIL");
+    expect(line1.match(/result=([A-Z]+)/)?.[1]).toBe("PASS");
+  });
+});
+
 describe("resolvePr", () => {
   it("returns the explicit value without calling gh", () => {
     let called = false;
@@ -183,11 +218,8 @@ describe("postComment", () => {
     // Runs the ACTUAL filter `postOnce` sends to `gh api --jq`, via a real local `jq`
     // binary, against crafted comment bodies. This is deliberately not a command-string
     // shape assertion: it proves the match/no-match behavior the issue asked for.
-    const runJqLookup = (bodies: string[]): string => {
-      const firstLineTest =
-        `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
-        `test("^${MARKER}")`;
-      const filter = `[.[] | select(${firstLineTest})][-1].id // empty`;
+    const runJqLookup = (bodies: string[], prefix = MARKER): string => {
+      const filter = anchoredMarkerLookupJq(prefix);
       const comments = bodies.map((body, i) => ({ id: i + 1, body }));
       const proc = Bun.spawnSync(["jq", filter], {
         stdin: Buffer.from(JSON.stringify(comments)),
@@ -229,6 +261,115 @@ describe("postComment", () => {
         .replace(/>/g, "&gt;");
       expect(body.startsWith(MARKER)).toBe(false); // sanity: this really is escaped
       expect(runJqLookup([body])).toBe("1");
+    });
+  });
+
+  /**
+   * #6404 / aside#1514 — the same unanchored `contains()` that #3576 retired for
+   * verification sticky is still what pr-review SKILL.md Step 6 tells agents to
+   * run for `<!-- pr-review-verdict -->`. A demo comment that *quoted* the
+   * marker in a table cell was PATCHed away. Accept + reject are a pair: a
+   * lookup that selects nobody would pass the reject arm alone.
+   */
+  describe("pr-review-verdict marker lookup (#6404, aside#1514)", () => {
+    const CONTAINS = '[.[]|select(.body|contains("<!-- pr-review-verdict -->"))]|last|.id // empty';
+    const asideDemo = [
+      "> Demo: the first-line anchor must not match a comment that only quotes the marker.",
+      "",
+      "| # | marker | kind |",
+      "|---|---|---|",
+      "| 1 | `<!-- verification-report` | sticky |",
+      "| 2 | `<!-- pr-review-verdict -->` | this verdict |",
+    ].join("\n");
+    const realVerdict = [
+      "<!-- pr-review-verdict -->",
+      "> 🤖 AI Agent PR Review @ host · runner:x · skill:pr-review",
+      "",
+      "## 裁定：MERGE —— 针对 HEAD abcdef1",
+      "",
+      '<!-- sweep-trace: {"ver":1,"pr":1514,"gate":"verdict","val":"MERGE"} -->',
+    ].join("\n");
+
+    const runJq = (bodies: string[], filter: string): string => {
+      const comments = bodies.map((body, i) => ({
+        id: i === 1 ? 5628844029 : i + 1,
+        body,
+      }));
+      const proc = Bun.spawnSync(["jq", filter], {
+        stdin: Buffer.from(JSON.stringify(comments)),
+        stdout: "pipe",
+      });
+      return proc.stdout.toString("utf8").trim();
+    };
+
+    it("positive control: unanchored contains() WOULD select the aside#1514 demo (otherwise reject is vacuous)", () => {
+      expect(asideDemo).toContain("<!-- pr-review-verdict -->");
+      expect(asideDemo.trimStart().startsWith("<!--")).toBe(false);
+      expect(runJq([asideDemo], CONTAINS)).toBe("1");
+    });
+
+    it("reject: anchored lookup does NOT select a comment that only quotes the marker in a table", () => {
+      expect(runJq([asideDemo], anchoredMarkerLookupJq(VERDICT_MARKER_PREFIX))).toBe("");
+    });
+
+    it("accept: anchored lookup DOES select a comment whose first non-empty line is the marker", () => {
+      expect(runJq([realVerdict], anchoredMarkerLookupJq(VERDICT_MARKER_PREFIX))).toBe("1");
+    });
+
+    it("when the quote is last, contains() PATCHes the demo; anchored still PATCHes the real verdict", () => {
+      // aside#1514 shape: the quoting demo is the last contains() hit, so the
+      // skill's old `|last` upsert overwrites it. Anchored lookup ignores it.
+      expect(runJq([realVerdict, asideDemo], CONTAINS)).toBe("5628844029");
+      expect(runJq([realVerdict, asideDemo], anchoredMarkerLookupJq(VERDICT_MARKER_PREFIX))).toBe(
+        "1",
+      );
+    });
+
+    it("postOnce with VERDICT_MARKER_PREFIX POSTs when lookup is empty (quoted-only thread)", () => {
+      const cmds: string[] = [];
+      const res = postOnce(
+        "1514",
+        realVerdict,
+        (cmd) => {
+          cmds.push(cmd);
+          if (cmd.includes("--jq")) return ok("");
+          return ok("created");
+        },
+        VERDICT_MARKER_PREFIX,
+      );
+      expect(res).toEqual({ ok: true, out: "created" });
+      expect(cmds.some((c) => c.includes("-X POST"))).toBe(true);
+      expect(cmds.some((c) => c.includes("-X PATCH"))).toBe(false);
+      const jqCmd = cmds.find((c) => c.includes("--jq"));
+      expect(jqCmd).toContain('split("\\n")');
+      expect(jqCmd).toContain(`test("^${VERDICT_MARKER_PREFIX}")`);
+      expect(jqCmd).not.toContain("contains(");
+    });
+  });
+
+  describe("pr-review SKILL.md Step 6 must not hand-write contains() (#6404)", () => {
+    const skill = readFileSync(
+      fileURLToPath(new URL("../skills/pr-review/SKILL.md", import.meta.url)),
+      "utf8",
+    );
+    const step6 = skill.split("### Step 6")[1]?.split("## Autonomy")[0] ?? "";
+
+    it("enumerates Step 6 (empty split must not read as green)", () => {
+      expect(step6.length).toBeGreaterThan(200);
+      expect(step6).toContain("pr-review-verdict");
+    });
+
+    it("REJECT: Step 6 does not show unanchored contains() as the upsert lookup", () => {
+      expect(step6).not.toMatch(/contains\(/);
+    });
+
+    it("ACCEPT: Step 6 wires post-verdict.ts rather than a hand-rolled gh --jq", () => {
+      expect(step6).toMatch(/post-verdict\.ts/);
+      expect(step6).toMatch(/\$\{AGENTLOOP_ROOT:-[^\n]*\}\/scripts\/post-verdict\.ts/);
+    });
+
+    it("REJECT: the invocation does not use the vendored-in-arc relative plugin path", () => {
+      expect(step6).not.toMatch(/bun\s+["']?\.claude\/plugins\/agentloop[^\n]*post-verdict\.ts/);
     });
   });
 
@@ -313,6 +454,35 @@ describe("postComment", () => {
     const res = postComment("742", "## Report", SHA, RESULT, runner);
     expect(res.ok).toBe(false);
     expect(postAttempts).toBe(1);
+  });
+
+  it("ACCEPT (#6401): the gh payload does not carry /Users/<os-user> from Produced at / Reused evidence", () => {
+    const tree = "/Users/robmao/.arc-workers/trees/aside-1464";
+    const host = "/Users/robmao/work/arcblock/aside/.git";
+    const record =
+      "/Users/robmao/work/arcblock/aside/.git/agentloop/verification/f4a7c31/pre-pr/4341d87/by-location/aside-1464-8a33c01eac9f";
+    const report =
+      `> 📍 **Produced at** — tree \`${tree}\` · host clone \`${host}\` · scenario \`pre-pr\` · base \`${SHA}\`\n\n` +
+      `> ℹ **Reused evidence**\n` +
+      `> Produced at tree \`${tree}\` · host clone \`${host}\`.\n` +
+      `> Shared record: \`${record}\`\n` +
+      `> Force a real re-run here: \`rm -rf .verify/${SHA}.* '${record}'\`\n\n` +
+      `## Verification Report\nPASS\n`;
+    const posted: string[] = [];
+    const runner = (cmd: string, _env?: Record<string, string>, input?: string) => {
+      if (cmd.includes("--jq")) return ok("");
+      if (!cmd.includes("gh api -X")) return ok("");
+      if (input) posted.push(JSON.parse(input).body as string);
+      return ok("created");
+    };
+    const res = postComment("742", report, SHA, RESULT, runner);
+    expect(res.ok).toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toContain("/Users/robmao");
+    expect(posted[0]).toContain("tree `aside-1464`");
+    expect(posted[0]).toContain("host clone `<repo>/.git`");
+    expect(posted[0]).toContain("by-location/aside-1464-8a33c01eac9f");
+    expect(posted[0]).toContain("<!-- verification-report");
   });
 });
 
@@ -690,6 +860,33 @@ describe("deliverComment", () => {
     );
     expect(res).toEqual({ posted: true, reason: "dry-run" });
     expect(cmds.some((c) => c.includes("-X POST") || c.includes("-X PATCH"))).toBe(false);
+  });
+
+  it("ACCEPT (#6401): dry-run preview redacts /Users/<os-user> the same way a real post does", () => {
+    const leaked =
+      "> 📍 **Produced at** — tree `/Users/robmao/.arc-workers/trees/aside-1464` · host clone `/Users/robmao/work/arcblock/aside/.git` · scenario `pre-pr` · base `abc`";
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      const res = deliverComment(
+        { post: true, pr: "742", dryRun: true },
+        leaked,
+        SHA,
+        RESULT,
+        stub(),
+      );
+      expect(res).toEqual({ posted: true, reason: "dry-run" });
+    } finally {
+      console.error = orig;
+    }
+    const preview = errors.join("\n");
+    expect(preview).toContain("[dry-run]");
+    expect(preview).not.toContain("/Users/robmao");
+    expect(preview).toContain("tree `aside-1464`");
+    expect(preview).toContain("host clone `<repo>/.git`");
   });
 
   it("reports no-pr when the PR cannot be resolved", () => {

@@ -1,0 +1,26 @@
+<!-- verification-report sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa result=PASS -->
+> Synthetic evidence block for transport tests (arc#6334).
+> Produced at tree `/tmp/synthetic-worktree`.
+
+| Check | Result |
+|-------|--------|
+| Build | PASS |
+
+<details><summary>notes</summary>
+
+line one of a multiline detail block
+line two still in the same comment body
+
+</details>
+<!-- pr-review-verdict -->
+> Synthetic PR review
+
+## MERGE (held)
+
+Synthetic verdict body with newlines so raw gh jq body spans many lines.
+
+<!-- sweep-trace: {"ver":1,"pr":34,"gate":"verdict","val":"MERGE","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","round":1} -->
+<!-- ordinary discussion -->
+Short third comment.
+Still has
+multiple lines.

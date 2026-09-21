@@ -5,8 +5,10 @@
  *
  *   bun bot-clean.ts --pr <n> [--repo owner/name] [--vendor 'login[bot]']
  *
- * With no `--vendor`, every bot login present on the PR is enumerated and
- * judged, one line each, plus a `vendorsSeen=` summary line.
+ * With no `--vendor`, every vendor in `RECOGNISED_REVIEW_VENDORS` is judged —
+ * including those that left no trace (`absent` is a real per-vendor verdict),
+ * not only the ones that happened to appear — one line each, plus a
+ * `vendorsSeen=` summary line.
  *
  * Exit 0 = every vendor clean · 1 = some vendor not clean · 2 = usage, or a
  * face could not be fetched (fail-closed).
@@ -56,8 +58,12 @@
  *
  * ## The criterion, stated once
  *
- *   clean  ⟺  every face was actually FETCHED
- *             ∧ zero findings from this vendor on EITHER face
+ *   clean  ⟺  every face was actually FETCHED (all five, including
+ *               `pulls/<n>/reviews`)
+ *             ∧ zero *live* findings from this vendor on either comment face
+ *               (a COMPLETED head-bound 👍 supersedes earlier findings the
+ *               same way it supersedes an earlier quota notice; comments are
+ *               never deleted, so a raw `total > 0` is absorbing)
  *             ∧ the vendor published its affirmative no-findings signal (👍)
  *             ∧ that signal names the commit that is HEAD
  *             ∧ no review is in flight (no 👀, and the status cell says
@@ -66,8 +72,9 @@
  *
  * Everything else is a distinct, nameable state — never folded into clean:
  *
- *   findings     ≥1 finding from this vendor, on the inline or the
- *                conversation face
+ *   findings     ≥1 *live* finding from this vendor, on the inline or the
+ *                conversation face. Historical findings that a later
+ *                COMPLETED head-bound 👍 outranks are not this state.
  *   blocked      the vendor said it CANNOT run (usage limit). Waiting is
  *                futile; this must not wear the colour of "still running".
  *   running      👍 exists, but a review is in flight (👀, or the status cell
@@ -117,10 +124,12 @@
  * ## No bypass
  *
  * There is deliberately no flag that turns a not-clean verdict into clean. The
- * escape from `findings` is to answer the findings; from `stale`, to re-trigger
- * the review on head; from `running`, to wait for the run in flight; from
- * `blocked`, to restore the vendor's quota; from `incomplete`, to wait; from
- * `unavailable`, to fetch again.
+ * escape from `findings` is to answer the findings and get a fresh head-bound
+ * 👍 (comments are never deleted, so that later completion must supersede
+ * them); from `stale`, to re-trigger the review on head; from `running`, to
+ * wait for the run in flight; from `blocked`, to restore the vendor's quota;
+ * from `incomplete`, to wait; from `unavailable`, to fetch again; from
+ * `absent`, to wait or record why the PR proceeds without that vendor.
  *
  * `treatCompletedSummaryAsClean` is NOT a bypass — it is the mutation knob that
  * re-creates the defect, unreachable from argv, and it exists solely so
@@ -141,6 +150,25 @@ export interface CommentLike {
   user: { login: string };
   created_at?: string;
   path?: string;
+  body: string;
+}
+
+/**
+ * One element of `gh api repos/{o}/{r}/pulls/<n>/reviews`.
+ *
+ * Codex posts a `COMMENTED` review whose body is a pointer
+ * (`**Reviewed commit:** \`abc1234\``); the findings themselves land on the
+ * two comment faces. This face is still fetched: an unread face must not
+ * share a colour with an empty one (#6164 F4), and the Reviewed-commit
+ * marker is a second source for `reviewedSha` — the summary's Commit cell
+ * names head 4.5 minutes before the run concludes (#6119).
+ */
+export interface ReviewLike {
+  id?: number;
+  user: { login: string };
+  submitted_at?: string;
+  commit_id?: string;
+  state?: string;
   body: string;
 }
 
@@ -168,13 +196,21 @@ export interface BotFaces {
    * when Codex could not attach to diff lines, the whole review body.
    */
   issueComments: CommentLike[] | null;
+  /**
+   * `gh api repos/{o}/{r}/pulls/<n>/reviews` — Codex `COMMENTED` review
+   * objects. **`null` means the fetch FAILED.** An empty array means it
+   * succeeded and there is nothing there. This face is not optional: omitting
+   * it is the same 同色 hole as never fetching it (#6164 F4).
+   */
+  reviews: ReviewLike[] | null;
 }
 
 /**
- * Which faces could not be read. ALL FOUR are nullable on purpose: an
+ * Which faces could not be read. ALL FIVE are nullable on purpose: an
  * unreadable reactions face must not read as "no 👍", an unreadable
- * conversation face must not read as "the bot never spoke", and an unreadable
- * head sha must not read as "the review was for head".
+ * conversation face must not read as "the bot never spoke", an unreadable
+ * head sha must not read as "the review was for head", and an unreadable
+ * reviews face must not read as "the vendor posted no review object".
  */
 function unreadableFaces(faces: BotFaces): string[] {
   return (
@@ -183,9 +219,10 @@ function unreadableFaces(faces: BotFaces): string[] {
       ["issues/<n>/reactions", faces.issueReactions],
       ["pulls/<n>/comments", faces.inlineComments],
       ["issues/<n>/comments", faces.issueComments],
+      ["pulls/<n>/reviews", faces.reviews],
     ] as const
   )
-    .filter(([, v]) => v === null)
+    .filter(([, v]) => v == null)
     .map(([name]) => name);
 }
 
@@ -214,7 +251,10 @@ export interface BotSignals {
    * SUFFICIENT for clean (#6119 `3948679018`) — see judgeBotReview.
    */
   summaryCompleted: boolean;
-  /** the sha named in the summary's Commit cell, or null if unreadable */
+  /**
+   * the sha named in the summary's Commit cell, or — if that cell is missing —
+   * the newest `**Reviewed commit:**` on the reviews face (#6164 F4).
+   */
   reviewedSha: string | null;
   /** the vendor said it has hit its usage limit and will not run */
   quotaBlocked: boolean;
@@ -222,10 +262,16 @@ export interface BotSignals {
   summaryAt: number | null;
   /** epoch ms of the NEWEST usage-limit notice, or `null` if none/unparsable */
   latestQuotaAt: number | null;
-  /** findings on `pulls/<n>/comments` */
+  /** epoch ms of the NEWEST finding (inline or conversation), or `null` */
+  latestFindingAt: number | null;
+  /** findings on `pulls/<n>/comments` (raw; may include superseded history) */
   inlineFindings: number;
   /** findings posted as top-level `issues/<n>/comments` review bodies */
   conversationFindings: number;
+  /** the vendor posted a non-empty review object on `pulls/<n>/reviews` */
+  reviewPresent: boolean;
+  /** how many review objects this vendor posted (0 is a read, not a miss) */
+  reviewsPosted: number;
 }
 
 /** Which faces the signals were actually derived from (#6013, P3b). */
@@ -234,6 +280,7 @@ export interface FaceRead {
   reactions: boolean;
   inline: boolean;
   conversation: boolean;
+  reviews: boolean;
 }
 
 export interface BotVerdict {
@@ -263,6 +310,13 @@ export const SUMMARY_COMPLETED_RE = /✅\s*\*{0,2}\s*Completed/;
 
 /** The Commit cell of that same table row: `| \`44b4546\` |`. */
 export const SUMMARY_COMMIT_RE = /\|\s*`([0-9a-f]{7,40})`\s*\|/;
+
+/**
+ * Codex review-object body: `**Reviewed commit:** \`2de275e8b1\``. Independent
+ * of the summary's Commit cell, and posted when the run concludes rather than
+ * when it starts (#6164 F4 / #6119's 4.5-minute window).
+ */
+export const REVIEWED_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/;
 
 /**
  * "You have reached your Codex usage limits for code reviews." (#5982)
@@ -327,19 +381,24 @@ function allBotLogins(faces: BotFaces): string[] {
     if (BOT_LOGIN_RE.test(c.user.login)) seen.add(c.user.login);
   for (const c of faces.issueComments ?? [])
     if (BOT_LOGIN_RE.test(c.user.login)) seen.add(c.user.login);
+  for (const c of faces.reviews ?? []) if (BOT_LOGIN_RE.test(c.user.login)) seen.add(c.user.login);
   return [...seen].sort();
 }
 
 /**
- * The RECOGNISED review connectors present on this PR.
+ * The RECOGNISED review connectors this judge will score.
  *
- * The host-gate rule (CLAUDE.md): a per-vendor judge must ship the enumerator
- * of the set it judges, or a second vendor's findings are invisible behind the
- * hardcoded default. Loud on empty — the CLI prints `vendorsSeen=0` rather than
- * quietly judging nobody.
+ * Presence on the PR is NOT the accept-set (#6164 F2). A vendor in the roster
+ * that left no trace is `absent` — which is explicitly not clean — and must
+ * be computed, printed, and folded into the exit. Enumerating only who
+ * appeared made "Codex was judged and was fine" share a colour with "Codex
+ * was never judged", as long as some *other* recognised vendor showed up.
+ *
+ * The `faces` argument is the other half of the host-gate pair (unknown bots
+ * still come from the PR); the judged set itself is the roster.
  */
-export function enumerateVendors(faces: BotFaces): string[] {
-  return allBotLogins(faces).filter((l) => RECOGNISED_REVIEW_VENDORS.includes(l));
+export function enumerateVendors(_faces: BotFaces): string[] {
+  return [...RECOGNISED_REVIEW_VENDORS].sort();
 }
 
 /**
@@ -397,23 +456,84 @@ function newest(values: (number | null)[]): number | null {
   return known.length === 0 ? null : Math.max(...known);
 }
 
+function reviewedShaFromReviews(reviews: ReviewLike[] | null, vendor: string): string | null {
+  const mine = (reviews ?? [])
+    .filter((r) => r.user.login === vendor)
+    .map((r) => ({
+      sha: REVIEWED_COMMIT_RE.exec(r.body ?? "")?.[1] ?? null,
+      at: at(r.submitted_at),
+    }))
+    .filter((x): x is { sha: string; at: number | null } => x.sha !== null);
+  if (mine.length === 0) return null;
+  const [first, ...rest] = mine;
+  if (first === undefined) return null;
+  let best = first;
+  for (const row of rest) {
+    if (row.at !== null && (best.at === null || row.at > best.at)) best = row;
+  }
+  return best.sha;
+}
+
 function collectSignals(faces: BotFaces, vendor: string): BotSignals {
   const mine = (faces.issueComments ?? []).filter((c) => c.user.login === vendor);
   const reactions = faces.issueReactions ?? [];
   const summary = mine.find((c) => isSummaryComment(c.body));
+  const vendorReviews = (faces.reviews ?? []).filter((r) => r.user.login === vendor);
+  const inlineMine = (faces.inlineComments ?? []).filter((c) => c.user.login === vendor);
+  const conversationMine = mine.filter((c) => isReviewBody(c.body));
   return {
     thumbsUp: reactions.some((r) => r.content === THUMBS_UP && r.user.login === vendor),
     eyes: reactions.some((r) => r.content === EYES && r.user.login === vendor),
     summaryPresent: mine.length > 0,
     summaryCompleted: summary !== undefined && SUMMARY_COMPLETED_RE.test(summary.body),
-    reviewedSha: SUMMARY_COMMIT_RE.exec(summary?.body ?? "")?.[1] ?? null,
+    reviewedSha:
+      SUMMARY_COMMIT_RE.exec(summary?.body ?? "")?.[1] ??
+      reviewedShaFromReviews(faces.reviews, vendor),
     quotaBlocked: mine.some((c) => QUOTA_NOTICE_RE.test(c.body)),
     summaryAt: at(summary?.created_at),
     latestQuotaAt: newest(
       mine.filter((c) => QUOTA_NOTICE_RE.test(c.body)).map((c) => at(c.created_at)),
     ),
-    inlineFindings: (faces.inlineComments ?? []).filter((c) => c.user.login === vendor).length,
-    conversationFindings: mine.filter((c) => isReviewBody(c.body)).length,
+    latestFindingAt: newest([...inlineMine, ...conversationMine].map((c) => at(c.created_at))),
+    inlineFindings: inlineMine.length,
+    conversationFindings: conversationMine.length,
+    reviewPresent: vendorReviews.some((r) => (r.body ?? "").trim() !== ""),
+    reviewsPosted: vendorReviews.length,
+  };
+}
+
+/**
+ * A finding whose timestamp is strictly earlier than a COMPLETED head-bound
+ * 👍 is historical: comments are never deleted, so counting it forever made
+ * `findings` absorbing — the same shape as the `blocked` bug #6119 fixed
+ * (#6164 F3). Unorderable timestamps fail-closed (the finding stands).
+ */
+function findingIsLive(
+  createdAt: string | undefined,
+  headBoundClean: boolean,
+  completionAt: number | null,
+): boolean {
+  if (!headBoundClean) return true;
+  const t = at(createdAt);
+  if (t === null || completionAt === null) return true;
+  return t >= completionAt;
+}
+
+function liveFindingCounts(
+  faces: BotFaces,
+  vendor: string,
+  headBoundClean: boolean,
+  completionAt: number | null,
+): { inline: number; conversation: number } {
+  const live = (createdAt: string | undefined) =>
+    findingIsLive(createdAt, headBoundClean, completionAt);
+  return {
+    inline: (faces.inlineComments ?? []).filter(
+      (c) => c.user.login === vendor && live(c.created_at),
+    ).length,
+    conversation: (faces.issueComments ?? []).filter(
+      (c) => c.user.login === vendor && isReviewBody(c.body) && live(c.created_at),
+    ).length,
   };
 }
 
@@ -425,6 +545,7 @@ export function judgeBotReview(faces: BotFaces, opts: JudgeOptions = {}): BotVer
     reactions: faces.issueReactions !== null,
     inline: faces.inlineComments !== null,
     conversation: faces.issueComments !== null,
+    reviews: faces.reviews != null,
   };
   const verdict = (state: BotState, botFindings: number | "UNAVAILABLE", reason: string) => ({
     vendor,
@@ -453,13 +574,27 @@ export function judgeBotReview(faces: BotFaces, opts: JudgeOptions = {}): BotVer
     );
   }
 
-  const total = signals.inlineFindings + signals.conversationFindings;
+  /**
+   * The vendor's own proof that a review RAN TO COMPLETION on this commit.
+   *
+   * Spelled once here because three rules need it: live-finding supersession
+   * (#6164 F3), the quota supersession just below, and the 👍 ladder further
+   * down (which reaches the same conclusion by elimination and owns the
+   * wording).
+   */
+  const headBoundClean =
+    signals.thumbsUp &&
+    signals.reviewedSha !== null &&
+    !signals.eyes &&
+    signals.summaryCompleted &&
+    head.startsWith(signals.reviewedSha);
+
+  const live = liveFindingCounts(faces, vendor, headBoundClean, signals.summaryAt);
+  const total = live.inline + live.conversation;
   if (total > 0) {
     const where = [
-      signals.inlineFindings > 0 ? `${signals.inlineFindings} inline` : "",
-      signals.conversationFindings > 0
-        ? `${signals.conversationFindings} as top-level comment(s)`
-        : "",
+      live.inline > 0 ? `${live.inline} inline` : "",
+      live.conversation > 0 ? `${live.conversation} as top-level comment(s)` : "",
     ]
       .filter(Boolean)
       .join(" + ");
@@ -470,20 +605,6 @@ export function judgeBotReview(faces: BotFaces, opts: JudgeOptions = {}): BotVer
         (signals.summaryCompleted ? " — a ✅ Completed summary does not cancel them" : ""),
     );
   }
-
-  /**
-   * The vendor's own proof that a review RAN TO COMPLETION on this commit.
-   *
-   * Spelled once here because two rules need it: the quota supersession just
-   * below, and the 👍 ladder further down (which reaches the same conclusion
-   * by elimination and owns the wording).
-   */
-  const headBoundClean =
-    signals.thumbsUp &&
-    signals.reviewedSha !== null &&
-    !signals.eyes &&
-    signals.summaryCompleted &&
-    head.startsWith(signals.reviewedSha);
 
   /**
    * A quota notice is a COMMENT, and comments are never deleted. Scanning the
@@ -563,14 +684,18 @@ export function judgeBotReview(faces: BotFaces, opts: JudgeOptions = {}): BotVer
           `(measured on #6070, and on 5 of the 13 👍 in the last 100 PRs). Re-trigger the review on head.`,
       );
     }
+    const rawTotal = signals.inlineFindings + signals.conversationFindings;
     return verdict(
       "clean",
       0,
-      `${vendor} reacted 👍 for ${signals.reviewedSha}, which is head, and both faces are empty`,
+      `${vendor} reacted 👍 for ${signals.reviewedSha}, which is head` +
+        (rawTotal > 0
+          ? `, and ${rawTotal} earlier finding(s) are superseded by that completion`
+          : ", and both faces are empty"),
     );
   }
 
-  if (signals.summaryPresent || signals.eyes) {
+  if (signals.summaryPresent || signals.eyes || signals.reviewPresent) {
     return verdict(
       "incomplete",
       0,
@@ -607,7 +732,8 @@ export function buildVerdictLine(v: BotVerdict): string {
     `conversation=${r.conversation ? s.conversationFindings : "UNKNOWN"} ` +
     `thumbsUp=${tri(r.reactions, s.thumbsUp)} eyes=${tri(r.reactions, s.eyes)} ` +
     `summaryCompleted=${tri(r.conversation, s.summaryCompleted)} ` +
-    `reviewedSha=${r.conversation ? (s.reviewedSha ?? "NONE") : "UNKNOWN"}\n` +
+    `reviewedSha=${r.conversation || r.reviews ? (s.reviewedSha ?? "NONE") : "UNKNOWN"} ` +
+    `reviews=${r.reviews ? s.reviewsPosted : "UNKNOWN"}\n` +
     `  ${v.reason}`
   );
 }
@@ -766,6 +892,7 @@ export const liveFetchFaces: MainDeps["fetchFaces"] = (pr, repo) => ({
   issueReactions: ghJson<Reaction>(`issues/${pr}/reactions`, repo),
   inlineComments: ghJson<CommentLike>(`pulls/${pr}/comments`, repo),
   issueComments: ghJson<CommentLike>(`issues/${pr}/comments`, repo),
+  reviews: ghJson<ReviewLike>(`pulls/${pr}/reviews`, repo),
 });
 
 export function main(argv: string[], deps: MainDeps): number {
@@ -789,16 +916,12 @@ export function main(argv: string[], deps: MainDeps): number {
     }
   }
 
-  // One named vendor, or every RECOGNISED vendor actually present.
-  // `vendorsSeen=0` is printed rather than silently judging nobody — an empty
-  // accept set must be loud (CLAUDE.md 度量正控).
+  // One named vendor, or every RECOGNISED vendor — including those that left
+  // no trace. Presence is not the accept-set (#6164 F2); `absent` is a real
+  // per-vendor verdict and must affect the exit. The roster is never empty
+  // (RECOGNISED_REVIEW_VENDORS is a non-empty const), so there is no
+  // `vendorsSeen=0` fallback that quietly judged only Codex.
   const vendors = args.vendor ? [args.vendor] : enumerateVendors(faces);
-  if (vendors.length === 0) {
-    const v = judgeBotReview(faces, { vendor: CODEX_VENDOR });
-    deps.log(buildVerdictLine(v));
-    deps.log(`bot-clean: vendorsSeen=0 vendors=NONE overall=${v.state}`);
-    return exitCodeFor(v);
-  }
 
   let worst = 0;
   const states: string[] = [];

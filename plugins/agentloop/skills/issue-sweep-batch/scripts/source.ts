@@ -744,9 +744,59 @@ export class WorkObjectSource implements WorkItemSource {
     return m;
   }
 
+  /**
+   * Windowed open+closed rows for the overview charts.
+   *
+   * Collection-query is AND-only (no OR), so the window is a **union of AND
+   * queries**, not one `{ contentType=work }` plus a client filter.
+   *
+   * DID Space file-form evaluates **content** fields only from the ≤2KiB inline
+   * cache. `workStatusMeta` / `completeWork` stamp `creativeWorkStatus` and
+   * `dateModified` on meta, not `closedAt` / `dateCreated`. Fat closed GitHub
+   * imports therefore miss every content-`closedAt` arm — that looks collected
+   * with false zero-closes, the same color as 未采集. Window predicates here
+   * are **meta-only**; hydrate then client-filters `closedAt`.
+   *
+   * `sinceDays=0` is an empty window (collected `[]`, no I/O) — not 未采集
+   * (method absent) and not “all currently open”.
+   */
   async timeline(sinceDays: number): Promise<TimedRow[]> {
+    if (!Number.isFinite(sinceDays) || sinceDays < 0) {
+      throw new AFSValidationError(
+        `timeline sinceDays must be a non-negative finite number, got ${String(sinceDays)}`,
+      );
+    }
+    if (sinceDays === 0) {
+      this.lastReadCount = 0;
+      return [];
+    }
     const since = Date.now() - sinceDays * 86_400_000;
-    const entries = await this.queryEntries({ field: "meta.contentType", eq: "work" });
+    const sinceIso = new Date(since).toISOString();
+    const work = { field: "meta.contentType", eq: "work" };
+    const pages = await Promise.all([
+      this.queryEntries(whereAll([work, { field: "meta.creativeWorkStatus", in: OPEN_STATUSES }])),
+      // Fat-safe closed window: status + dateModified live on meta (workStatusMeta).
+      this.queryEntries(
+        whereAll([
+          work,
+          { field: "meta.creativeWorkStatus", in: CLOSED_STATUSES },
+          { field: "meta.dateModified", gte: sinceIso },
+        ]),
+      ),
+      // When writers stamp meta.closedAt / meta.dateCreated (#6329).
+      this.queryEntries(whereAll([work, { field: "meta.closedAt", gte: sinceIso }])),
+      this.queryEntries(whereAll([work, { field: "meta.dateCreated", gte: sinceIso }])),
+    ]);
+    const seen = new Set<string>();
+    const entries: QueryEntry[] = [];
+    for (const page of pages) {
+      for (const entry of page) {
+        if (typeof entry.path !== "string" || seen.has(entry.path)) continue;
+        seen.add(entry.path);
+        entries.push(entry);
+      }
+    }
+    this.lastReadCount = entries.length;
     const candidates = entries.filter((entry) => !timelineMetaOutsideWindow(entry.meta, since));
     const rows: TimedRow[] = [];
     for (const slot of await this.hydrateEntries(candidates)) {

@@ -78,6 +78,7 @@
         "created_at": "2026-09-05T21:44:41Z",
         "body": "<!-- e2e-gate-report sha=f30b8e78a2b1a5e377a532f050b08ef235eb2767 result=PASS --… [non-vendor body truncated by the recorder]"
       }
-    ]
+    ],
+    "reviews": []
   }
 }

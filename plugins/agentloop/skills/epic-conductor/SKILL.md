@@ -183,10 +183,14 @@ a sandbox boundary, or payment/billing:
   1. **Neither role has a blocking finding** → synthesize `MERGE` (or `COMMENT` with
      non-blocking notes). This does not replace §7's gate — the repo's `pre-merge`
      verification, e2e-gate, and ui-verify still *apply* exactly as for a normal PR. Reviewer /
-     fixer / conductor do **not** re-invoke the gate when a current sticky or sibling-location
-     PASS already matches `{HEAD SHA, scenario, resolved base, capabilities}`; they read that
-     fact. Independent code review of the diff stays. That efficiency never substitutes for
-     the independent code-review roles.
+     fixer / conductor obtain the verification fact by **invoking the entrypoint**, never by
+     reading identity off a sticky by hand (the marker carries only `sha=`/`result=`). The
+     entrypoint decides whether to reuse: a same-scenario PASS at `{HEAD SHA, resolved base,
+     capabilities}` (own or sibling location), or — where the repo declares it — an
+     equivalent scenario's covering PASS (arc: pre-pr's full PASS stands in for pre-merge when
+     merge-base == `origin/main` tip; the report header says `♻️ Equivalent evidence`). A hit
+     costs nothing and skips the gate lane. Independent code review of the diff stays. That
+     efficiency never substitutes for the independent code-review roles.
   2. **Only one role produced findings** → pass them through directly as the verdict basis;
      do not spend an agent on synthesis just for symmetry.
   3. **Both roles have findings** → read-only merge: dedupe, order by severity, keep every
@@ -302,7 +306,7 @@ If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThread
 Merge a PR only when ALL hold, **in this order** (do not skip to squash):
 
 1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
-2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches — **plus a cross-engine review door that applies only when this branch has a Factory run record**, i.e. when you are running inside the Factory. Attended runs on a developer machine do not hit it, and the gate prints which of the two N/As it means). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. **One measured exception, decided by the gate and not by you**: an e2e-gate PASS whose sha is older is CARRIED FORWARD when every file changed since is off the backend surface (a Swift-only or docs-only fixer commit cannot change what a data-plane boot observed). The gate prints `e2e-gate=PASS (carried from <sha9>; …)` when it does this; it refuses — and says which of its four fail-closed conditions tripped — otherwise. The cross-engine door carries forward too but only under the strictest form of the same rule (the two commits have an **identical tree** — an amend that rewrote only the message, a clean rebase replay); `verification` never carries, because it is diff-sensitive by construction. All three decisions are the gate's, computed from git. Do not reproduce the reasoning by hand. If the verification sticky (or sibling-location shared evidence) is already PASS at `sha=HEAD` with matching base+capabilities, **read that fact** — do not re-invoke `pre-merge.ts`. Re-invoke only when identity does not match.
+2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches — **plus a cross-engine review door that applies only when this branch has a Factory run record**, i.e. when you are running inside the Factory. Attended runs on a developer machine do not hit it, and the gate prints which of the two N/As it means). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. **One measured exception, decided by the gate and not by you**: an e2e-gate PASS whose sha is older is CARRIED FORWARD when every file changed since is off the backend surface (a Swift-only or docs-only fixer commit cannot change what a data-plane boot observed). The gate prints `e2e-gate=PASS (carried from <sha9>; …)` when it does this; it refuses — and says which of its four fail-closed conditions tripped — otherwise. The cross-engine door carries forward too but only under the strictest form of the same rule (the two commits have an **identical tree** — an amend that rewrote only the message, a clean rebase replay); `verification` never carries, because it is diff-sensitive by construction. All three decisions are the gate's, computed from git. Do not reproduce the reasoning by hand. The verification fact comes from **invoking `<pre_merge_entry> --comment <PR#>`** — always; the entrypoint reuses a current same-scenario PASS (own or sibling location) or, where declared, an equivalent scenario's covering PASS (arc: pre-pr at the same sha when merge-base == `origin/main` tip), and re-runs only when nothing matches. It prints what it reused. Do not try to read base/scenario identity off the sticky yourself — the marker does not carry them.
 3. **Every actionable inline review thread is addressed** per §6 (fixed with SHA/change/verification or REJECTed with reasoning; only P2/Medium/Low may defer with tracking/owner/re-entry condition). Any P1/High that is not fixed or REJECTed is a hard blocker; lower severity is not a risk blocker but is still never mergeable without its in-thread conclusion.
 4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
 
@@ -317,6 +321,40 @@ For a **security-face** PR, post a short **risk-summary** comment before merging
 - **Out-of-scope findings**: a reviewer/bot surfaces something real but outside this PR's scope → open a **follow-up issue**, never silently fold it in, never drop it.
 - **Flaky pre-existing test**: confirm it fails on merge-base too; don't let it block; file a flaky-test issue.
 - **Bot-review multi-hour hang**: treating Codex silence (or waiting for re-👍 after a fix) as a hard gate freezes the wave while the real gates are already green. Obey §6 short-wait; late comments → `codex-review-backlog`.
+- **A worker dies on a provider capacity limit (429), not on its task** (arc#6204): both arrive as
+  `status=failed`, so the work is dropped unless you happen to be watching. Measured twice in one
+  run — one worker had already committed its fix and died queued behind a gate; another died
+  mid-edit holding uncommitted work. Do NOT re-dispatch blindly and do NOT treat it as a task
+  outcome. Classify it, record it, retry after the reset:
+  ```bash
+  R="${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/agent-retry.ts"
+  bun "$R" record --agent <id> --target "<owner>/<repo>#<n>" --brief-file <p> --summary-file <p> [--wip <ref>]
+  bun "$R" due                                        # prints scanned=/pending=/inFlight= even when nothing is due
+  bun "$R" bump --target "<key>" --holder-pid $$      # CLAIM it, then dispatch
+  bun "$R" resolve --target "<key>"                   # after the retry lands
+  ```
+  **`--summary-file` must hold the harness's death text VERBATIM.** Do not paraphrase it, do not
+  summarise it, do not reformat it. The classifier keys on the harness's own termination notice and
+  reads the capacity error type *inside* that notice; your retelling ("worker o/r#1 died: HTTP 429
+  from the provider") is prose and lands on needs-a-human. Capture the text, write it to a file,
+  pass the file.
+  The classifier is fail-closed: an unrecognised death is NOT retryable, because auto-retrying a
+  real failure burns budget and repeats side effects. It needs BOTH an agent-termination notice and
+  a capacity error type **within that notice** — a worker reporting that the endpoint *under test*
+  answered `HTTP 429` is a task outcome, not a death, and so is a death notice about something else
+  that happens to be followed by a sentence mentioning 429. `due` always prints the scanned count —
+  an empty ledger and a full one with nothing ripe otherwise render identically, and the first means
+  the RECORDER never fired.
+  **`bump` before you dispatch, and pass `--holder-pid`.** `bump` CLAIMS the record and takes it out
+  of `due`; without that step the next poll hands you the same brief again — duplicate agents,
+  repeated PR/comment side effects, the attempt cap burned in seconds. `--holder-pid` must name the
+  process that will still be alive while the retry runs (`$$` for your own session), never the
+  `bump` invocation itself: that is what lets a crashed retry be offered again within seconds
+  instead of waiting out the 6h lease ceiling. A claim is released automatically when its holder
+  dies, and `due` prints `reclaimed=` when that happens.
+  **Preserve the partial work first.** Put every worker brief on notice: on a capacity limit, stop
+  cleanly and WIP-commit to a side branch rather than half-writing, and report the ref. Pass it as
+  `--wip`. A classifier cannot recover work an agent never left behind.
 - **Worktree cleanup**: `git worktree remove` / `prune` leftover worktrees at the end.
 
 ### 9. Closeout (mandatory — the epic isn't done until this is posted)

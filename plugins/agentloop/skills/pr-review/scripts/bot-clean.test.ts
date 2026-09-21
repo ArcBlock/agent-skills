@@ -63,6 +63,7 @@ import {
   parsePaginatedArray,
   QUOTA_NOTICE_RE,
   RECOGNISED_REVIEW_VENDORS,
+  REVIEWED_COMMIT_RE,
   SUMMARY_COMPLETED_RE,
   SUMMARY_MARKER,
   THUMBS_UP,
@@ -183,6 +184,13 @@ describe("PC — the fixture enumeration is a working instrument", () => {
     for (const f of FIXTURES) expect(f.faces.headSha).toMatch(/^[0-9a-f]{40}$/);
   });
 
+  test("every fixture records the reviews face as an array, not omitted (#6164 F4)", () => {
+    for (const f of FIXTURES) {
+      expect(Array.isArray(f.faces.reviews)).toBe(true);
+      expect(f.faces.reviews).not.toBeNull();
+    }
+  });
+
   /**
    * The 同色 fact this whole issue rests on, asserted rather than described:
    * the clean PR and the 3-finding PR publish the SAME summary status cell.
@@ -300,6 +308,7 @@ describe("REJECT — `✅ Completed` is never on its own evidence of clean", () 
       issueReactions: [],
       inlineComments: [],
       issueComments: [],
+      reviews: [],
     });
     expect(v.state).toBe("absent");
     expect(isBotClean(v)).toBe(false);
@@ -311,6 +320,7 @@ describe("REJECT — `✅ Completed` is never on its own evidence of clean", () 
       issueReactions: [{ content: "eyes", user: { login: CODEX_VENDOR } }],
       inlineComments: [],
       issueComments: [],
+      reviews: [],
     });
     expect(v.state).toBe("incomplete");
     expect(v.signals.eyes).toBe(true);
@@ -838,7 +848,7 @@ describe("parsePaginatedArray — `gh --paginate` output, including page seams",
  * 3e. P2a — the accept-set enumerator (host-gate discipline)
  * ------------------------------------------------------------------ */
 
-describe("P2a — which vendors are PRESENT is enumerated, not assumed", () => {
+describe("P2a — which vendors are JUDGED is enumerated, not assumed from presence", () => {
   const two = byName("reject-two-vendors-one-dirty");
 
   test("both vendors on the two-vendor fixture are enumerated", () => {
@@ -886,7 +896,10 @@ describe("P2a — which vendors are PRESENT is enumerated, not assumed", () => {
 
     test("a CI bot's status comment does not turn the command red", () => {
       const out: string[] = [];
-      const code = main(["--pr", "1"], { fetchFaces: () => withCi, log: (s) => out.push(s) });
+      const code = main(["--pr", "1", "--vendor", CODEX_VENDOR], {
+        fetchFaces: () => withCi,
+        log: (s) => out.push(s),
+      });
       expect(code).toBe(0);
       expect(out.join("\n")).toContain("state=clean");
     });
@@ -924,17 +937,19 @@ describe("P2a — which vendors are PRESENT is enumerated, not assumed", () => {
     expect(cursor.botFindings).toBe(1);
   });
 
-  test("PC — an empty vendor set is reported, not silently skipped", () => {
+  test("PC — an empty PR still judges the recognised roster (absent, not skipped)", () => {
     const none: BotFaces = {
       headSha: "a".repeat(40),
       issueReactions: [],
       inlineComments: [],
       issueComments: [],
+      reviews: [],
     };
-    expect(enumerateVendors(none)).toEqual([]);
+    expect(enumerateVendors(none).sort()).toEqual([...RECOGNISED_REVIEW_VENDORS].sort());
     const out: string[] = [];
     const code = main(["--pr", "1"], { fetchFaces: () => none, log: (s) => out.push(s) });
-    expect(out.join("\n")).toContain("vendorsSeen=0");
+    expect(out.join("\n")).toContain(`vendor=${CODEX_VENDOR}`);
+    expect(out.join("\n")).toContain("state=absent");
     expect(code).not.toBe(0);
   });
 
@@ -1054,7 +1069,7 @@ describe("CLI", () => {
 
   test("--pr <n> prints the verdict line and exits 0 only when clean", () => {
     const out: string[] = [];
-    const code = main(["--pr", "6097", "--repo", "ArcBlock/arc"], {
+    const code = main(["--pr", "6097", "--repo", "ArcBlock/arc", "--vendor", CODEX_VENDOR], {
       fetchFaces: fetcher("accept-thumbsup-for-head-sha"),
       log: (s) => out.push(s),
     });
@@ -1235,5 +1250,306 @@ describe("the reason strings do not assert a mechanism that is not true", () => 
     expect(summary?.created_at).toBe("2026-09-06T09:05:51Z");
     expect(summary?.body).toMatch(/datetime="2026-09-06T09:09:4/);
     expect((f.faces.inlineComments ?? [])[0]?.created_at).toBe("2026-09-06T09:09:37Z");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 9. #6164 — three residual defects the #6119 review left unfixed
+ *
+ * F2  a recognised vendor that left NO trace is never judged
+ * F3  `findings` is absorbing (same shape as the `blocked` bug #6119 fixed)
+ * F4  `pulls/<n>/reviews` is unread, and unread must not look like empty
+ * ------------------------------------------------------------------ */
+
+const CURSOR_VENDOR = "cursor[bot]";
+
+function remapLogin<T extends { user: { login: string } }>(
+  rows: T[] | null,
+  from: string,
+  to: string,
+): T[] {
+  return (rows ?? []).map((row) =>
+    row.user.login === from ? { ...row, user: { ...row.user, login: to } } : row,
+  );
+}
+
+function remapVendor(faces: BotFaces, from: string, to: string): BotFaces {
+  return {
+    ...faces,
+    issueReactions: remapLogin(faces.issueReactions, from, to),
+    inlineComments: remapLogin(faces.inlineComments, from, to),
+    issueComments: remapLogin(faces.issueComments, from, to),
+    reviews: remapLogin(faces.reviews ?? [], from, to),
+  };
+}
+
+function mergeFaces(a: BotFaces, b: BotFaces): BotFaces {
+  return {
+    headSha: a.headSha,
+    issueReactions: [...(a.issueReactions ?? []), ...(b.issueReactions ?? [])],
+    inlineComments: [...(a.inlineComments ?? []), ...(b.inlineComments ?? [])],
+    issueComments: [...(a.issueComments ?? []), ...(b.issueComments ?? [])],
+    reviews: [...(a.reviews ?? []), ...(b.reviews ?? [])],
+  };
+}
+
+describe("#6164 F2 — a recognised vendor that left no trace is still judged", () => {
+  const clean = byName("accept-thumbsup-for-head-sha").faces;
+  const cursorClean = remapVendor(clean, CODEX_VENDOR, CURSOR_VENDOR);
+  const bothClean = mergeFaces(clean, cursorClean);
+
+  /**
+   * THE HOLE. cursor[bot] is present and clean; Codex left no comment and no
+   * reaction. Today enumerateVendors() returns only who appeared, so Codex is
+   * never judged and the command prints overall=cursor[bot]=clean, exit 0.
+   * `absent` is explicitly not clean in this judge's own state table.
+   */
+  test("REJECT: Codex absent behind a clean cursor is computed, printed, and fails the exit", () => {
+    expect(enumerateVendors(cursorClean)).toContain(CODEX_VENDOR);
+    expect(enumerateVendors(cursorClean)).toContain(CURSOR_VENDOR);
+
+    const out: string[] = [];
+    const code = main(["--pr", "1"], { fetchFaces: () => cursorClean, log: (s) => out.push(s) });
+    const text = out.join("\n");
+    expect(text).toContain(`vendor=${CODEX_VENDOR}`);
+    expect(text).toMatch(
+      new RegExp(`vendor=${CODEX_VENDOR.replace(/[[\]]/g, "\\$&")}[^\\n]*state=absent`),
+    );
+    expect(text).toContain(`vendor=${CURSOR_VENDOR}`);
+    expect(text).toMatch(/cursor\[bot\]=clean/);
+    expect(code).not.toBe(0);
+  });
+
+  /** "always not-clean" would satisfy the arm above. This says it does not. */
+  test("ACCEPT: every recognised vendor clean still exits 0", () => {
+    const out: string[] = [];
+    const code = main(["--pr", "1"], { fetchFaces: () => bothClean, log: (s) => out.push(s) });
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/chatgpt-codex-connector\[bot\]=clean/);
+    expect(out.join("\n")).toMatch(/cursor\[bot\]=clean/);
+  });
+
+  test("ACCEPT: --vendor still judges only the named login (absent others are a policy of the enumerator)", () => {
+    const out: string[] = [];
+    const code = main(["--pr", "1", "--vendor", CURSOR_VENDOR], {
+      fetchFaces: () => cursorClean,
+      log: (s) => out.push(s),
+    });
+    expect(code).toBe(0);
+    expect(out.join("\n")).not.toContain(`vendor=${CODEX_VENDOR}`);
+  });
+
+  test("an empty PR judges the whole roster as absent, not a silent vendorsSeen=0 skip of everyone but Codex", () => {
+    const none: BotFaces = {
+      headSha: "a".repeat(40),
+      issueReactions: [],
+      inlineComments: [],
+      issueComments: [],
+      reviews: [],
+    };
+    expect(enumerateVendors(none).sort()).toEqual([...RECOGNISED_REVIEW_VENDORS].sort());
+    const out: string[] = [];
+    const code = main(["--pr", "1"], { fetchFaces: () => none, log: (s) => out.push(s) });
+    const text = out.join("\n");
+    expect(text).toContain(`vendor=${CODEX_VENDOR}`);
+    expect(text).toContain(`vendor=${CURSOR_VENDOR}`);
+    expect(text).toMatch(/state=absent/);
+    expect(code).not.toBe(0);
+  });
+});
+
+describe("#6164 F3 — `findings` is not absorbing once a later head-bound 👍 lands", () => {
+  const cleanFaces = byName("accept-thumbsup-for-head-sha").faces;
+  const oldFindings = (
+    byName("reject-completed-with-inline-findings").faces.inlineComments ?? []
+  ).filter((c) => c.user.login === CODEX_VENDOR);
+  const recovered: BotFaces = {
+    ...cleanFaces,
+    inlineComments: [...oldFindings, ...(cleanFaces.inlineComments ?? [])],
+    reviews: cleanFaces.reviews ?? [],
+  };
+  const summaryAt = (cleanFaces.issueComments ?? []).find((c) =>
+    c.body.includes(SUMMARY_MARKER),
+  )?.created_at;
+
+  test("the reproduction really does carry historical findings (else the arms below prove nothing)", () => {
+    expect(oldFindings.length).toBeGreaterThan(0);
+    expect(judgeBotReview(recovered).signals.inlineFindings).toBe(oldFindings.length);
+  });
+
+  test("ACCEPT: earlier findings are superseded by a COMPLETED head-bound 👍", () => {
+    const v = judgeBotReview(recovered);
+    expect(v.state).toBe("clean");
+    expect(isBotClean(v)).toBe(true);
+    expect(v.botFindings).toBe(0);
+  });
+
+  test("REJECT: a STALE 👍 does not cancel the findings", () => {
+    expect(judgeBotReview({ ...recovered, headSha: "f".repeat(40) }).state).toBe("findings");
+  });
+
+  test("REJECT: a 👍 with a run still in flight does not cancel the findings", () => {
+    const eyes = [
+      ...(recovered.issueReactions ?? []),
+      { content: EYES, user: { login: CODEX_VENDOR } },
+    ];
+    expect(judgeBotReview({ ...recovered, issueReactions: eyes }).state).toBe("findings");
+  });
+
+  test("REJECT: a finding posted AFTER the completed run is not superseded by it", () => {
+    const later = new Date(Date.parse(summaryAt ?? "") + 60_000).toISOString();
+    const v = judgeBotReview({
+      ...cleanFaces,
+      inlineComments: [
+        {
+          user: { login: CODEX_VENDOR },
+          created_at: later,
+          path: "x.ts",
+          body: "P1 — a finding that landed after the 👍",
+        },
+      ],
+    });
+    expect(v.state).toBe("findings");
+    expect(v.botFindings).toBe(1);
+    expect(isBotClean(v)).toBe(false);
+  });
+
+  test("ACCEPT: a finding posted BEFORE it still is (else the fix would just re-flag everything)", () => {
+    const earlier = new Date(Date.parse(summaryAt ?? "") - 60_000).toISOString();
+    const v = judgeBotReview({
+      ...cleanFaces,
+      inlineComments: [
+        {
+          user: { login: CODEX_VENDOR },
+          created_at: earlier,
+          path: "x.ts",
+          body: "P1 — a historical finding",
+        },
+      ],
+    });
+    expect(v.signals.inlineFindings).toBe(1);
+    expect(v.state).toBe("clean");
+  });
+
+  test("REJECT: an unorderable finding (no timestamp) is fail-closed, not superseded", () => {
+    const v = judgeBotReview({
+      ...cleanFaces,
+      inlineComments: [{ user: { login: CODEX_VENDOR }, path: "x.ts", body: "P1 — undated" }],
+    });
+    expect(v.state).toBe("findings");
+    expect(v.botFindings).toBe(1);
+  });
+});
+
+describe("#6164 F4 — the reviews face is read, and unread ≠ empty", () => {
+  const clean = byName("accept-thumbsup-for-head-sha").faces;
+  const reviewedCommitBody =
+    "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n" +
+    "**Reviewed commit:** `a942d79`\n";
+
+  test("the Reviewed-commit marker actually matches the measured Codex review body", () => {
+    expect(REVIEWED_COMMIT_RE.exec(reviewedCommitBody)?.[1]).toBe("a942d79");
+  });
+
+  test("REJECT: an unreadable reviews face is UNAVAILABLE, never `no reviews`", () => {
+    const v = judgeBotReview({ ...clean, reviews: null });
+    expect(v.state).toBe("unavailable");
+    expect(v.botFindings).toBe("UNAVAILABLE");
+    expect(v.faceRead.reviews).toBe(false);
+    expect(isBotClean(v)).toBe(false);
+  });
+
+  test("`null` and `[]` reviews faces do not share a verdict", () => {
+    expect(judgeBotReview({ ...clean, reviews: null }).state).toBe("unavailable");
+    expect(judgeBotReview({ ...clean, reviews: [] }).state).toBe("clean");
+  });
+
+  test("ACCEPT: Reviewed commit on the reviews face binds sha when the summary Commit cell is missing", () => {
+    const summary = (clean.issueComments ?? []).find((c) => c.body.includes(SUMMARY_MARKER));
+    if (!summary) throw new Error("accept fixture lost its summary");
+    const stripped = {
+      ...summary,
+      body: summary.body.replace(/( \|\s*`)[0-9a-f]{7,40}(`\s*\|)/, "$1$2"),
+    };
+    const v = judgeBotReview({
+      ...clean,
+      issueComments: (clean.issueComments ?? []).map((c) => (c === summary ? stripped : c)),
+      reviews: [
+        {
+          user: { login: CODEX_VENDOR },
+          submitted_at: "2026-09-07T09:29:43Z",
+          commit_id: "a942d7988c5baf7a14cd32b7f3beffac58825117",
+          state: "COMMENTED",
+          body: reviewedCommitBody,
+        },
+      ],
+    });
+    expect(v.signals.reviewedSha).toBe("a942d79");
+    expect(v.state).toBe("clean");
+    expect(isBotClean(v)).toBe(true);
+  });
+
+  test("ACCEPT: a review body is a pointer, not a conversation finding (no double-count)", () => {
+    const v = judgeBotReview({
+      ...clean,
+      reviews: [
+        {
+          user: { login: CODEX_VENDOR },
+          submitted_at: "2026-09-07T09:29:43Z",
+          body: reviewedCommitBody,
+        },
+      ],
+    });
+    expect(v.signals.conversationFindings).toBe(0);
+    expect(v.state).toBe("clean");
+  });
+
+  test("a vendor that only spoke on the reviews face is incomplete, not absent", () => {
+    const v = judgeBotReview({
+      headSha: "a".repeat(40),
+      issueReactions: [],
+      inlineComments: [],
+      issueComments: [],
+      reviews: [
+        {
+          user: { login: CODEX_VENDOR },
+          submitted_at: "2026-09-07T09:29:43Z",
+          body: reviewedCommitBody,
+        },
+      ],
+    });
+    expect(v.state).toBe("incomplete");
+    expect(v.signals.reviewedSha).toBe("a942d79");
+    expect(isBotClean(v)).toBe(false);
+  });
+
+  test("unread reviews print UNKNOWN on the verdict line, not 0", () => {
+    const line = buildVerdictLine(judgeBotReview({ ...clean, reviews: null }));
+    expect(line).toContain("reviews=UNKNOWN");
+    expect(line).not.toMatch(/(?:^|\s)reviews=0(?:\s|$)/);
+  });
+
+  test("REJECT: liveFetchFaces actually fetches pulls/<n>/reviews (doc without a fetch is the hole)", () => {
+    const src = readFileSync(fileURLToPath(new URL("./bot-clean.ts", import.meta.url)), "utf8");
+    expect(src).toMatch(/pulls\/\$\{pr\}\/reviews/);
+  });
+});
+
+describe("#6164 SKILL.md names the three residual holes", () => {
+  const text = readFileSync(SKILL, "utf8");
+
+  test("the enumerator judges recognised vendors that left no trace, not only those present", () => {
+    expect(text).toMatch(/absent/i);
+    expect(text).toMatch(/RECOGNISED_REVIEW_VENDORS|已识别/);
+    expect(text).toMatch(/没(有)?(留下?)?(痕迹|发言)|left no trace|never spoke/i);
+  });
+
+  test("findings superseded by a later head-bound 👍 is documented, same shape as blocked", () => {
+    expect(text).toMatch(/findings[\s\S]{0,400}(supersed|顶掉|吸收)/i);
+  });
+
+  test("the fifth face `pulls/<n>/reviews` is named, so unread cannot look like omitted", () => {
+    expect(text).toMatch(/pulls\/<n>\/reviews|pulls\/\{.*\}\/reviews/);
+    expect(text).toMatch(/Reviewed commit/);
   });
 });

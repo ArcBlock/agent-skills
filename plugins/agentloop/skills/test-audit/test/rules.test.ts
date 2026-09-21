@@ -75,7 +75,12 @@ describe("falsifiability — each bad fixture is a defect the runner cannot see"
   for (const rule of STATIC_RULES) {
     test(`${rule.id} — bad fixture runs GREEN`, () => {
       const rel = `./fixtures/${rule.id}/bad.fixture.ts`;
-      const r = spawnSync("bun", ["test", rel], { cwd: SKILL_ROOT, encoding: "utf8" });
+      // bun 1.4+ refuses `test.only` when CI=true; the point of this fixture is
+      // that `.only` silently drops siblings while the run stays green — so the
+      // child must not inherit a CI gate that turns the defect into a hard error.
+      const env = { ...process.env };
+      delete env.CI;
+      const r = spawnSync("bun", ["test", rel], { cwd: SKILL_ROOT, encoding: "utf8", env });
       const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
       expect({ rule: rule.id, status: r.status, sawFail: /\b[1-9]\d* fail\b/.test(out) }).toEqual({
         rule: rule.id,

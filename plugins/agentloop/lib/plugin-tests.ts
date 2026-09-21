@@ -17,6 +17,8 @@
  * discipline. The consuming repo supplies only the wiring (which scenarios get
  * the check, and its `when` gate) in `.claude/verify/config.ts`.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type CheckResult, run, tail } from "./report.ts";
 
 /** Directory prefix a plugin checkout lives under, relative to the repo root. */
@@ -100,6 +102,54 @@ export function discoverTestDirs(
   return minimalDirs(dirs);
 }
 
+/** Test files under `root`, relative to the plugin root. Same find as {@link discoverTestDirs}. */
+export function listTestFiles(
+  root: string,
+  exec: (cmd: string, cwd: string) => { code: number; out: string },
+): string[] {
+  const { out } = exec(
+    `find . -name '*.test.ts' -type f -not -path '*/node_modules/*' -not -path '*/.git/*'`,
+    root,
+  );
+  return out
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((f) => f.replace(/^\.\//, ""))
+    .sort();
+}
+
+/**
+ * A file that must not share a `bun test` process with the rest of the plugin
+ * suite (arc#6090). Same declaration shape as arc's `@test-shards:solo` so a
+ * plugin file can use either tag; `@plugin-tests:isolated` is the generic name.
+ */
+export function isIsolatedTestSource(source: string): boolean {
+  return /^[ \t]*(?:\/\/[ \t]*|\*[ \t]*)?@(?:plugin-tests:isolated|test-shards:solo)[ \t]+\S/m.test(
+    source,
+  );
+}
+
+export function partitionIsolatedTestFiles(
+  pluginAbs: string,
+  files: string[],
+): { packed: string[]; isolated: string[] } {
+  const packed: string[] = [];
+  const isolated: string[] = [];
+  for (const file of files) {
+    let source = "";
+    try {
+      source = readFileSync(join(pluginAbs, file), "utf8");
+    } catch {
+      packed.push(file);
+      continue;
+    }
+    if (isIsolatedTestSource(source)) isolated.push(file);
+    else packed.push(file);
+  }
+  return { packed, isolated };
+}
+
 /**
  * `bun test` summary counts. Both lines are always emitted by bun (` 334 pass` /
  * ` 0 fail`), but a crashed run (e.g. a syntax error in a test file) prints
@@ -130,15 +180,54 @@ export function runPluginTests(opts: PluginTestsOptions): PluginTestRun[] {
     const abs = `${repoRoot}/${plugin}`;
     const dirs = discoverTestDirs(abs, exec);
     if (dirs.length === 0) {
-      // No suite at all. Not a pass to be proud of, but not a failure either —
-      // report it explicitly (code 0, pass -1) so the stats show `no tests`
-      // instead of a fake green count.
-      results.push({ plugin, dirs, code: 0, pass: -1, fail: -1, out: "" });
+      // No suite at all. Visible in stats as `no tests` (not a fake 0 fail),
+      // and NON-green at the CheckResult layer (arc#6439 / 度量正控):
+      // 「这个 plugin 的测试全过了」与「这个 plugin 一个测试都没有」must not
+      // share a colour. code non-zero so callers that only look at exit see it.
+      results.push({
+        plugin,
+        dirs,
+        code: 1,
+        pass: -1,
+        fail: -1,
+        out: "no *.test.ts discovered under this plugin tree",
+      });
       continue;
     }
-    const cmd = `bun test ${dirs.map((d) => JSON.stringify(d)).join(" ")} 2>&1`;
-    const { code, out } = exec(cmd, abs);
-    results.push({ plugin, dirs, code, ...parseBunCounts(out), out });
+    const files = listTestFiles(abs, exec);
+    const { packed, isolated } = partitionIsolatedTestFiles(abs, files);
+    // Packed files share one `bun test`. Isolated files each get their own
+    // process so a spawn-heavy suite cannot 30s-timeout its neighbours
+    // (arc#6090). Passing explicit files (not dirs) keeps bun from pulling
+    // an isolated file back into the packed run.
+    const chunks: string[][] = [];
+    if (packed.length > 0) chunks.push(packed);
+    for (const file of isolated) chunks.push([file]);
+    let code = 0;
+    let out = "";
+    let pass = 0;
+    let fail = 0;
+    let sawCrash = false;
+    for (const chunk of chunks) {
+      const cmd = `bun test ${chunk.map((f) => JSON.stringify(f)).join(" ")} 2>&1`;
+      const r = exec(cmd, abs);
+      if (r.code !== 0) code = r.code;
+      out += (out && !out.endsWith("\n") ? "\n" : "") + r.out;
+      const counts = parseBunCounts(r.out);
+      if (counts.pass < 0 || counts.fail < 0) sawCrash = true;
+      else {
+        pass += counts.pass;
+        fail += counts.fail;
+      }
+    }
+    results.push({
+      plugin,
+      dirs,
+      code,
+      pass: sawCrash ? -1 : pass,
+      fail: sawCrash ? -1 : fail,
+      out,
+    });
   }
   return results;
 }
@@ -166,8 +255,16 @@ export function checkPluginTests(opts: PluginTestsOptions): CheckResult {
 
   for (const r of runs) {
     const name = r.plugin.slice(PLUGIN_PREFIX.length);
+    // 度量正控 — empty suite must be NON-green. Anchor is the guard expression
+    // `r.dirs.length === 0` (PC-weak-anchor). Stats still say `no tests` so the
+    // report distinguishes 「没有套件」 from 「0 个失败」.
     if (r.dirs.length === 0) {
       stats[name] = "no tests";
+      failures.push(
+        `=== ${r.plugin} — no test suite discovered (*.test.ts) ===\n` +
+          `touched plugin has zero *.test.ts under it — empty suite is not a pass ` +
+          `(arc#6439 / #2643: pass:-1 must not render green).`,
+      );
       continue;
     }
     if (r.pass >= 0) totalPass += r.pass;

@@ -19,13 +19,23 @@ import {
   isArcAfsNotFound,
   isInEpic,
   isProjectedPullUrl,
+  MemoryWorkItemSource,
   membershipMode,
+  type TimedRow,
   WORK_ID_RE,
   WORK_QUERY_PAGE,
   type WorkItemSource,
   type WorkLedgerOps,
   WorkObjectSource,
 } from "./source";
+import {
+  bucketFlow,
+  bucketFlowByType,
+  bucketsFor,
+  stockSeries,
+  stockSeriesByType,
+  type TimedItem,
+} from "./stats";
 
 const SRC = readFileSync(join(import.meta.dir, "source.ts"), "utf8");
 const SWEEP = readFileSync(join(import.meta.dir, "sweep-batch.ts"), "utf8");
@@ -189,12 +199,18 @@ function mockOps(entries: Array<{ path: string; content: unknown }>): WorkLedger
 /** Query returns path+meta only; bodies live behind read/readMany. */
 function countingOps(
   entries: FixtureEntry[],
-  opts?: { queryIncludesContent?: boolean; readManyNull?: Iterable<string> },
+  opts?: {
+    queryIncludesContent?: boolean;
+    readManyNull?: Iterable<string>;
+    /** Paths whose content is not queryable (DID Space fat / inline-cache miss). */
+    fatPaths?: Iterable<string>;
+  },
 ): { ops: WorkLedgerOps; reads: string[]; readManyCalls: string[][] } {
   const reads: string[] = [];
   const readManyCalls: string[][] = [];
   const includeContent = opts?.queryIncludesContent === true;
   const nullPaths = new Set(opts?.readManyNull ?? []);
+  const fatPaths = new Set(opts?.fatPaths ?? []);
   return {
     reads,
     readManyCalls,
@@ -216,15 +232,9 @@ function countingOps(
       },
       write: async () => ({}),
       exec: async (_path, args) => {
-        const w = whereField(args.where);
-        let rows = entries;
-        if (w.field === "meta.predicate" && w.eq === "member-of") {
-          rows = entries.filter((e) => e.meta?.predicate === "member-of");
-        } else if (w.field === "meta.objectId" && typeof w.eq === "string") {
-          rows = entries.filter((e) => e.meta?.objectId === w.eq);
-        } else {
-          rows = entries.filter((e) => e.meta?.predicate !== "member-of");
-        }
+        const rows = entries.filter((e) =>
+          entryMatchesWhere(e, args.where, { contentIndexed: !fatPaths.has(e.path) }),
+        );
         const mapped = rows.map((e) => ({
           path: e.path,
           meta: e.meta,
@@ -256,11 +266,97 @@ function whereField(where: unknown): { field?: unknown; eq?: unknown } {
   return where as { field?: unknown; eq?: unknown };
 }
 
-function whereClauses(where: unknown): Array<{ field?: unknown; eq?: unknown; in?: unknown }> {
+function whereClauses(where: unknown): Array<{
+  field?: unknown;
+  eq?: unknown;
+  in?: unknown;
+  gte?: unknown;
+  lte?: unknown;
+  contains?: unknown;
+  notIn?: unknown;
+}> {
   if (typeof where !== "object" || where === null) return [];
-  const w = where as { all?: unknown; field?: unknown; eq?: unknown; in?: unknown };
+  const w = where as {
+    all?: unknown;
+    field?: unknown;
+    eq?: unknown;
+    in?: unknown;
+    gte?: unknown;
+    lte?: unknown;
+    contains?: unknown;
+    notIn?: unknown;
+  };
   if (Array.isArray(w.all)) return w.all.flatMap((c) => whereClauses(c));
   return [w];
+}
+
+function resolveEntryField(entry: FixtureEntry, field: string): unknown {
+  if (field.startsWith("meta.")) {
+    const key = field.slice("meta.".length);
+    let current: unknown = entry.meta;
+    for (const segment of key.split(".")) {
+      if (typeof current !== "object" || current === null) return undefined;
+      current = (current as Record<string, unknown>)[segment];
+    }
+    return current;
+  }
+  const content = entry.content;
+  if (typeof content !== "object" || content === null) return undefined;
+  return (content as Record<string, unknown>)[field];
+}
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (typeof a === "string" && typeof b === "string") return a.toLowerCase() === b.toLowerCase();
+  return a === b;
+}
+
+/** Same operators as collection-query (AND-only). Used so pushdown tests can lie-detect. */
+function entryMatchesWhere(
+  entry: FixtureEntry,
+  where: unknown,
+  opts?: { contentIndexed?: boolean },
+): boolean {
+  for (const c of whereClauses(where)) {
+    if (typeof c.field !== "string") continue;
+    const value =
+      opts?.contentIndexed === false && !c.field.startsWith("meta.")
+        ? undefined
+        : resolveEntryField(entry, c.field);
+    if (c.eq !== undefined) {
+      if (value == null || !valuesEqual(value, c.eq)) return false;
+      continue;
+    }
+    if (Array.isArray(c.in)) {
+      if (value == null || !c.in.some((v) => valuesEqual(value, v))) return false;
+      continue;
+    }
+    if (Array.isArray(c.notIn)) {
+      if (value != null && c.notIn.some((v) => valuesEqual(value, v))) return false;
+      continue;
+    }
+    if (c.contains !== undefined) {
+      if (!Array.isArray(value) || !value.some((m) => valuesEqual(m, c.contains))) return false;
+      continue;
+    }
+    if (c.gte !== undefined) {
+      if (value == null) return false;
+      if (typeof value === "number" && typeof c.gte === "number") {
+        if (value < c.gte) return false;
+      } else if (String(value).toLowerCase() < String(c.gte).toLowerCase()) {
+        return false;
+      }
+      continue;
+    }
+    if (c.lte !== undefined) {
+      if (value == null) return false;
+      if (typeof value === "number" && typeof c.lte === "number") {
+        if (value > c.lte) return false;
+      } else if (String(value).toLowerCase() > String(c.lte).toLowerCase()) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 /** Filter `/work` rows by query `where` so claimedIds' three queries stay distinct. */
@@ -278,17 +374,7 @@ function claimedFixtureOps(rows: FixtureEntry[]): WorkLedgerOps {
     },
     write: async () => ({}),
     exec: async (_path, args) => {
-      const clauses = whereClauses(args.where);
-      const matched = rows.filter((row) => {
-        for (const c of clauses) {
-          if (typeof c.field !== "string") continue;
-          const key = c.field.replace(/^meta\./, "");
-          const value = row.meta?.[key];
-          if (c.eq !== undefined && value !== c.eq) return false;
-          if (Array.isArray(c.in) && !c.in.includes(value)) return false;
-        }
-        return true;
-      });
+      const matched = rows.filter((row) => entryMatchesWhere(row, args.where));
       return { success: true, data: { entries: matched } };
     },
   };
@@ -900,6 +986,281 @@ describe("WorkObjectSource — timeline meta prefilter (f1scpt1q)", () => {
     );
     const rows = await src.timeline!(30);
     expect(rows.map((r) => r.id)).toEqual(["live"]);
+  });
+});
+
+describe("WorkObjectSource — timeline window pushdown (#6330)", () => {
+  const recent = new Date().toISOString();
+  const old = "2020-01-01T00:00:00.000Z";
+  const closedInWindow = new Date(Date.now() - 3 * 86_400_000).toISOString();
+
+  function windowFixture(): FixtureEntry[] {
+    return [
+      {
+        path: "/work/old.json",
+        content: {
+          name: "old",
+          creativeWorkStatus: "done",
+          dateCreated: old,
+          closedAt: old,
+          keywords: ["bug"],
+        },
+        meta: {
+          contentType: "work",
+          creativeWorkStatus: "done",
+          dateCreated: old,
+          closedAt: old,
+        },
+      },
+      {
+        path: "/work/live.json",
+        content: {
+          name: "live",
+          creativeWorkStatus: "planned",
+          dateCreated: recent,
+          keywords: ["bug"],
+        },
+        meta: { contentType: "work", creativeWorkStatus: "planned", dateCreated: recent },
+      },
+      {
+        path: "/work/closed.json",
+        content: {
+          name: "closed",
+          creativeWorkStatus: "done",
+          dateCreated: recent,
+          closedAt: closedInWindow,
+          keywords: ["feature"],
+        },
+        meta: {
+          contentType: "work",
+          creativeWorkStatus: "done",
+          dateCreated: recent,
+          closedAt: closedInWindow,
+        },
+      },
+    ];
+  }
+
+  test("ACCEPT: sinceDays=0 is an empty window (collected []), not 未采集", async () => {
+    const execCalls: unknown[] = [];
+    const inner = countingOps(windowFixture());
+    const ops: WorkLedgerOps = {
+      ...inner.ops,
+      exec: async (path, args) => {
+        execCalls.push(args);
+        return inner.ops.exec(path, args);
+      },
+    };
+    const src = new WorkObjectSource(ops);
+    expect(typeof src.timeline).toBe("function");
+    const rows = await src.timeline!(0);
+    expect(rows).toEqual([]);
+    expect(src.lastReadCount).toBe(0);
+    expect(execCalls).toEqual([]);
+  });
+
+  test("REJECT: negative sinceDays is invalid, not an empty window and not 未采集", async () => {
+    const src = new WorkObjectSource(countingOps(windowFixture()).ops);
+    await expect(src.timeline!(-1)).rejects.toThrow(AFSValidationError);
+    expect(typeof src.timeline).toBe("function");
+  });
+
+  test("collected zero-closed is not the same color as cannot-timeline", async () => {
+    const openOnly: FixtureEntry[] = [
+      {
+        path: "/work/live.json",
+        content: { ...PLANNED, name: "live", keywords: ["bug"] },
+        meta: { contentType: "work", creativeWorkStatus: "planned" },
+      },
+    ];
+    const collected = new WorkObjectSource(countingOps(openOnly).ops);
+    const rows = await collected.timeline!(30);
+    expect(typeof collected.timeline).toBe("function");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.closedAt === null)).toBe(true);
+    expect(collected.lastReadCount).toBeGreaterThan(0);
+
+    const uncollected: WorkItemSource = new MemoryWorkItemSource([
+      { id: "1", title: "a", body: null, labels: ["bug"] },
+    ]);
+    expect(uncollected.timeline).toBeUndefined();
+  });
+
+  test("REJECT: declaring a window query then listing all work is dishonest", async () => {
+    const execWheres: unknown[] = [];
+    const inner = countingOps(windowFixture());
+    const ops: WorkLedgerOps = {
+      ...inner.ops,
+      exec: async (path, args) => {
+        execWheres.push(args.where);
+        return inner.ops.exec(path, args);
+      },
+    };
+    const src = new WorkObjectSource(ops);
+    await src.timeline!(30);
+    const dumped = JSON.stringify(execWheres);
+    expect(dumped).toMatch(/"gte"/);
+    // Fat rows (inline-cache miss) only expose meta. Content closedAt/dateCreated
+    // is not a window arm — DID Space file-form will not see those fields.
+    expect(dumped).toMatch(/meta\.dateModified|meta\.closedAt|meta\.dateCreated/);
+    expect(dumped).toMatch(/"done"|"dropped"/);
+    // A single `{ meta.contentType eq work }` with no time bound is the residual.
+    expect(
+      execWheres.some((w) => JSON.stringify(w) === '{"field":"meta.contentType","eq":"work"}'),
+    ).toBe(false);
+  });
+
+  test("ACCEPT: window pushdown reads strictly fewer rows than the full work set", async () => {
+    const queried: string[][] = [];
+    const inner = countingOps(windowFixture());
+    const ops: WorkLedgerOps = {
+      ...inner.ops,
+      exec: async (path, args) => {
+        const page = await inner.ops.exec(path, args);
+        const entries = (page.data as { entries?: Array<{ path?: string }> }).entries ?? [];
+        queried.push(entries.map((e) => e.path ?? ""));
+        return page;
+      },
+    };
+    const src = new WorkObjectSource(ops);
+    const rows = await src.timeline!(30);
+    const union = new Set(queried.flat().filter(Boolean));
+    expect(union.has("/work/old.json")).toBe(false);
+    expect(union.has("/work/live.json")).toBe(true);
+    expect(union.size).toBeLessThan(windowFixture().length);
+    expect(src.lastReadCount).toBe(union.size);
+    expect(src.lastReadCount).toBeGreaterThan(0);
+    expect(rows.some((r) => r.id === "closed" && r.closedAt === closedInWindow)).toBe(true);
+    expect(rows.some((r) => r.id === "old")).toBe(false);
+  });
+
+  test("ACCEPT: open + closed-in-window → opened/closed/stock; byType sums == total", async () => {
+    const src = new WorkObjectSource(countingOps(windowFixture()).ops);
+    const rows = await src.timeline!(30);
+    const timed: TimedItem[] = rows.map((r: TimedRow) => ({
+      id: r.id,
+      type: r.labels.includes("bug") ? "bug" : r.labels.includes("feature") ? "feature" : "untyped",
+      createdAt: r.createdAt,
+      closedAt: r.closedAt,
+    }));
+    expect(timed.some((t) => t.closedAt)).toBe(true);
+    expect(timed.some((t) => t.closedAt === null)).toBe(true);
+    const now = new Date();
+    const b = bucketsFor("day", now);
+    const flow = bucketFlow(timed, b);
+    const flowBy = bucketFlowByType(timed, b);
+    const stock = stockSeries(timed, b);
+    const stockBy = stockSeriesByType(timed, b);
+    for (let i = 0; i < b.length; i++) {
+      const openedSum = Object.values(flowBy).reduce((n, s) => n + (s[i]?.opened ?? 0), 0);
+      const closedSum = Object.values(flowBy).reduce((n, s) => n + (s[i]?.closed ?? 0), 0);
+      const stockSum = Object.values(stockBy).reduce((n, s) => n + (s[i]?.open ?? 0), 0);
+      expect(flow[i]?.opened).toBe(openedSum);
+      expect(flow[i]?.closed).toBe(closedSum);
+      expect(stock[i]?.open).toBe(stockSum);
+    }
+  });
+
+  test("ACCEPT: fat closed row (no meta.closedAt, inline-cache miss) still appears", async () => {
+    // Production workStatusMeta stamps status + dateModified, not closedAt/dateCreated.
+    // DID Space file-form will not evaluate content fields on a fat description.
+    const fatPath = "/work/fat.json";
+    const fat: FixtureEntry[] = [
+      {
+        path: fatPath,
+        content: {
+          name: "fat-closed",
+          creativeWorkStatus: "done",
+          dateCreated: recent,
+          dateModified: closedInWindow,
+          closedAt: closedInWindow,
+          description: "x".repeat(2048 + 512),
+          keywords: ["bug"],
+        },
+        meta: {
+          contentType: "work",
+          creativeWorkStatus: "done",
+          dateModified: closedInWindow,
+        },
+      },
+      {
+        path: "/work/live.json",
+        content: { ...PLANNED, name: "live", keywords: ["feature"] },
+        meta: { contentType: "work", creativeWorkStatus: "planned", dateCreated: recent },
+      },
+      {
+        path: "/work/old-fat.json",
+        content: {
+          name: "old-fat",
+          creativeWorkStatus: "done",
+          dateCreated: old,
+          dateModified: old,
+          closedAt: old,
+          description: "y".repeat(2048 + 512),
+          keywords: ["bug"],
+        },
+        meta: {
+          contentType: "work",
+          creativeWorkStatus: "done",
+          dateModified: old,
+        },
+      },
+    ];
+    const queried: string[][] = [];
+    const inner = countingOps(fat, { fatPaths: [fatPath, "/work/old-fat.json"] });
+    const ops: WorkLedgerOps = {
+      ...inner.ops,
+      exec: async (path, args) => {
+        const page = await inner.ops.exec(path, args);
+        const entries = (page.data as { entries?: Array<{ path?: string }> }).entries ?? [];
+        queried.push(entries.map((e) => e.path ?? ""));
+        return page;
+      },
+    };
+    const src = new WorkObjectSource(ops);
+    const rows = await src.timeline!(30);
+    expect(typeof src.timeline).toBe("function");
+    const hit = rows.find((r) => r.id === "fat");
+    expect(hit?.closedAt).toBe(closedInWindow);
+    expect(rows.some((r) => r.id === "live")).toBe(true);
+    expect(rows.some((r) => r.id === "old-fat")).toBe(false);
+    const union = new Set(queried.flat().filter(Boolean));
+    expect(union.has("/work/old-fat.json")).toBe(false);
+    expect(union.size).toBeLessThan(fat.length);
+    expect(src.lastReadCount).toBeGreaterThan(0);
+  });
+
+  test("mutation: all-zero timeline while the method still claims collected fails ACCEPT", async () => {
+    const fixture = windowFixture();
+    const honest = new WorkObjectSource(countingOps(fixture).ops);
+    const honestRows = await honest.timeline!(30);
+    expect(honestRows.some((r) => r.closedAt)).toBe(true);
+
+    const dishonest: WorkItemSource = {
+      lastReadCount: fixture.length,
+      capabilities: {
+        pushdown: true,
+        incremental: true,
+        writableClassification: true,
+        neighborhood: true,
+      },
+      async list() {
+        return [];
+      },
+      async claimedIds() {
+        return new Set();
+      },
+      async epicMembers() {
+        return new Map();
+      },
+      async timeline() {
+        return honestRows.map((r) => ({ ...r, closedAt: null }));
+      },
+    };
+    const lied = await dishonest.timeline!(30);
+    expect(typeof dishonest.timeline).toBe("function");
+    expect(lied.every((r) => r.closedAt === null)).toBe(true);
+    expect(lied.some((r) => r.closedAt)).toBe(false);
   });
 });
 

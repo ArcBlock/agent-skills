@@ -1,17 +1,25 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { requireStickyGate } from "./gate";
 import {
   agentAuthored,
+  appendCoderEngine,
+  assertCwdIsPrHead,
   assertReviewerEngine,
   attestLocalReview,
   type Convergence,
   coderEngineClaim,
+  collectReviewOutput,
+  contractRetryPrompt,
   convergence,
   crossEngineVerdict,
   type Disposition,
   dispositionParseDiag,
   formatDispositionParseDiag,
+  formatReviewRawArtifact,
+  fulfillReviewContract,
   LOCAL_REVIEW_PREFIX,
   localReviewRerunHint,
   nextRound,
@@ -21,8 +29,10 @@ import {
   parseReviewerEngineFromComment,
   parseReviewReport,
   parseReviewState,
+  persistReviewRaw,
   pickDefaultReviewer,
   REPORT_CONTRACT,
+  REVIEW_OUTPUT_SCHEMA,
   type ReviewFinding,
   ROUND_CAP,
   renderReviewComment,
@@ -30,6 +40,7 @@ import {
   rerunDiscipline,
   resolveReviewerBin,
   resolveSubjectEngine,
+  reviewExcerpt,
   reviewerArgv,
   reviewerEngines,
   reviewResult,
@@ -38,6 +49,7 @@ import {
   type StateFinding,
   setReviewerEngines,
   toStateFindings,
+  unionCoderEngines,
 } from "./local-review";
 
 /** 真实产物：2026-08-31 本地 codex 对 arc#5685 的 review，逐字保存。 */
@@ -81,6 +93,12 @@ const FIXTURE = {
   },
   grok: {
     bin: "grok",
+    args: ({ prompt }: { prompt: string; base: string }) => ["-p", prompt],
+    outputMode: "stdout" as const,
+  },
+  "grok-build": {
+    bin: "grok",
+    fallbackBins: ["grok-build"],
     args: ({ prompt }: { prompt: string; base: string }) => ["-p", prompt],
     outputMode: "stdout" as const,
   },
@@ -1441,6 +1459,138 @@ describe("★★ coder 引擎的来源：工厂写的凭据 vs 被审者写的�
   });
 });
 
+describe("★★ Gate 6 coder 引擎是集合，不是每 PR 一个值（#6184）", () => {
+  const body = (e?: string) =>
+    `> 🤖 AI Agent PR @ h · runner:x · agentloop@0.36.0+a · skill:x${e ? ` · engine:${e}` : ""}`;
+
+  test("ACCEPT：单引擎行为完全不变 — 同引擎 BLOCKED、异引擎 PASS", () => {
+    // 一个「永远判 BLOCKED」的闸满足所有「它拦住了同引擎 review」的断言。
+    expect(crossEngineVerdict("claude", "claude")).toMatchObject({
+      ok: false,
+      reason: "same-engine",
+    });
+    expect(crossEngineVerdict("codex", "claude")).toMatchObject({
+      ok: true,
+      reason: "cross-engine",
+    });
+    expect(agentAuthored(body("claude"))).toMatchObject({
+      required: true,
+      coderEngine: "claude",
+    });
+    expect(reviewResult({ reviewerEngine: "claude", subjectEngine: "claude", findings: [] })).toBe(
+      "BLOCKED",
+    );
+    expect(reviewResult({ reviewerEngine: "codex", subjectEngine: "claude", findings: [] })).toBe(
+      "PASS",
+    );
+  });
+
+  test("★ 身份行 engine:grok-build+claude 解析成集合，不是只取第一个", () => {
+    const a = agentAuthored(body("grok-build+claude"));
+    expect(a.coderEngines).toEqual(["grok-build", "claude"]);
+    expect(a.coderEngine).toBe("grok-build+claude");
+  });
+
+  test("★ 多个 engine: 字段同样收成集合", () => {
+    const line =
+      "> 🤖 AI Agent PR @ h · runner:x · agentloop@0.36.0+a · skill:x · engine:grok-build · engine:claude";
+    expect(agentAuthored(line).coderEngines).toEqual(["grok-build", "claude"]);
+  });
+
+  test("★ 混合作者：reviewer ∈ 集合 → same-engine BLOCKED，∉ 集合 → PASS", () => {
+    const mixed = "grok-build+claude";
+    expect(crossEngineVerdict("grok-build", mixed)).toMatchObject({
+      ok: false,
+      reason: "same-engine",
+    });
+    expect(crossEngineVerdict("claude", mixed)).toMatchObject({
+      ok: false,
+      reason: "same-engine",
+    });
+    expect(crossEngineVerdict("codex", mixed)).toMatchObject({
+      ok: true,
+      reason: "cross-engine",
+    });
+  });
+
+  test("★ reviewResult：grok 审混合作者 BLOCKED，codex 审 PASS", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "grok-build",
+        subjectEngine: "grok-build+claude",
+        findings: [],
+      }),
+    ).toBe("BLOCKED");
+    expect(
+      reviewResult({
+        reviewerEngine: "codex",
+        subjectEngine: "grok-build+claude",
+        findings: [],
+      }),
+    ).toBe("PASS");
+  });
+
+  test("★ 追加而不是覆盖：grok 写完 claude 再写，claim 集合保住 grok-build", () => {
+    const afterGrok = body("grok-build");
+    const afterClaude = appendCoderEngine(afterGrok, "claude");
+    const claim = coderEngineClaim(undefined, afterClaude);
+    expect(claim.engine).toBe("grok-build+claude");
+    expect(agentAuthored(afterClaude).coderEngines).toEqual(["grok-build", "claude"]);
+    expect(crossEngineVerdict("grok-build", claim.engine).ok).toBe(false);
+    expect(crossEngineVerdict("codex", claim.engine).ok).toBe(true);
+  });
+
+  test("mutation: 把追加改回覆盖 → grok reviewer 假 PASS，断言必须红", () => {
+    const src = readFileSync(new URL("./local-review.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/unionCoderEngines/);
+    // 真追加：集合是 {grok-build, claude}，grok reviewer BLOCKED。
+    const appended = unionCoderEngines(["grok-build"], "claude");
+    expect(appended).toEqual(["grok-build", "claude"]);
+    expect(crossEngineVerdict("grok-build", appended.join("+")).ok).toBe(false);
+    // 覆盖（本条修法要根除的形态）：集合掉成 {claude}，grok reviewer 假 PASS。
+    const overwrite = (prior: string[], next: string) => (next ? [next] : prior);
+    const dropped = overwrite(["grok-build"], "claude");
+    expect(dropped).toEqual(["claude"]);
+    expect(crossEngineVerdict("grok-build", dropped.join("+")).ok).toBe(true);
+    // 源里必须是追加。改成 `return n ? [n] : [...prior]`（覆盖）会让上面那条
+    // 真追加断言红 —— 把实现改坏时本测试必须失败。
+    expect(src).toMatch(/return prior\.includes\(n\) \? \[\.\.\.prior\] : \[\.\.\.prior, n\];/);
+    expect(src).not.toMatch(/return n \? \[n\] : \[\.\.\.prior\];/);
+  });
+
+  test("★ --subject-engine 只能确认集合里的一员，不得把集合塌成单值", () => {
+    const mixed = body("grok-build+claude");
+    const r = resolveSubjectEngine(mixed, "claude");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.engine).toBe("grok-build+claude");
+    expect(crossEngineVerdict("grok-build", r.engine).ok).toBe(false);
+  });
+
+  test("★ attested 顺序派工的集合与 claimed 子集不矛盾，用完整 attested 集", () => {
+    const c = coderEngineClaim("grok-build+claude", body("claude"));
+    expect(c.conflict).toBeUndefined();
+    expect(c.attested).toBe(true);
+    expect(c.engine).toBe("grok-build+claude");
+    expect(crossEngineVerdict("grok-build", c.engine).ok).toBe(false);
+  });
+
+  test("★ claimed 侧单值不得因为 attested 放宽而变松：只有 claimed 时仍是单元素", () => {
+    const c = coderEngineClaim(undefined, body("claude"));
+    expect(c.attested).toBe(false);
+    expect(c.engine).toBe("claude");
+    expect(c.source).toBe("pr-body");
+    expect(crossEngineVerdict("codex", c.engine).ok).toBe(true);
+  });
+
+  test("★ pickDefaultReviewer 对混合作者挑一个不在集合里的引擎", () => {
+    const picked = pickDefaultReviewer("grok-build+claude");
+    expect(picked).toBeDefined();
+    expect(["grok-build", "claude"]).not.toContain(picked);
+    expect(crossEngineVerdict(picked, "grok-build+claude").ok).toBe(true);
+  });
+});
+
 describe("★★ 未了结的 finding 必须被带进下一轮账本（#5697 review P1）", () => {
   const prior: StateFinding[] = [
     { id: "aaa", severity: "P1", title: "还没修", file: "a.ts", line: "1" },
@@ -2002,5 +2152,619 @@ describe("★★ rerunDiscipline —— 「该重跑」与「重跑没有用」�
   test("★ 读不到 body ⇒ 沉默（不猜）", () => {
     expect(rerunDiscipline(undefined)).toBeUndefined();
     expect(rerunDiscipline("")).toBeUndefined();
+  });
+});
+
+/**
+ * arc#6165 + #6172 —— 解析失败这条路上的两个同色洞。
+ *
+ * #6165: sticky 把「有两条真 P2」和「reviewer 什么都没说」都渲染成 `BLOCKED · 0 条`。
+ *         fail-closed（BLOCKED）是对的；绞死已经认得出的 finding 是错的。
+ * #6172: grok-build 的模型原文有时落盘、有时只剩 24 行日志。文件存在 ≠ 原文还在；
+ *         「什么都没说」与「说了但扔掉」必须分色。依赖 #6183：身份行已经能写出
+ *         `engine:grok-build`，否则独立性会先被涂成 unknown，本条的分色到不了人眼前。
+ */
+describe("★★ arc#6165 + #6172 —— 解析失败不得绞死 finding / 原文不得同色丢失", () => {
+  const NONCE = "arc-review-nonce-6165dead";
+  const SHA = "a".repeat(40);
+  /** PR #6135 上 grok-build 那份格式完好、却被渲染成 0 条的形状。 */
+  const wellFormedTwoP2s = [
+    "先看完整 diff 和调用链。",
+    "",
+    "Full review comments:",
+    "",
+    "- [P2] record-building catch leaves ledgerWrites absent on a reachable path — packages/core/src/audit.ts:40-55",
+    "  catch 吞掉异常之后返回值没有 ledgerWrites，下游当成没写过。",
+    "- [P2] { success: false } hub result with no tokens counted as skipped — packages/core/src/audit.ts:80-90",
+    "  writeAuditEntry 从不读 result.success，后端故障与图片 hub 正常工作同色。",
+  ].join("\n");
+
+  test("★ arc#6165 REJECT: 格式完好的 finding + 缺 nonce → 仍 unparseable，但 findings 必须捞回", () => {
+    // 脚本每轮都传 nonce。grok 常漏抄最后一行，于是整份在 nonce 检查处被扔掉，
+    // 两条 P2 只剩在 raw 文件里。fail-closed 是 BLOCKED，不是「当 0 条」。
+    const r = parseCodexReview(wellFormedTwoP2s, { nonce: NONCE });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.kind).toBe("incomplete");
+    expect(r.findings.length).toBe(2);
+    expect(r.findings[0]?.title).toContain("ledgerWrites");
+    expect(r.findings[1]?.title).toContain("success: false");
+    expect(r.excerpt).toContain("ledgerWrites");
+  });
+
+  test("★ arc#6165 REJECT: 没有小节 vs 有小节但认不出 —— kind 必须分色", () => {
+    const noSection = parseCodexReview("已检查完整 diff，未发现可确证问题。");
+    expect(noSection.ok).toBe(false);
+    if (noSection.ok) return;
+    expect(noSection.kind).toBe("missing-section");
+
+    const unrecognised = parseCodexReview(
+      "S\n\nFull review comments:\n\n1. 这不是契约形状的 finding\n",
+    );
+    expect(unrecognised.ok).toBe(false);
+    if (unrecognised.ok) return;
+    expect(unrecognised.kind).toBe("unrecognised");
+    expect(unrecognised.kind).not.toBe(noSection.kind);
+  });
+
+  test("★ arc#6165 REJECT: sticky 有捞回的 P2 时不得写成 0 条", () => {
+    const parsed = parseCodexReview(wellFormedTwoP2s, { nonce: NONCE });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    const body = renderReviewComment({
+      reviewerEngine: "grok-build",
+      subjectEngine: "claude",
+      sha: SHA,
+      base: "origin/main",
+      findings: parsed.findings,
+      unparseable: true,
+      parseKind: parsed.kind,
+      excerpt: parsed.excerpt,
+      raw: {
+        path: ".verify/local-review-6135.raw.md",
+        bytes: wellFormedTwoP2s.length,
+        preserved: true,
+      },
+    });
+    expect(body.split("\n")[0]).toContain("result=BLOCKED");
+    expect(body).toMatch(/2 条/);
+    expect(body).not.toMatch(/0 条/);
+    expect(body).toContain("ledgerWrites");
+    expect(body).toContain("success: false");
+    expect(body).toMatch(/无法解析/);
+    expect(body).toMatch(/原文已保留/);
+    expect(body).toContain(".verify/local-review-6135.raw.md");
+  });
+
+  test("★ arc#6165 ACCEPT: 真干净仍是 PASS · 0 条（否则「永远非 0 条」满足上一条）", () => {
+    const clean = ["Looks good.", "", "Full review comments:", "", "(none)", "", NONCE].join("\n");
+    const r = parseCodexReview(clean, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings.length).toBe(0);
+    const body = renderReviewComment({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      sha: SHA,
+      base: "origin/main",
+      findings: r.findings,
+    });
+    expect(body.split("\n")[0]).toContain("result=PASS");
+    expect(body).toMatch(/0 条/);
+    expect(body).toMatch(/本轮无 finding/);
+  });
+
+  test("★ arc#6165 ACCEPT: 解析失败仍是 BLOCKED，不得因为捞回了 finding 就变 FAIL/PASS", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "grok-build",
+        subjectEngine: "claude",
+        findings: [
+          {
+            severity: "P2",
+            title: "ledgerWrites absent",
+            file: "a.ts",
+            line: "1",
+            body: "x",
+          },
+        ],
+        unparseable: true,
+      }),
+    ).toBe("BLOCKED");
+  });
+
+  test("★ arc#6172 REJECT: stdout 空、stderr 有模型原文 → 接到的是 stderr（grok-build 洞）", () => {
+    const model = `${wellFormedTwoP2s}\n`;
+    const collected = collectReviewOutput({
+      outputMode: "stdout",
+      stdout: "",
+      stderr: model,
+    });
+    expect(collected.source).toBe("stderr");
+    expect(collected.text).toContain("ledgerWrites");
+  });
+
+  test("★ arc#6172 ACCEPT: stdout 非空时不得改吃 stderr（事件流/日志不能冒充模型原文）", () => {
+    const collected = collectReviewOutput({
+      outputMode: "stdout",
+      stdout: "Full review comments:\n\n(none)\n",
+      stderr: wellFormedTwoP2s,
+    });
+    expect(collected.source).toBe("stdout");
+    expect(collected.text).toContain("(none)");
+    expect(collected.text).not.toContain("ledgerWrites");
+  });
+
+  test("★ arc#6172 ACCEPT: file 模式优先 outFile（codex -o），stdout 只是回退", () => {
+    const collected = collectReviewOutput({
+      outputMode: "file",
+      stdout: "event stream noise",
+      stderr: "",
+      outFileText: wellFormedTwoP2s,
+    });
+    expect(collected.source).toBe("outFile");
+    expect(collected.text).toContain("ledgerWrites");
+  });
+
+  test("★ arc#6172 REJECT: 空原文 persist.preserved=false —— 文件存在不是原文还在", () => {
+    // 铁律：一个「总是创建 raw 文件」的实现满足每一条「raw 被保留了」的断言。
+    const dir = mkdtempSync(join(tmpdir(), "local-review-6172-"));
+    try {
+      const dest = join(dir, "empty.raw.md");
+      const artifact = formatReviewRawArtifact(
+        collectReviewOutput({ outputMode: "stdout", stdout: "", stderr: "" }),
+        { engine: "grok-build" },
+      );
+      const r = persistReviewRaw({ destPath: dest, modelText: "", artifact });
+      expect(r.preserved).toBe(false);
+      expect(r.bytes).toBe(0);
+      const onDisk = readFileSync(dest, "utf8");
+      // 盘上可以有头，但不得把空原文涂成「已保留」。
+      expect(onDisk).not.toContain("ledgerWrites");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("★ arc#6172 ACCEPT: 文件里必须真的含模型说过的话，不只是文件存在", () => {
+    const dir = mkdtempSync(join(tmpdir(), "local-review-6172-"));
+    try {
+      const dest = join(dir, "kept.raw.md");
+      const collected = collectReviewOutput({
+        outputMode: "stdout",
+        stdout: "",
+        stderr: wellFormedTwoP2s,
+      });
+      const artifact = formatReviewRawArtifact(collected, { engine: "grok-build" });
+      const r = persistReviewRaw({
+        destPath: dest,
+        modelText: collected.text,
+        artifact,
+      });
+      expect(r.preserved).toBe(true);
+      expect(r.bytes).toBeGreaterThan(0);
+      const onDisk = readFileSync(r.path, "utf8");
+      expect(onDisk).toContain("ledgerWrites");
+      expect(onDisk).toContain("success: false");
+      expect(onDisk).toContain("engine: grok-build");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("★ arc#6172 REJECT: sticky 上「原文已保留」与「原文未保留」必须分色", () => {
+    const base = {
+      reviewerEngine: "grok-build",
+      subjectEngine: "claude",
+      sha: SHA,
+      base: "origin/main",
+      findings: [] as ReviewFinding[],
+      unparseable: true,
+      parseKind: "empty" as const,
+    };
+    const kept = renderReviewComment({
+      ...base,
+      excerpt: reviewExcerpt("模型说了一段话但解析器没认出来"),
+      raw: { path: ".verify/kept.raw.md", bytes: 99, preserved: true },
+    });
+    const lost = renderReviewComment({
+      ...base,
+      excerpt: "",
+      raw: { path: ".verify/lost.raw.md", bytes: 0, preserved: false },
+    });
+    expect(kept).toMatch(/原文已保留/);
+    expect(kept).toContain(".verify/kept.raw.md");
+    expect(kept).toContain("模型说了一段话但解析器没认出来");
+    expect(lost).toMatch(/原文未保留/);
+    expect(lost).not.toMatch(/原文已保留/);
+    expect(kept).not.toBe(lost);
+  });
+
+  test("★ 脚本必须在解析之前无条件落盘，且 stdout+stderr 都 pipe（#6172 接线）", () => {
+    const src = readFileSync(new URL("../scripts/local-review.ts", import.meta.url), "utf8");
+    expect(src).toContain("persistReviewRaw");
+    expect(src).toContain("collectReviewOutput");
+    // 修之前 stderr 是 inherit、file 模式 stdout 也是 inherit —— grok 的模型原文
+    // 只要没打到被 pipe 的那条 fd 就丢了。两条都 pipe 才是无条件。
+    expect(src).toMatch(/stdio:\s*\[[^\]]*pipe[^\]]*pipe/);
+    expect(src).not.toMatch(/outputMode === "stdout" \? "pipe" : "inherit"/);
+    // persist 必须在 parse 之前。把两行调换会让「解析崩了原文没落」再出现。
+    expect(src.indexOf("persistReviewRaw(")).toBeLessThan(src.indexOf("parseCodexReview("));
+  });
+});
+
+describe("★★ cwd HEAD 必须是 PR head，否则不得 spawn（arc#6195）", () => {
+  /**
+   * 事故原形：`local-review.ts --pr 6112` 从共享主 checkout 跑，当时 HEAD 是另一条
+   * 分支。reviewer 认真审了 `scripts/git-push-lease.ts`，输出带 nonce、格式合法，
+   * 却一个 native 文件都没看见。`--post` 路径后来有 sha 断言，但在引擎跑完之后
+   * 才做（实测烧掉 1288s）；**不带 `--post` 时完全没有这条断言**。
+   *
+   * nonce 证明输出没被截断，不证明输入是对的。「审过这个 PR」与「审的是别的东西」
+   * 在报告上同色。
+   */
+  const LOCAL = "4e5add2adba71226880fb411664d749de35f1cd3";
+  const PR_HEAD = "13ac17cd2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const CWD = "/Users/robmao/work/arcblock/arc";
+  const ghHead =
+    (out: string, code = 0) =>
+    (cmd: string) => {
+      expect(cmd).toMatch(/6112/);
+      expect(cmd).toMatch(/head\.sha|headRefOid/);
+      return { code, out, ms: 0 };
+    };
+
+  test("★ REJECT: sha 不符 → 非 ok，两个 sha 和 cwd 都要说出来", () => {
+    const r = assertCwdIsPrHead({
+      pr: "6112",
+      localSha: LOCAL,
+      cwd: CWD,
+      runner: ghHead(`${PR_HEAD}\n`),
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toContain(LOCAL);
+    expect(r.reason).toContain(PR_HEAD);
+    expect(r.reason).toContain(CWD);
+    expect(r.reason).toMatch(/worktree|工作树/);
+    // 一个「只警告、仍 ok」的实现会让调用方照常 spawn —— 那正是事故。
+  });
+
+  test("★ REJECT: 取不到 PR head ≠ 就是当前 HEAD（读不到不得放行）", () => {
+    const r = assertCwdIsPrHead({
+      pr: "6112",
+      localSha: LOCAL,
+      cwd: CWD,
+      runner: ghHead("not a sha", 1),
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toMatch(/取不到|读不到|head/i);
+    expect(r.reason).toContain("6112");
+    // 判别项：退回 localSha 当 PR head 的实现会 ok=true。
+  });
+
+  test("★ REJECT: gh 成功但输出空 / 非 40 位 → 同样停，不猜", () => {
+    for (const out of ["", "13ac17cd2", "HEAD", "origin/main"]) {
+      const r = assertCwdIsPrHead({
+        pr: "6112",
+        localSha: LOCAL,
+        cwd: CWD,
+        runner: ghHead(out),
+      });
+      expect(r.ok).toBe(false);
+    }
+  });
+
+  test("★ ACCEPT: sha 相符 → ok，调用方应照常 review（否则「永远拒绝」满足上面每一条）", () => {
+    let fetched = false;
+    const r = assertCwdIsPrHead({
+      pr: "6112",
+      localSha: PR_HEAD,
+      cwd: "/workspace/wt/pr-6112",
+      runner: (cmd) => {
+        fetched = true;
+        expect(cmd).toMatch(/6112/);
+        return { code: 0, out: `${PR_HEAD}\n`, ms: 0 };
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.sha).toBe(PR_HEAD);
+    expect(r.prHead).toBe(PR_HEAD);
+    expect(fetched).toBe(true);
+  });
+
+  test("★ 正控：相符与不符必须不同色（否则上面几条可能只是同向）", () => {
+    const mismatch = assertCwdIsPrHead({
+      pr: "6112",
+      localSha: LOCAL,
+      cwd: CWD,
+      runner: ghHead(PR_HEAD),
+    });
+    const match = assertCwdIsPrHead({
+      pr: "6112",
+      localSha: PR_HEAD,
+      cwd: "/wt/pr-6112",
+      runner: ghHead(PR_HEAD),
+    });
+    expect(mismatch.ok).toBe(false);
+    expect(match.ok).toBe(true);
+    expect(mismatch.ok).not.toBe(match.ok);
+  });
+
+  test("★ 脚本必须在 spawn 之前断言，且不藏在 --post 里", () => {
+    const src = readFileSync(new URL("../scripts/local-review.ts", import.meta.url), "utf8");
+    expect(src).toContain("assertCwdIsPrHead");
+    const assertAt = src.indexOf("assertCwdIsPrHead(");
+    const spawnAt = src.indexOf("spawnSync(");
+    // 锚在控制流，不是注释里的「if (post)」字样。
+    const postAt = src.indexOf("if (post) {");
+    expect(assertAt).toBeGreaterThan(0);
+    expect(spawnAt).toBeGreaterThan(assertAt);
+    // 修之前断言只在 `--post` 分支里。把检查重新塞进该分支，不带 --post
+    // 的错 review 再与真 review 同色。
+    expect(postAt).toBeGreaterThan(0);
+    expect(assertAt).toBeLessThan(postAt);
+  });
+});
+
+/**
+ * arc#6187 —— codex 对报告契约的遵守是间歇性的。
+ *
+ * #6123 把「输出无法解析」判成 BLOCKED 是对的（散文结论与「我没能审」同色）。
+ * 但引擎对契约的遵守不稳：平凡 diff（纯配置 / 纯文档）上，codex 稳定只出一句
+ * 对话式结论，没有小节头、没有 `(none)`、没有 nonce → 可合并的 PR 被随机挡住。
+ *
+ * 修法不是把散文重新读成干净（那会把 #6123 整段退回去），而是让契约兑现
+ * 不再靠模型自觉在自由文本末尾贴哨兵：
+ *
+ *   1. 结构化输出（JSON schema）—— 格式由引擎强制，不由被审方自觉
+ *   2. 一次「你没有按契约输出」重试，仍不合规才 BLOCKED
+ *
+ * 误拦一侧不可少：真有 P1 的报告修好之后仍必须报出那条 P1，不得变成 PASS。
+ */
+describe("★★ arc#6187 —— 契约兑现不得靠模型自觉贴哨兵", () => {
+  const NONCE = "arc-review-nonce-6187deadbeef";
+  const PROSE_6186 = readFileSync(
+    new URL("./fixtures/codex-prose-6186.txt", import.meta.url),
+    "utf8",
+  ).trim();
+  const markdownClean = [
+    "审完了，没问题。",
+    "",
+    "Full review comments:",
+    "",
+    "(none)",
+    "",
+    NONCE,
+  ].join("\n");
+  const markdownP1 = [
+    "有一个确证的缺陷。",
+    "",
+    "Full review comments:",
+    "",
+    "- [P1] 错误放行 — packages/core/src/afs.ts:7",
+    "  只有在 X 且 Y 时才会触发，修法是 Z。",
+    "",
+    NONCE,
+  ].join("\n");
+  const jsonClean = JSON.stringify({
+    summary: "已审查完整 diff，未发现可确证的缺陷。",
+    findings: [],
+    nonce: NONCE,
+  });
+  const jsonP1 = JSON.stringify({
+    summary: "有一个确证的缺陷。",
+    findings: [
+      {
+        severity: "P1",
+        title: "错误放行",
+        file: "packages/core/src/afs.ts",
+        line: "7",
+        body: "只有在 X 且 Y 时才会触发，修法是 Z。",
+      },
+    ],
+    nonce: NONCE,
+  });
+  const verdict = (parsed: ReturnType<typeof parseReviewReport>) =>
+    reviewResult({
+      reviewerEngine: "codex",
+      subjectEngine: "claude",
+      findings: parsed.ok ? parsed.findings : [],
+      unparseable: !parsed.ok,
+    });
+
+  test("★ REJECT: #6186 那种平凡 diff 散文仍是 unparseable，不是干净", () => {
+    // 这条钉死 #6123 不许被「修合规率」顺手退回去。
+    expect(PROSE_6186).toMatch(/未发现/);
+    expect(PROSE_6186).not.toContain("Full review comments:");
+    expect(PROSE_6186).not.toContain("(none)");
+    expect(parseReviewReport(PROSE_6186, { nonce: NONCE }).ok).toBe(false);
+    expect(parseReviewReport(`${PROSE_6186}\n\n${NONCE}`, { nonce: NONCE }).ok).toBe(false);
+    expect(verdict(parseReviewReport(PROSE_6186, { nonce: NONCE }))).toBe("BLOCKED");
+  });
+
+  test("★ ACCEPT: 结构化 JSON 空 findings + 匹配 nonce → PASS，零条", () => {
+    const r = parseReviewReport(jsonClean, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings).toEqual([]);
+    expect(verdict(r)).toBe("PASS");
+  });
+
+  test("★ REJECT: JSON 缺 nonce / nonce 不对 / 没有 findings 数组 → unparseable，不是干净", () => {
+    expect(
+      parseReviewReport(JSON.stringify({ summary: "ok", findings: [] }), { nonce: NONCE }).ok,
+    ).toBe(false);
+    expect(
+      parseReviewReport(JSON.stringify({ summary: "ok", findings: [], nonce: "other" }), {
+        nonce: NONCE,
+      }).ok,
+    ).toBe(false);
+    expect(parseReviewReport(JSON.stringify({ ok: true, nonce: NONCE }), { nonce: NONCE }).ok).toBe(
+      false,
+    );
+    expect(verdict(parseReviewReport(JSON.stringify({ ok: true }), { nonce: NONCE }))).toBe(
+      "BLOCKED",
+    );
+  });
+
+  test("★ 误拦：JSON 里的真 P1 必须报出，判决 FAIL 不是 PASS/干净", () => {
+    const r = parseReviewReport(jsonP1, { nonce: NONCE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings).toHaveLength(1);
+    expect(r.findings[0]).toMatchObject({
+      severity: "P1",
+      title: "错误放行",
+      file: "packages/core/src/afs.ts",
+      line: "7",
+    });
+    expect(r.findings[0]?.body).toContain("修法是 Z");
+    // 有 finding 是 FAIL（闸仍挡住合并）。BLOCKED 是「没审成」；两者不许同色。
+    expect(verdict(r)).toBe("FAIL");
+  });
+
+  test("★ REJECT: JSON findings 缺字段 → unparseable，不许丢条装干净", () => {
+    const bad = JSON.stringify({
+      summary: "有问题",
+      findings: [{ severity: "P1", title: "x" }],
+      nonce: NONCE,
+    });
+    expect(parseReviewReport(bad, { nonce: NONCE }).ok).toBe(false);
+    expect(verdict(parseReviewReport(bad, { nonce: NONCE }))).toBe("BLOCKED");
+  });
+
+  test("★ 重试：平凡散文之后按契约重出 → PASS 空 findings", () => {
+    const r = fulfillReviewContract({
+      nonce: NONCE,
+      first: { stdout: PROSE_6186, failed: false },
+      retry: () => ({ stdout: markdownClean, failed: false }),
+    });
+    expect(r.retried).toBe(true);
+    expect(r.parsed.ok).toBe(true);
+    if (r.parsed.ok) expect(r.parsed.findings).toEqual([]);
+    expect(verdict(r.parsed)).toBe("PASS");
+  });
+
+  test("★ 弄坏：去掉重试，同一条平凡 diff 散文再次不可解析 → BLOCKED", () => {
+    const r = fulfillReviewContract({
+      nonce: NONCE,
+      first: { stdout: PROSE_6186, failed: false },
+    });
+    expect(r.retried).toBe(false);
+    expect(r.parsed.ok).toBe(false);
+    expect(verdict(r.parsed)).toBe("BLOCKED");
+  });
+
+  test("★ 弄坏：重试仍是散文 → 仍 BLOCKED，不得读成干净", () => {
+    const r = fulfillReviewContract({
+      nonce: NONCE,
+      first: { stdout: PROSE_6186, failed: false },
+      retry: () => ({ stdout: PROSE_6186, failed: false }),
+    });
+    expect(r.retried).toBe(true);
+    expect(r.parsed.ok).toBe(false);
+    expect(verdict(r.parsed)).toBe("BLOCKED");
+  });
+
+  test("★ REJECT: 进程失败不重试（超时/非零 ≠ 散文不合规）", () => {
+    const r = fulfillReviewContract({
+      nonce: NONCE,
+      first: { stdout: "", failed: true },
+      retry: () => ({ stdout: markdownClean, failed: false }),
+    });
+    expect(r.retried).toBe(false);
+    expect(r.failed).toBe(true);
+    expect(r.parsed.ok).toBe(false);
+  });
+
+  test("★ 重试提示必须点名「没按契约」，并带上 (none) 与 nonce", () => {
+    const p = contractRetryPrompt(NONCE);
+    expect(p).toMatch(/没按契约|没有按契约|无法解析/);
+    expect(p).toContain("(none)");
+    expect(p).toContain(NONCE);
+    expect(p).toContain("Full review comments:");
+  });
+
+  test("★ 结构化 schema 是严格 JSON Schema（additionalProperties: false + required）", () => {
+    expect(REVIEW_OUTPUT_SCHEMA.type).toBe("object");
+    expect(REVIEW_OUTPUT_SCHEMA.additionalProperties).toBe(false);
+    expect(REVIEW_OUTPUT_SCHEMA.required).toEqual(["summary", "findings", "nonce"]);
+    expect(REVIEW_OUTPUT_SCHEMA.properties.findings.type).toBe("array");
+    const item = REVIEW_OUTPUT_SCHEMA.properties.findings.items;
+    expect(item.additionalProperties).toBe(false);
+    expect(item.required).toEqual(["severity", "title", "file", "line", "body"]);
+  });
+
+  test("★ 弄坏：去掉 --output-schema 请求，模拟 codex 在平凡 diff 上再次只出散文", () => {
+    setReviewerEngines({
+      ...FIXTURE,
+      codex: {
+        bin: "codex",
+        args: ({
+          prompt,
+          outFile,
+          schemaFile,
+        }: {
+          prompt: string;
+          base: string;
+          outFile?: string;
+          schemaFile?: string;
+        }) => [
+          "exec",
+          "-s",
+          "read-only",
+          ...(outFile ? ["-o", outFile] : []),
+          ...(schemaFile ? ["--output-schema", schemaFile] : ["review"]),
+          prompt,
+        ],
+        outputMode: "file" as const,
+      },
+    });
+    const simulate = (argv: string[]) =>
+      argv.includes("--output-schema") ? jsonClean : PROSE_6186;
+
+    const withSchema = reviewerArgv("codex", {
+      prompt: "p",
+      base: "main",
+      outFile: "/tmp/o",
+      schemaFile: "/tmp/s.json",
+    });
+    expect(withSchema).toContain("--output-schema");
+    const parsed = parseReviewReport(simulate(withSchema), { nonce: NONCE });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.findings).toEqual([]);
+    expect(verdict(parsed)).toBe("PASS");
+
+    const without = reviewerArgv("codex", { prompt: "p", base: "main", outFile: "/tmp/o" });
+    expect(without).not.toContain("--output-schema");
+    expect(parseReviewReport(simulate(without), { nonce: NONCE }).ok).toBe(false);
+    expect(verdict(parseReviewReport(simulate(without), { nonce: NONCE }))).toBe("BLOCKED");
+  });
+
+  test("★ ACCEPT: grok-build / claude 的 markdown 契约路径不得被改坏", () => {
+    const clean = parseReviewReport(markdownClean, { nonce: NONCE });
+    expect(clean.ok).toBe(true);
+    if (clean.ok) expect(clean.findings).toEqual([]);
+    expect(verdict(clean)).toBe("PASS");
+
+    const p1 = parseReviewReport(markdownP1, { nonce: NONCE });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    expect(p1.findings).toHaveLength(1);
+    expect(p1.findings[0]?.severity).toBe("P1");
+    expect(verdict(p1)).toBe("FAIL");
+
+    const f = fulfillReviewContract({
+      nonce: NONCE,
+      first: { stdout: markdownClean, failed: false },
+      retry: () => {
+        throw new Error("must not retry a parseable report");
+      },
+    });
+    expect(f.retried).toBe(false);
+    expect(f.parsed.ok).toBe(true);
   });
 });

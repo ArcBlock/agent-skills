@@ -172,11 +172,11 @@ summary comment 的折叠说明里写着真正的判据:
 
 ```bash
 bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/pr-review/scripts/bot-clean.ts" \
-  --pr <n> --repo <owner/name>            # 不给 --vendor 就枚举 PR 上**所有** bot 并逐个判
+  --pr <n> --repo <owner/name>            # 不给 --vendor 就判 RECOGNISED_REVIEW_VENDORS 花名册上**每一个**（含没留下痕迹的，state=`absent`），不是只判 PR 上出现过的
 # → bot-clean: vendor=… state=… botFindings=<n|UNAVAILABLE> inline=… conversation=… \
-#              thumbsUp=… summaryCompleted=… reviewedSha=…
+#              thumbsUp=… summaryCompleted=… reviewedSha=… reviews=…
 # → bot-clean: vendorsSeen=<n> vendors=<a,b> overall=<每个 vendor 的 state>
-# exit 0 = 全部 clean · 1 = 有 vendor 不 clean · 2 = 用法错 / 取不到面(fail-closed)
+# exit 0 = 全部 clean · 1 = 有 vendor 不 clean（含 `absent`） · 2 = 用法错 / 取不到面(fail-closed)
 ```
 
 > `${AGENTLOOP_ROOT:-…}` 的**默认**落点是发布镜像 clone。脚本随本 skill 发布,所以在镜像
@@ -185,23 +185,26 @@ bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/
 
 | state | 含义 | verdict 里怎么写 |
 |---|---|---|
-| `clean` | 👍 **且**它指的 sha == head **且**没有 review 在跑 **且**两个 face 都取到且为空 | 记「bot clean」 |
-| `findings` | inline face 或顶层 comment 有 n 条该 vendor 的 finding | 按上面的 P1/High 表走,**`Completed` 不改变这一行**;顶层 comment 的 finding 与 inline 同等对待 |
+| `clean` | 👍 **且**它指的 sha == head **且**没有 review 在跑 **且**五个 face 都取到 **且**没有 *live* finding（更早的 finding 会被这次 head-bound 👍 顶掉） | 记「bot clean」 |
+| `findings` | inline face 或顶层 comment 有 n 条**未被顶掉的** finding | 按上面的 P1/High 表走,**`Completed` 不改变这一行**;顶层 comment 的 finding 与 inline 同等对待。comment 永不删除,所以 raw `total > 0` 是**吸收态**——一次后来的 head-bound `Completed` + 👍 必须把更早的 finding 顶掉,形状与 `blocked` 相同(#6164 F3) |
 | `blocked` | vendor 说它跑不了(usage limit,实测 #5982),且**之后没有跑完一轮 head 上的 review** | **不是「还在跑」**,等下去没有结果。要么恢复额度重跑,要么写清为什么不等它。恢复额度后拿到指向 head 的 `Completed` + 👍,这条通知就被顶掉——否则 `blocked` 会变成**吸收态**:一个曾经撞过限额的 PR 永远回不到 `clean`,而它给的指示恰恰是「恢复额度重跑」 |
 | `running` | 有 👍,但**这一轮 review 还在跑**(有 👀,或 Status 格还不是 `Completed`) | **不是 clean**。那个 👍 是上一轮留下的、马上会被顶掉。等这一轮跑完 |
 | `stale` | 有 👍,但它指的 commit 不是 head | **不是 clean**。在 head 上重新触发 review,拿到新的 👍 再说 |
 | `unbound` | 有 👍,但读不到它指的 commit | 同上,fail-closed |
 | `incomplete` | vendor 在场(有 summary / 👀)但没有 👍 | 记「未完成/未知」——**不是 clean** |
-| `absent` | vendor 一个字都没说 | 「未知」。等不等由 [`epic-conductor` §6](../epic-conductor/SKILL.md) 决定,不由本步决定 |
-| `unavailable` | 某个面取失败 | **fail-closed**,不是 0。取失败 ≠ 没有 finding |
+| `absent` | vendor 一个字都没说（花名册里有、本 PR 没留下痕迹） | 「未知」。**仍会判、仍会印、仍进 exit**——「Codex 被判过且没问题」和「Codex 根本没被判」不许同色(#6164 F2)。等不等由 [`epic-conductor` §6](../epic-conductor/SKILL.md) 决定,不由本步决定 |
+| `unavailable` | 某个面取失败（五个面:`pulls/<n>` head.sha / `issues/<n>/reactions` / `pulls/<n>/comments` / `issues/<n>/comments` / `pulls/<n>/reviews`） | **fail-closed**,不是 0。取失败 ≠ 没有 finding。`pulls/<n>/reviews` 上 Codex 会发 `COMMENTED` review,正文带 `**Reviewed commit:**`——finding 不藏在这面,但这面仍必须取;未取与空数组不许同色(#6164 F4) |
 
 - **verdict comment 必须逐字带上这一行的 `botFindings=<n>`**,含 `0`,取不到就写
   `botFindings=UNAVAILABLE` 并降级判决。「数出来是 0」和「根本没数」不许同色。
-- **同样要带上 `vendorsSeen=`**。不给 `--vendor` 时脚本自己枚举 PR 上**已识别的** review
-  connector 并逐个判——别只判默认那一个,否则 `cursor[bot]` 挂着 5 条 finding 也不会有任何
-  东西变红。**认不出的 bot 会单独打一行 `unknownBot=`**:不判、不计数、不阻断,但也**不静默**
-  ——一个新的 review connector 如果就这么消失了,「看过、没问题」和「压根没看」就又同色了。
-  看到 `unknownBot=` 且它确实会发 finding,把它加进 `RECOGNISED_REVIEW_VENDORS`。
+- **同样要带上 `vendorsSeen=`**。不给 `--vendor` 时脚本自己枚举 `RECOGNISED_REVIEW_VENDORS`
+  花名册上**每一个**已识别 review connector 并逐个判——包括本 PR **没留下痕迹**的,它的
+  state 是 `absent`(不是 clean)。别只判默认那一个,否则 `cursor[bot]` 挂着 5 条 finding
+  也不会有任何东西变红;也别只判「出现过的」,否则另一个 connector 的 `absent` 会藏在
+  `overall=cursor[bot]=clean` 后面。**认不出的 bot 会单独打一行 `unknownBot=`**:不判、
+  不计数、不阻断,但也**不静默**——一个新的 review connector 如果就这么消失了,「看过、没问题」
+  和「压根没看」就又同色了。看到 `unknownBot=` 且它确实会发 finding,把它加进
+  `RECOGNISED_REVIEW_VENDORS`。
 
 > **为什么是脚本而不是一条纪律:** 这段话的前身(「👍 / 无 inline finding → 记 bot clean」)
 > 和 `:127` 的「取失败 ≠ 没有 finding」在两次误判**之前**就已经写在这里了,没挡住——
@@ -325,7 +328,7 @@ Step 2 核验"这个 PR **声称**改的";这一步核验它对**系统其他部
 
 ### Step 3 — ★ 获取 verification 门控事实(pre-merge)并判读根因
 
-**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前要有一份 **current** verification 事实。若 sticky 或 `--deliver-cached` 的身份已经是 current（`sha=HEAD`、scenario=`pre-merge`、同一 resolved base + capabilities），**读这个事实，不要再付 350s**——独立 code review 仍读 diff、仍发 verdict，再跑一遍闸不是审查。身份不匹配时才调用 `<pre_merge_entry>`（profile 字段;只读、不写远端;`--comment` 会把报告贴到 PR）。支持 shared evidence broker 的 repo 由入口按 **`{HEAD SHA, scenario=pre-merge, resolved base, capabilities}`** 取得同一事实，**含 sibling worktree 上已有的 PASS**；HEAD、场景、resolved base 或 capabilities 任一变化就必须重新跑。没有该能力的 repo 仍按普通入口实际执行，绝不由 reviewer 手工猜 cache 是否可用:
+**门控形态 = profile `gate_mode`**(arc = `scripts`:删了 `ci.yml`/`pr-title.yml`,`gh pr checks` 恒为空,verification 脚本是**唯一门控信号**;`ci`/`both` 的 repo 还要把 `gh pr checks` 纳入判定)。出判定前要有一份 **current** verification 事实。**拿事实的动作只有一个：调 `<pre_merge_entry>`**（profile 字段;只读、不写远端;`--comment` 会把报告贴到 PR）。复用还是重跑由入口自己判——它按 **`{HEAD SHA, resolved base, capabilities}`** 找同场景的记录，**含 sibling worktree 上已有的 PASS**；找不到时再看声明过的等价场景（arc：merge-base == `origin/main` tip 时 pre-pr 的全量 PASS 覆盖了 pre-merge 的全部 check，入口直接继承、零 check 执行，报告头写 `♻️ Equivalent evidence`）。命中即零成本（也不排 gate lane），未命中才真跑。**不要自己去 sticky 上比 base / scenario**——sticky marker 只带 `sha=`/`result=`，那个判断你做不了、也不该做。独立 code review 仍读 diff、仍发 verdict，再跑一遍闸不是审查。没有 shared evidence broker 的 repo 仍按普通入口实际执行，绝不由 reviewer 手工猜 cache 是否可用:
 
 ```bash
 # <pre_merge_entry> from repo-profile.md
@@ -333,7 +336,7 @@ Step 2 核验"这个 PR **声称**改的";这一步核验它对**系统其他部
 <pre_merge_entry> --comment <n>         # --post 模式:一步跑 + 贴到 PR
 ```
 
-`pre-merge` 用最新 `origin/<default_branch>` 作 affected base(兄弟 PR 合并后环境已前进,能抓 pre-pr 看不到的破坏)。因此 resolved base 是验证事实的组成部分，不能只凭同一 HEAD 或报告时间复用。
+`pre-merge` 用最新 `origin/<default_branch>` 作 affected base(main 前进后 affected 选择面变宽)。因此 resolved base 是验证事实的组成部分，不能只凭同一 HEAD 或报告时间复用——但这个比对由入口做，不由你做。
 `renderReport` 已生成 markdown(状态/耗时表 + `rawTail` + 折叠 `rawFull`),直接引用,不手写数字。
 
 **verification 报告只能通过 `--comment` 投递,禁止手写。** 不要把 verification 结果手抄进
@@ -361,7 +364,7 @@ verification 结果永远用 `pre-merge.ts --comment <n>` 单独投递,不要合
 
 > **这一步在 pr-review 是 advisory(判定输入),不是不可跳过的合并门控。** 真正不可跳过的硬门控——"`<merge_gate_entry> <pr#>` exit 0(SHA 匹配 + result=PASS/NA;profile 字段,arc = `<merge_gate_entry>`)"——在 [`pr-sweep` 合并闸](../pr-sweep/SKILL.md)(机制点:SHA 比对由该脚本执行、不靠自觉)。pr-review 只判不合,门控在那边执行。
 >
-> 例外只限 sticky/`--deliver-cached` 已经证明存在同一 `{HEAD SHA, scenario=pre-merge, resolved base, capabilities}` 的 PASS 事实（含 sibling worktree 产出的）；不能用“同一 HEAD + 时间较新”的人工启发式，也不能手读/手贴旧报告来绕过入口。只验证并投递已存在事实的 `--deliver-cached` 类命令，必须同样校验这个完整身份。FAIL 不得被洗成 sibling 的 PASS。
+> 例外只限入口自己复用的既有事实（同场景同 `{HEAD SHA, resolved base, capabilities}` 的 PASS，含 sibling worktree 产出的；或入口按声明继承的等价场景 PASS）；不能用“同一 HEAD + 时间较新”的人工启发式，也不能手读/手贴旧报告来绕过入口。只验证并投递已存在事实的 `--deliver-cached` 类命令，走的是同一套身份校验。FAIL 不得被洗成 sibling 的 PASS，也不跨场景继承。
 
 **运行时 / CF-parity PR(改该仓库的多运行时 parity 面 `<Backend Face Paths>`,或 blocklet render/mount/serve 语义):`/agentloop:verification` 的静态门控看不到「跑起来对不对」——补跑 `/e2e-verify`(该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)。** 它本地 boot **两个** runtime 做匿名 + 认证 roundtrip 核验:Node = `<dev_server_node>`,**CF = `<dev_server_edge>` 本地 miniflare(自带 D1 + migration,不需要 CF 账号、不碰 staging)**。所以 CF 那侧**本地就能验**——绝不判成「需要云端 CF/wrangler 环境」而 defer;别把「别猛测线上 staging」当成「CF 本地验不了」。`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`(arc `cli_binary` = `arc`)。
 
@@ -503,20 +506,21 @@ hdr=$(bash <agent_identity_script> --header "PR Review" --skill pr-review)   # p
 echo "${hdr}。读取:PR diff + 受影响代码/文档/测试 + 关联 issue。运行:/agentloop:verification (pre-merge) + <测试命令>。每条结论附可复现证据。"
 ```
 详见根 CLAUDE.md「Agent Comment 格式」(前缀是 pr-sweep 检测谓词,由脚本保证不漂移)。
+
+**canonical verdict 的第一条非空行必须是 marker**(`<!-- pr-review-verdict -->`);identity header 是第二行。lookup 只认第一条非空行(#3576 / #6404)——marker 写在表格/引用/正文中间会被当成「提到了 marker 的讨论」,下一轮会另 POST 一条,而**绝不会 PATCH 那条讨论**(aside#1514 就是非锚定子串匹配把演示评论整条覆盖掉)。
+
+**upsert 走引擎,禁止手写非锚定子串匹配 / 裸 `--jq`。** `postOnce` 已按第一条非空行锚定;`pr-review` 的入口是:
+
 ```bash
-# canonical verdict comment:每 PR 唯一,body 必含 marker <!-- pr-review-verdict -->,复审 = 原地 upsert
+# draft.md 首行 = <!-- pr-review-verdict -->
+# 第二行起 = ${hdr} + 裁定正文 + sweep-trace
 # (--edit-last 只能编辑「自己」的上一条;上一轮 verdict 可能是别的 runner 发的,必须 marker 定位 + PATCH)
-cid=$(gh api "repos/{owner}/{repo}/issues/<n>/comments" --paginate \
-      --jq '[.[]|select(.body|contains("<!-- pr-review-verdict -->"))]|last|.id // empty')
-if [[ -n "$cid" ]]; then
-  gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$cid" -F body=@draft.md   # 跨 runner 原地刷新
-else
-  gh pr comment <n> --body-file draft.md                                          # 首轮:新建
-fi
-# gh 不可用时：先安装（apt install gh -y），确实无法安装才用 mcp__github__add_issue_comment
-# ⚠️ MCP add_issue_comment 会吃掉 ![截图](...) 的 `!`（图片变纯链接）——含截图时避免用 MCP
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/post-verdict.ts" \
+  --pr <n> --body-file draft.md
+# 已有第一条非空行即 marker 的评论 → PATCH;没有 → POST。正文只是引用 marker 的评论不会被选中。
+# gh 不可用时：先安装（apt install gh -y）。本脚本走 `gh api`；MCP add_issue_comment 会吃掉图片 `!`，含截图时不要用 MCP。
 ```
-- **verdict comment 每 PR 唯一(canonical):body 必含 `<!-- pr-review-verdict -->` marker;任何复审(含跨 runner)= upsert 同一条**,历史版本留在 GitHub edit history 里可查。别堆重复——#1812 的 6 条评论堆叠就是这条规则缺位的直接后果。补充性产物(verification 报告、ui-verify 截图 comment)仍各自独立投递,verdict 只引用其结论。
+- **verdict comment 每 PR 唯一(canonical):第一条非空行必须是 `<!-- pr-review-verdict -->`;任何复审(含跨 runner)= upsert 同一条**,历史版本留在 GitHub edit history 里可查。别堆重复——#1812 的 6 条评论堆叠就是这条规则缺位的直接后果。补充性产物(verification 报告、ui-verify 截图 comment)仍各自独立投递,verdict 只引用其结论。
 - 默认 read-only;`--post` 才写。
 - Step 3 的验证报告已用 `--comment` 单独贴出;verdict comment 只引用其结论(PASS/FAIL),不重复全量日志。
 

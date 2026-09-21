@@ -5,6 +5,9 @@
  * `runScenario` ends in `process.exit`, so each case runs it in a child process
  * against a throwaway git repo — the runner reads HEAD/dirtiness from git, so a
  * real (tiny) repo is the honest fixture.
+ *
+ * @plugin-tests:isolated spawns a child `runScenario` per case. Packed with the
+ * rest of lib/ it 30s-timeouts under saturation (arc#6090). Not heavy.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -23,7 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ENV_GAP_CAPABILITY, envGapIdentity, FAILURE_REASONS } from "./failure-class.ts";
-import { readProcessStartTimeMs } from "./pid-liveness.ts";
+import { readProcessStartTime, readProcessStartTimeMs } from "./pid-liveness.ts";
 import { type CheckResult, deriveResult, isSkipped, passed } from "./report.ts";
 import {
   CACHE_STATE,
@@ -33,10 +36,13 @@ import {
   checkFailuresOf,
   classifyLocalCache,
   dirtyPorcelainFiles,
+  foreignScenarioMissNotice,
   livenessSuffix,
   observedEnvGaps,
+  observedNonReusable,
   probeCapabilities,
   provenanceNotice,
+  pushTokenMissingNotice,
   type RunContext,
   runCheckGuarded,
   undeclaredEnvGaps,
@@ -138,17 +144,28 @@ function commitFiles(dir: string, files: Record<string, string>): void {
 }
 
 /** Run a one-check scenario in `dir`; returns HEAD sha + the runner's exit code. */
+function exemptPathsLiteral(paths: readonly (string | RegExp)[]): string {
+  return `[${paths
+    .map((p) => (typeof p === "string" ? JSON.stringify(p) : p.toString()))
+    .join(", ")}]`;
+}
+
 function runScenarioIn(
   dir: string,
   pass: boolean,
   extraArgv = "",
   stats: Record<string, number | string> = {},
+  evidenceExemptPaths?: readonly (string | RegExp)[],
 ): { sha: string; code: number; out: string } {
   // OUTSIDE the repo: an untracked file in it would read as a dirty tree and
   // suppress the very PASS cache one of these cases is asserting.
   const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-script-"));
   dirs.push(scriptDir);
   const script = join(scriptDir, "scenario-run.ts");
+  const exemptField =
+    evidenceExemptPaths === undefined
+      ? ""
+      : `evidenceExemptPaths: ${exemptPathsLiteral(evidenceExemptPaths)},`;
   writeFileSync(
     script,
     `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
@@ -156,6 +173,7 @@ function runScenarioIn(
        {
          scenario: "unit",
          resolveBase: () => "HEAD",
+         ${exemptField}
          checks: [
            {
              id: "only",
@@ -399,6 +417,204 @@ describe("peekReusableSharedEvidence (arc#5833)", () => {
 });
 
 /**
+ * `equivalentEvidenceFrom`: pre-merge at (sha, base=B) inherits pre-pr's PASS at
+ * the same (sha, B) — the two runs are the same checks over the same diff on
+ * the same tree once merge-base equals the origin/main tip. Measured before
+ * this existed: 33 of 88 pre-merge runs on one machine were exactly that.
+ *
+ * The accept arm is load-bearing: "never inherit" satisfies every reject
+ * assertion below and is precisely the 81 minutes this feature removes.
+ */
+describe("equivalentEvidenceFrom — pre-merge inherits a covering pre-pr PASS", () => {
+  /**
+   * Two scenarios over one fixture. `donor` ("pre-pr") runs checks a, b and
+   * `extra`; `consumer` ("pre-merge") runs a, b plus `--consumer-extra` d when
+   * asked, and declares `equivalentEvidenceFrom: ["pre-pr"]`. Every executed
+   * check appends `<scenario>:<id>` to a runs log so "did it run" is counted,
+   * not inferred from exit codes.
+   */
+  function pairIn(dir: string): {
+    donor: (base: string, argv?: string[], env?: NodeJS.ProcessEnv) => ReturnType<typeof spawnSync>;
+    consumer: (
+      base: string,
+      argv?: string[],
+      env?: NodeJS.ProcessEnv,
+    ) => ReturnType<typeof spawnSync>;
+    runs: () => string[];
+    sha: string;
+  } {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-equiv-"));
+    dirs.push(scriptDir);
+    const runs = join(scriptDir, "runs.log");
+    const script = join(scriptDir, "pair.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       import { appendFileSync } from "node:fs";
+       const scenario = process.env.TEST_SCENARIO;
+       const pass = process.env.TEST_PASS !== "0";
+       const check = (id) => ({ id, run: () => {
+         appendFileSync(${JSON.stringify(runs)}, scenario + ":" + id + "\\n");
+         return { check: id, title: id, pass, blocking: true, durationMs: 1, rawFull: "log-" + id };
+       } });
+       const donor = { scenario: "pre-pr", resolveBase: () => process.env.TEST_BASE,
+         checks: [check("a"), check("b"), check("extra")] };
+       const consumer = { scenario: "pre-merge", resolveBase: () => process.env.TEST_BASE,
+         equivalentEvidenceFrom: ["pre-pr"],
+         checks: [check("a"), check("b"),
+           { ...check("d"), when: () => process.env.TEST_CONSUMER_EXTRA === "1" }] };
+       runScenario(scenario === "pre-pr" ? donor : consumer, process.argv.filter((a) => a !== "--consumer-extra"));`,
+    );
+    const spawnIt = (scenario: string, base: string, argv: string[], env: NodeJS.ProcessEnv) =>
+      spawnSync("bun", [script, ...argv], {
+        cwd: dir,
+        encoding: "utf8",
+        env: childEnv(dir, { TEST_SCENARIO: scenario, TEST_BASE: base, ...env }),
+      });
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    return {
+      donor: (base, argv = [], env = {}) => spawnIt("pre-pr", base, argv, env),
+      consumer: (base, argv = [], env = {}) => spawnIt("pre-merge", base, argv, env),
+      runs: () =>
+        existsSync(runs) ? readFileSync(runs, "utf8").trim().split("\n").filter(Boolean) : [],
+      sha,
+    };
+  }
+  const out = (r: ReturnType<typeof spawnSync>) => `${r.stdout}${r.stderr}`;
+
+  test("ACCEPT: same sha + same base + covering pre-pr PASS → pre-merge reuses it and runs nothing", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    expect(p.runs()).toEqual(["pre-pr:a", "pre-pr:b", "pre-pr:extra"]);
+
+    const merge = p.consumer("base-x");
+    expect(merge.status).toBe(0);
+    expect(out(merge)).toContain("reused shared pre-pr evidence as pre-merge");
+    expect(out(merge)).toContain("♻️ **Equivalent evidence**");
+    // Nothing new executed — the whole point.
+    expect(p.runs()).toEqual(["pre-pr:a", "pre-pr:b", "pre-pr:extra"]);
+    // The local token is THIS scenario's, and says where it came from.
+    const m = meta(dir, p.sha);
+    expect(m.scenario).toBe("pre-merge");
+    expect(m.equivalentFrom).toBe("pre-pr");
+    expect(m.result).toBeUndefined(); // result lives in .result, unchanged shape
+    expect(readFileSync(join(dir, ".verify", `${p.sha}.result`), "utf8").trim()).toBe("PASS");
+  });
+
+  test("ACCEPT: --deliver-cached for pre-merge is current when only pre-pr ever ran", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    const delivered = p.consumer("base-x", ["--deliver-cached"]);
+    expect(delivered.status).toBe(0);
+    expect(out(delivered)).toContain("AGENTLOOP_CACHE_STATE=current");
+    expect(out(delivered)).toContain("♻️ **Equivalent evidence**");
+    expect(p.runs()).toHaveLength(3);
+  });
+
+  test("ACCEPT: the lane peek hits too, so an equivalent pre-merge never queues behind another gate", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-equiv-peek-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "peek.ts");
+    writeFileSync(
+      script,
+      `import { peekReusableSharedEvidence } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const boom = (id) => ({ id, run: () => { throw new Error("peek must not run checks"); } });
+       const peeked = peekReusableSharedEvidence(
+         { scenario: "pre-merge", resolveBase: () => "base-x", equivalentEvidenceFrom: ["pre-pr"],
+           checks: [boom("a"), boom("b")] },
+         process.argv,
+       );
+       console.log(JSON.stringify({ peeked: peeked !== undefined, from: peeked?.equivalentFrom ?? null }));`,
+    );
+    const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ peeked: true, from: "pre-pr" });
+  });
+
+  test("REJECT: a different resolved base is a different question — pre-merge runs", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    const merge = p.consumer("base-y");
+    expect(merge.status).toBe(0);
+    expect(out(merge)).not.toContain("reused shared pre-pr evidence");
+    expect(p.runs()).toEqual([
+      "pre-pr:a",
+      "pre-pr:b",
+      "pre-pr:extra",
+      "pre-merge:a",
+      "pre-merge:b",
+    ]);
+  });
+
+  test("REJECT: a pre-pr FAIL is never pre-merge's answer — pre-merge runs", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x", [], { TEST_PASS: "0" }).status).toBe(1);
+    const merge = p.consumer("base-x");
+    expect(merge.status).toBe(0);
+    expect(out(merge)).not.toContain("reused shared pre-pr evidence");
+    expect(p.runs().filter((r) => r.startsWith("pre-merge:"))).toEqual([
+      "pre-merge:a",
+      "pre-merge:b",
+    ]);
+  });
+
+  test("REJECT (discriminator): a required check the donor never ran turns the inheritance off, by name", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    const merge = p.consumer("base-x", ["--consumer-extra"], { TEST_CONSUMER_EXTRA: "1" });
+    expect(merge.status).toBe(0);
+    expect(out(merge)).toContain("does not cover: d");
+    expect(out(merge)).not.toContain("reused shared pre-pr evidence");
+    expect(p.runs().filter((r) => r.startsWith("pre-merge:"))).toEqual([
+      "pre-merge:a",
+      "pre-merge:b",
+      "pre-merge:d",
+    ]);
+  });
+
+  test("REJECT (direction): pre-pr does not inherit a pre-merge PASS — it declares no donor", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.consumer("base-x").status).toBe(0);
+    expect(p.runs()).toEqual(["pre-merge:a", "pre-merge:b"]);
+    const pr = p.donor("base-x");
+    expect(pr.status).toBe(0);
+    expect(out(pr)).not.toContain("reused shared pre-merge evidence");
+    expect(p.runs()).toEqual([
+      "pre-merge:a",
+      "pre-merge:b",
+      "pre-pr:a",
+      "pre-pr:b",
+      "pre-pr:extra",
+    ]);
+  });
+
+  test("REJECT: a dirty tree does not inherit either (#6209 holds across scenarios)", () => {
+    const dir = repo();
+    const p = pairIn(dir);
+    expect(p.donor("base-x").status).toBe(0);
+    writeFileSync(join(dir, "f.txt"), "mutated\n");
+    const merge = p.consumer("base-x");
+    expect(out(merge)).not.toContain("reused shared pre-pr evidence");
+    expect(p.runs().filter((r) => r.startsWith("pre-merge:"))).toEqual([
+      "pre-merge:a",
+      "pre-merge:b",
+    ]);
+  });
+});
+
+/**
  * #5067: a partial verification wrote a PASS cache that satisfied the push gate.
  *
  * Arms 1 and 3 are load-bearing: "refuse every cache" satisfies every reject
@@ -468,13 +684,33 @@ describe("runScenario — partial verification is not a gate token (#5067)", () 
 
   test("arm 1 survives a partial run afterwards: the broker rehydrates the full PASS", () => {
     const dir = repo();
-    const { sha } = runMultiIn(dir);
+    const first = runMultiIn(dir);
+    // A saturation-starved first spawn that never published used to fail
+    // later at --deliver-cached, same colour as a real rehydrate bug (#6090).
+    expect(first.code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
+    expect(brokerMeta(dir).body).toMatchObject({
+      result: "PASS",
+      fullScenario: true,
+      checks: ["a", "b", "c"],
+    });
     // The natural sequence: full gate green, then `--only` to poke at one check.
     runMultiIn(dir, `, "--only", "a"`);
-    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PARTIAL");
+    expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PARTIAL");
     // The push gate must still pass — the full evidence is in the shared broker.
     expect(runMultiIn(dir, `, "--deliver-cached"`).code).toBe(0);
-    expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+    expect(readFileSync(join(dir, ".verify", `${first.sha}.result`), "utf8")).toBe("PASS");
+  });
+
+  test("accept-path ratchet (#6090): deleting arm 1 must turn this file red", () => {
+    const src = readFileSync(import.meta.path, "utf8");
+    expect(src).toContain("arm 1 (accept): a full scenario PASS is still a gate token");
+    expect(src).toContain(
+      "arm 1 survives a partial run afterwards: the broker rehydrates the full PASS",
+    );
+    const report = readFileSync(join(import.meta.dir, "report.test.ts"), "utf8");
+    expect(report).toContain("a fast command under a generous timeoutMs completes normally");
+    expect(report).toContain('expect(r.out.trim()).toBe("hi")');
   });
 
   test("NA accept: an unread documentation file still receives the exemption", () => {
@@ -672,14 +908,18 @@ describe("runScenario — .verify cache", () => {
    * that only rejects (and never says who is dirty) cannot be told from a gate
    * that always refuses — accept-path iron law.
    */
-  function inspectCleanForEvidence(dir: string): { clean: boolean; files: string[] } {
+  function inspectCleanForEvidence(
+    dir: string,
+    evidenceExemptPaths?: readonly (string | RegExp)[],
+  ): { clean: boolean; files: string[] } {
     const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-clean-for-evidence-"));
     dirs.push(scriptDir);
     const script = join(scriptDir, "inspect.ts");
+    const arg = evidenceExemptPaths === undefined ? "" : exemptPathsLiteral(evidenceExemptPaths);
     writeFileSync(
       script,
       `import { cleanForEvidence } from ${JSON.stringify(join(LIB, "scenario.ts"))};
-       const value = cleanForEvidence();
+       const value = cleanForEvidence(${arg});
        console.log(JSON.stringify(value));`,
     );
     const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
@@ -699,13 +939,11 @@ describe("runScenario — .verify cache", () => {
     test("cleanForEvidence returns the dirty file list, not only a boolean", () => {
       const dir = repo();
       writeFileSync(join(dir, "named-dirty.txt"), "leak\n");
-      writeFileSync(join(dir, "FACTORY_TASK.md"), "brief\n");
       mkdirSync(join(dir, ".verify"), { recursive: true });
       writeFileSync(join(dir, ".verify", "scratch.md"), "runner artifact\n");
       const value = inspectCleanForEvidence(dir);
       expect(value.clean).toBe(false);
       expect(value.files).toContain("named-dirty.txt");
-      expect(value.files.some((f) => f.includes("FACTORY_TASK.md"))).toBe(false);
       expect(value.files.some((f) => f.startsWith(".verify/"))).toBe(false);
       expect(value.files.length).toBeGreaterThan(0);
     });
@@ -775,7 +1013,7 @@ describe("runScenario — .verify cache", () => {
       expect(dirtyPorcelainFiles("R  f.txt -> g.txt")).toEqual(["g.txt", "f.txt"]);
       expect(dirtyPorcelainFiles("UU conflict.txt")).toEqual(["conflict.txt"]);
       expect(dirtyPorcelainFiles("?? .verify/scratch.md")).toEqual([]);
-      expect(dirtyPorcelainFiles("?? FACTORY_TASK.md")).toEqual([]);
+      expect(dirtyPorcelainFiles("?? FACTORY_TASK.md")).toEqual(["FACTORY_TASK.md"]);
       expect(dirtyPorcelainFiles(" M f.txt")).toEqual(["f.txt"]);
     });
 
@@ -791,6 +1029,77 @@ describe("runScenario — .verify cache", () => {
       expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
       expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
       expect(out).not.toMatch(/\bis dirty\b/);
+    });
+  });
+
+  /**
+   * #6405: the engine is repo-agnostic. `.verify/` is its own artifact and stays
+   * exempt; any other path (including arc's FACTORY_TASK.md) is dirty unless the
+   * consuming repo lists it on ScenarioConfig.evidenceExemptPaths.
+   */
+  describe("evidenceExemptPaths is repo config, not an engine filename (#6405)", () => {
+    test("engine source does not hardcode FACTORY_TASK.md", () => {
+      expect(readFileSync(join(LIB, "scenario.ts"), "utf8")).not.toMatch(/FACTORY_TASK/);
+    });
+
+    test("undeclared FACTORY_TASK.md is dirty — coincidence is not an exemption", () => {
+      const dir = repo();
+      writeFileSync(join(dir, "FACTORY_TASK.md"), "brief\n");
+      const value = inspectCleanForEvidence(dir);
+      expect(value.clean).toBe(false);
+      expect(value.files).toContain("FACTORY_TASK.md");
+      const { sha, code, out } = runScenarioIn(dir, true);
+      expect(code).toBe(0);
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(false);
+      expect(out).toContain("FACTORY_TASK.md");
+      expect(out).toMatch(/is dirty \([^)]*FACTORY_TASK\.md[^)]*\)/);
+    });
+
+    test("declared exemption of an untracked path is clean and still publishes", () => {
+      const dir = repo();
+      writeFileSync(join(dir, "scratch.brief"), "runner brief\n");
+      const value = inspectCleanForEvidence(dir, ["scratch.brief"]);
+      expect(value.clean).toBe(true);
+      expect(value.files).toEqual([]);
+      const { sha, code, out } = runScenarioIn(dir, true, "", {}, ["scratch.brief"]);
+      expect(code).toBe(0);
+      expect(readFileSync(join(dir, ".verify", `${sha}.result`), "utf8")).toBe("PASS");
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
+      expect(out).not.toMatch(/\bis dirty\b/);
+    });
+
+    test("ACCEPT: declared exemption + unrelated dirty file is still dirty and names the unrelated file", () => {
+      // Positive control: "exemption took" and "dirty-tree detection went blind"
+      // must not be the same colour. Exempt scratch.brief, dirty named-dirty.txt.
+      const dir = repo();
+      writeFileSync(join(dir, "scratch.brief"), "runner brief\n");
+      writeFileSync(join(dir, "named-dirty.txt"), "leak\n");
+      mkdirSync(join(dir, ".verify"), { recursive: true });
+      writeFileSync(join(dir, ".verify", "scratch.md"), "runner artifact\n");
+      const value = inspectCleanForEvidence(dir, ["scratch.brief"]);
+      expect(value.clean).toBe(false);
+      expect(value.files).toContain("named-dirty.txt");
+      expect(value.files).not.toContain("scratch.brief");
+      expect(value.files.some((f) => f.startsWith(".verify/"))).toBe(false);
+      const { sha, code, out } = runScenarioIn(dir, true, "", {}, ["scratch.brief"]);
+      expect(code).toBe(0);
+      expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(false);
+      expect(out).toContain("named-dirty.txt");
+      expect(out).not.toContain("scratch.brief");
+      expect(out).toMatch(/is dirty \([^)]*named-dirty\.txt[^)]*\)/);
+    });
+
+    test("dirtyPorcelainFiles honours extra exemptions without treating undeclared names as clean", () => {
+      expect(dirtyPorcelainFiles("?? scratch.brief", ["scratch.brief"])).toEqual([]);
+      expect(dirtyPorcelainFiles("?? scratch.brief")).toEqual(["scratch.brief"]);
+      expect(dirtyPorcelainFiles("?? FACTORY_TASK.md", ["FACTORY_TASK.md"])).toEqual([]);
+      expect(dirtyPorcelainFiles("?? FACTORY_TASK.md")).toEqual(["FACTORY_TASK.md"]);
+      expect(dirtyPorcelainFiles("?? notes.tmp", [/\.tmp$/])).toEqual([]);
+      expect(dirtyPorcelainFiles("?? notes.md", [/\.tmp$/])).toEqual(["notes.md"]);
+      expect(dirtyPorcelainFiles("?? named-dirty.txt", ["scratch.brief"])).toEqual([
+        "named-dirty.txt",
+      ]);
+      expect(dirtyPorcelainFiles("?? .verify/scratch.md", ["scratch.brief"])).toEqual([]);
     });
   });
 
@@ -3253,12 +3562,33 @@ describe("runScenario — a recycled owner pid does not wedge the lease (#5815)"
     const binDir = mkdtempSync(join(tmpdir(), "agentloop-5815-nops-"));
     dirs.push(binDir);
     writeFileSync(join(binDir, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    plantLocalLease(dir, {
-      pid: process.pid,
-      scenario: "unit",
-      processStartedAt: readProcessStartTimeMs(process.pid),
-      startedAt: new Date().toISOString(),
-    });
+    // Plant via the /proc instrument: with `ps` broken below, the child can only
+    // measure through /proc. Route 1 requires matching startTimeSource (#5829);
+    // a ps-planted lease would read as start-time-unavailable even when /proc
+    // works, which collapses the Linux positive control this test exists for.
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${prevPath}`;
+    const planted = readProcessStartTime(process.pid);
+    process.env.PATH = prevPath;
+    // On hosts without /proc (macOS), broken `ps` means we cannot measure — plant a
+    // bare live-pid lease and let the no-/proc assertions below own that path.
+    // On Linux, pin the /proc instrument so route 1 can still verify (#5829).
+    plantLocalLease(
+      dir,
+      planted
+        ? {
+            pid: process.pid,
+            scenario: "unit",
+            processStartedAt: planted.ms,
+            startTimeSource: planted.source,
+            startedAt: new Date().toISOString(),
+          }
+        : {
+            pid: process.pid,
+            scenario: "unit",
+            startedAt: new Date().toISOString(),
+          },
+    );
     const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-5815-blind-"));
     dirs.push(scriptDir);
     const script = join(scriptDir, "blind.ts");
@@ -3523,5 +3853,1187 @@ describe("runScenario — sibling PASS is reusable across worktrees (#5875)", ()
     expect(second.status).toBe(0);
     expect(`${second.stdout}${second.stderr}`).not.toContain("reused shared cap evidence");
     expect(countRuns(runs)).toBe(2);
+  });
+});
+
+/**
+ * A FAIL whose report carries the live FLAKY section (taxonomy §7.3). The
+ * attribution hook does not flip the aggregate — in-diff FLAKY stays FAIL.
+ * Used by #6158 / #6213 to seed the prior attempt `--retry-failed` then covers.
+ */
+function runFlakyIn(dir: string, extraArgv = ""): { sha: string; code: number; out: string } {
+  const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-scenario-flaky-"));
+  dirs.push(scriptDir);
+  const script = join(scriptDir, "flaky-run.ts");
+  writeFileSync(
+    script,
+    `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+     runScenario(
+       {
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [{
+           id: "only",
+           run: () => ({
+             check: "only",
+             title: "Only",
+             pass: false,
+             blocking: true,
+             durationMs: 1,
+             rawFull: "batch-red",
+             failure: { class: "CODE", reason: "observed-test-failures" },
+           }),
+         }],
+         attribution: () => ({
+           attributed: false,
+           notice: [
+             "### Flaky — batch red, solo green",
+             "",
+             "> 🟡 FLAKY These files failed in the batch run and passed when re-run alone.",
+             "> They are not the same colour as a confirmed failure. The overall verdict stays FAIL",
+             "> (taxonomy §7.3: colour-separation, not a turn-to-green).",
+             "",
+             "#### \`factory-worktree.test.ts\` — 🟡 FLAKY",
+             "- check: Tests (root: scripts)",
+             "- tests: factory-worktree.sh add > ACCEPT: concurrent provisions never read a peer's released lock as unreadable",
+           ].join("\\n"),
+         }),
+       },
+       ["bun", "flaky-run.ts"${extraArgv}],
+     );`,
+  );
+  const r = spawnSync("bash", ["-c", `cd ${dir} && bun ${script}`], {
+    encoding: "utf8",
+    env: childEnv(dir),
+  });
+  const sha = spawnSync("bash", ["-c", `cd ${dir} && git rev-parse HEAD`], {
+    encoding: "utf8",
+  }).stdout.trim();
+  return { sha, code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+}
+
+const liveMd = (dir: string, sha: string) =>
+  readFileSync(join(dir, ".verify", `${sha}.md`), "utf8");
+const liveResult = (dir: string, sha: string) =>
+  readFileSync(join(dir, ".verify", `${sha}.result`), "utf8").trim();
+
+/* ================================================================== *
+ * #6213 — --retry-failed must not erase the prior FLAKY verdict from
+ * the live report. first-green and retry-then-green are different
+ * colours; `.result=PASS` is allowed, but the surviving .md must still
+ * say 🟡 FLAKY (taxonomy §7.3: colour-separation, not a turn-to-green).
+ * ================================================================== */
+
+describe("#6213 — --retry-failed must not erase a same-SHA FLAKY from the live report", () => {
+  test("弄坏: FLAKY FAIL then retry PASS, live .md with no FLAKY must be red", () => {
+    const dir = repo();
+    const first = runFlakyIn(dir);
+    expect(first.code).toBe(1);
+    expect(liveResult(dir, first.sha)).toBe("FAIL");
+    expect(liveMd(dir, first.sha)).toContain("🟡 FLAKY");
+    expect(liveMd(dir, first.sha)).toContain("### Flaky — batch red, solo green");
+
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.code).toBe(0);
+    expect(retried.sha).toBe(first.sha);
+    expect(liveResult(dir, first.sha)).toBe("PASS");
+    // Load-bearing: a silent overwrite makes this grep 0, which is the bug.
+    expect(liveMd(dir, first.sha)).toContain("🟡 FLAKY");
+  });
+
+  test("恢复: retry-then-green keeps a FLAKY history section, not just the mark", () => {
+    const dir = repo();
+    runFlakyIn(dir);
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.code).toBe(0);
+    const md = liveMd(dir, retried.sha);
+    expect(md).toContain("🟡 FLAKY");
+    expect(md).toMatch(/Retry history|retry-then-green|attempt 2/i);
+  });
+
+  test("ACCEPT: first-green has no FLAKY and no retry-history — empty ≠ missing is the metadata job", () => {
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, true);
+    expect(code).toBe(0);
+    expect(liveResult(dir, sha)).toBe("PASS");
+    const md = liveMd(dir, sha);
+    expect(md).not.toContain("🟡 FLAKY");
+    expect(md).not.toMatch(/Retry history|retry-then-green/i);
+  });
+
+  test("ACCEPT: in-diff FLAKY without a green retry stays FAIL (do not turn-to-green)", () => {
+    const dir = repo();
+    const first = runFlakyIn(dir);
+    expect(first.code).toBe(1);
+    expect(liveResult(dir, first.sha)).toBe("FAIL");
+    expect(liveMd(dir, first.sha)).toContain("🟡 FLAKY");
+    const stillRed = runFlakyIn(dir, `, "--retry-failed"`);
+    expect(stillRed.code).toBe(1);
+    expect(stillRed.sha).toBe(first.sha);
+    expect(liveResult(dir, first.sha)).toBe("FAIL");
+    expect(liveMd(dir, first.sha)).toContain("🟡 FLAKY");
+  });
+});
+
+/* ================================================================== *
+ * #6158 — --retry-failed washing a FLAKY FAIL into PASS must leave a
+ * trail on every merge-decision surface (metadata, sticky marker,
+ * pre-push). taxonomy §7.4 / gap M9: per-(sha, check) one-shot ledger.
+ * A writer that records attempts=1 after overwrite satisfies every
+ * "it recorded an attempt count" assertion — so the reject arm is
+ * attempts===1 after a real retry, not "attempts is present".
+ * ================================================================== */
+
+describe("#6158 — --retry-failed trail: priorResult / attempts / class survive the overwrite", () => {
+  test("弄坏: retry-then-green with attempts=1 (or no priorResult) must be red", () => {
+    const dir = repo();
+    const first = runFlakyIn(dir);
+    expect(meta(dir, first.sha).failureClass).toBe("CODE");
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.code).toBe(0);
+    expect(liveResult(dir, first.sha)).toBe("PASS");
+    const body = meta(dir, first.sha);
+    // The mutation #6158 names: overwrite still showing attempts=1.
+    expect(body.attempts).not.toBe(1);
+    expect(body.attempts).toBe(2);
+    expect(body.priorResult).toBe("FAIL");
+  });
+
+  test("恢复: metadata carries prior class and a non-empty retryHistory", () => {
+    const dir = repo();
+    runFlakyIn(dir);
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    const body = meta(dir, retried.sha);
+    expect(body.attempts).toBe(2);
+    expect(body.priorResult).toBe("FAIL");
+    expect(body.priorFailureClass).toBe("CODE");
+    expect(Array.isArray(body.retryHistory)).toBe(true);
+    expect(body.retryHistory).toEqual(
+      expect.arrayContaining([expect.objectContaining({ result: "FAIL", flaky: true })]),
+    );
+  });
+
+  test("ACCEPT: first-green writes attempts=1 and retryHistory=[] — counted zero, not omitted", () => {
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, true);
+    expect(code).toBe(0);
+    const body = meta(dir, sha);
+    expect(Object.hasOwn(body, "attempts")).toBe(true);
+    expect(body.attempts).toBe(1);
+    expect(Object.hasOwn(body, "priorResult")).toBe(false);
+    expect(Object.hasOwn(body, "retryHistory")).toBe(true);
+    expect(body.retryHistory).toEqual([]);
+  });
+
+  test("ACCEPT: .result=PASS still distinguishes first-green from retry-then-green", () => {
+    const firstDir = repo();
+    const firstGreen = runScenarioIn(firstDir, true);
+    expect(liveResult(firstDir, firstGreen.sha)).toBe("PASS");
+    const firstBody = meta(firstDir, firstGreen.sha);
+
+    const retryDir = repo();
+    runFlakyIn(retryDir);
+    const retried = runScenarioIn(retryDir, true, `, "--retry-failed"`);
+    expect(liveResult(retryDir, retried.sha)).toBe("PASS");
+    const retryBody = meta(retryDir, retried.sha);
+
+    expect({
+      attempts: firstBody.attempts,
+      priorResult: firstBody.priorResult,
+    }).not.toEqual({
+      attempts: retryBody.attempts,
+      priorResult: retryBody.priorResult,
+    });
+    expect(liveMd(firstDir, firstGreen.sha)).not.toContain("🟡 FLAKY");
+    expect(liveMd(retryDir, retried.sha)).toContain("🟡 FLAKY");
+  });
+
+  test("ACCEPT: sticky / stdout marker carries attempts and prev without colliding with result=", () => {
+    const dir = repo();
+    runFlakyIn(dir);
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.out).toContain("result=PASS");
+    expect(retried.out).toContain("attempts=2");
+    expect(retried.out).toContain("prev=FAIL");
+    const marker = (retried.out.match(/<!-- verification-report [^>]+ -->/) ?? [])[0] ?? "";
+    expect(marker).toContain("result=PASS");
+    expect(marker.match(/result=([A-Z]+)/)?.[1]).toBe("PASS");
+    expect(marker).toContain("attempts=2");
+    expect(marker).toContain("prev=FAIL");
+    expect(marker).not.toContain("priorResult=");
+  });
+
+  test("ACCEPT: a leftover .class is still removed on retry-green (current class is absence)", () => {
+    const dir = repo();
+    const first = runFlakyIn(dir);
+    expect(existsSync(join(dir, ".verify", `${first.sha}.class`))).toBe(true);
+    const retried = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(retried.code).toBe(0);
+    expect(existsSync(join(dir, ".verify", `${first.sha}.class`))).toBe(false);
+    expect(meta(dir, first.sha).priorFailureClass).toBe("CODE");
+  });
+
+  test("ACCEPT: a second --retry-failed increments attempts (one-shot ledger, not a loop of 2)", () => {
+    const dir = repo();
+    runFlakyIn(dir);
+    const stillRed = runFlakyIn(dir, `, "--retry-failed"`);
+    expect(stillRed.code).toBe(1);
+    expect(meta(dir, stillRed.sha).attempts).toBe(2);
+    const green = runScenarioIn(dir, true, `, "--retry-failed"`);
+    expect(green.code).toBe(0);
+    expect(meta(dir, green.sha).attempts).toBe(3);
+    expect(meta(dir, green.sha).priorResult).toBe("FAIL");
+  });
+});
+
+/**
+ * #6420 — a non-envGap publish-time withhold.
+ *
+ * Today the only way to stop `publishSharedEvidence` is `observedEnvGaps`.
+ * That forces a check that already ran (gh installed, logged in, exit 0) to
+ * lie `ENV_GAP` so a host-local PASS is not donated to a sibling that would
+ * have measured a different answer. The two facts are not the same:
+ *
+ *   - envGap: "this host lacks a capability" (probeable-in-principle)
+ *   - reusable:false: "this round's answer must not travel" (only known after)
+ *
+ * R2: colours, `passed()`, `requireStickyGate` accept set stay put. Only
+ * publish-or-not moves. Local cache still writes so this host's push gate
+ * does not livelock (#5600 / env-gap half 1).
+ */
+describe("#6420 — reusable:false withholds shared publish without lying ENV_GAP", () => {
+  const red = (over: Partial<CheckResult>): CheckResult => ({
+    check: "pr-body",
+    title: "PR body",
+    pass: true,
+    blocking: true,
+    durationMs: 1,
+    ...over,
+  });
+
+  test("unit: reusable:false is collected; omitted is not; ENV_GAP is a different field", () => {
+    expect(observedNonReusable([red({})])).toEqual([]);
+    expect(observedNonReusable([red({ reusable: false })])).toEqual(["pr-body"]);
+    expect(
+      observedNonReusable([
+        red({ check: "a", reusable: false }),
+        red({ check: "b" }),
+        red({ check: "c", reusable: false }),
+      ]),
+    ).toEqual(["a", "c"]);
+    // The lie this field exists to retire: an ENV_GAP is NOT a reusable:false.
+    expect(
+      observedNonReusable([
+        red({
+          pass: false,
+          blocking: false,
+          failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" },
+        }),
+      ]),
+    ).toEqual([]);
+    expect(
+      observedEnvGaps([
+        red({
+          pass: false,
+          blocking: false,
+          failure: { class: "ENV_GAP", reason: "dns-localhost-subdomain-missing" },
+        }),
+      ]),
+    ).toEqual(["dns-localhost-subdomain"]);
+    expect(observedEnvGaps([red({ reusable: false })])).toEqual([]);
+  });
+
+  const shaOf = (dir: string): string =>
+    spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+
+  function hostLocalScript(runs: string): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6420-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "host-local-run.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [{ id: "pr-body", run: () => {
+           appendFileSync(${JSON.stringify(runs)}, process.cwd() + "\\n");
+           if (process.env.TEST_HOST_LOCAL === "1")
+             return { check: "pr-body", title: "PR body", pass: true, blocking: true,
+                      durationMs: 1, reusable: false };
+           return { check: "pr-body", title: "PR body",
+                    pass: process.env.TEST_FAIL !== "1", blocking: true, durationMs: 1 };
+         }}],
+       }, process.argv);`,
+    );
+    return script;
+  }
+
+  function runsLog(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agentloop-6420-runs-"));
+    dirs.push(dir);
+    const runs = join(dir, "runs.log");
+    writeFileSync(runs, "");
+    return runs;
+  }
+
+  const countRuns = (runs: string): number =>
+    readFileSync(runs, "utf8")
+      .split("\n")
+      .filter((l) => l.trim()).length;
+
+  const exec = (script: string, cwd: string, env: Record<string, string> = {}) => {
+    const r = spawnSync("bun", [script], {
+      cwd,
+      encoding: "utf8",
+      env: childEnv(cwd, env),
+    });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  };
+
+  function addWorktree(dir: string, name: string): string {
+    const peer = join(tmpdir(), `agentloop-6420-peer-${name}-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `${name}-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    return peer;
+  }
+
+  function brokerRecordCount(dir: string): number {
+    const root = brokerRoot(dir);
+    let n = 0;
+    const walk = (p: string): void => {
+      try {
+        for (const e of readdirSync(p, { withFileTypes: true })) {
+          const next = join(p, e.name);
+          if (e.isDirectory()) walk(next);
+          else if (e.name === "metadata.json") n += 1;
+        }
+      } catch {
+        return;
+      }
+    };
+    walk(root);
+    return n;
+  }
+
+  test("弄坏: a PASS with reusable:false that still publishes shared evidence must be red", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const first = exec(hostLocalScript(runs), dir, { TEST_HOST_LOCAL: "1" });
+    expect(first.code).toBe(0);
+    expect(readFileSync(join(dir, ".verify", `${shaOf(dir)}.result`), "utf8").trim()).toBe("PASS");
+    // Load-bearing: today's hole is that this PASS is banked and donated.
+    expect(brokerRecordCount(dir)).toBe(0);
+  });
+
+  test("恢复: local cache still writes; stderr names the check and does NOT say ENV_GAP", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const first = exec(hostLocalScript(runs), dir, { TEST_HOST_LOCAL: "1" });
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("without publishing reusable evidence");
+    expect(first.out).toContain("pr-body");
+    expect(first.out).not.toContain("environment gap");
+    expect(first.out).not.toContain("Declare them in `capabilities`");
+    expect(existsSync(join(dir, ".verify", `${shaOf(dir)}.result`))).toBe(true);
+    expect(existsSync(join(dir, ".verify", `${shaOf(dir)}.md`))).toBe(true);
+    expect(existsSync(join(dir, ".verify", `${shaOf(dir)}.metadata.json`))).toBe(true);
+    // Local metadata still records an empty envGaps — we did not lie.
+    expect(meta(dir, shaOf(dir)).envGaps).toEqual([]);
+  });
+
+  test("ACCEPT: omitted reusable still publishes — sibling reuses the PASS", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = hostLocalScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    expect(brokerRecordCount(dir)).toBe(1);
+    const peer = addWorktree(dir, "reuse");
+    const second = exec(script, peer);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("Reused evidence");
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("ACCEPT: sibling of a reusable:false PASS re-runs; a would-be-red host is not laundered", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = hostLocalScript(runs);
+    expect(exec(script, dir, { TEST_HOST_LOCAL: "1" }).code).toBe(0);
+    const peer = addWorktree(dir, "no-donate");
+    const second = exec(script, peer, { TEST_FAIL: "1" });
+    expect(second.out).not.toContain("Reused evidence");
+    expect(countRuns(runs)).toBe(2);
+    expect(second.code).not.toBe(0);
+    expect(readFileSync(join(peer, ".verify", `${shaOf(dir)}.result`), "utf8").trim()).toBe("FAIL");
+  });
+
+  test("ACCEPT: --deliver-cached on the producing host still works (push-gate half 1)", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = hostLocalScript(runs);
+    expect(exec(script, dir, { TEST_HOST_LOCAL: "1" }).code).toBe(0);
+    const cached = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir, { TEST_HOST_LOCAL: "1" }),
+    });
+    expect(cached.status).toBe(0);
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("ACCEPT: envGap still withholds independently (do not break #5386)", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6420-gap-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "gap-run.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [{ id: "tests", run: () => ({
+           check: "tests", title: "Tests", pass: false, blocking: false, durationMs: 1,
+           stats: { envGap: "dns-localhost-subdomain" },
+         })}],
+       }, process.argv);`,
+    );
+    const first = exec(script, dir);
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("environment gap");
+    expect(first.out).toContain("Declare them in `capabilities`");
+    expect(brokerRecordCount(dir)).toBe(0);
+  });
+
+  test("ACCEPT: one non-reusable check among greens withholds the whole run", () => {
+    const dir = repo();
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6420-mix-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "mix-run.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [
+           { id: "build", run: () => ({ check: "build", title: "Build", pass: true, blocking: true, durationMs: 1 }) },
+           { id: "pr-body", run: () => ({ check: "pr-body", title: "PR body", pass: true, blocking: true, durationMs: 1, reusable: false }) },
+         ],
+       }, process.argv);`,
+    );
+    const first = exec(script, dir);
+    expect(first.code).toBe(0);
+    expect(brokerRecordCount(dir)).toBe(0);
+    expect(first.out).toContain("pr-body");
+    expect(first.out).toContain("without publishing reusable evidence");
+  });
+});
+
+/**
+ * #6197 — attribution grants PASS on `.result` while the foreign row stays
+ * red. The Overall header is the verdict, not a re-sum of those rows.
+ * Fixture shape is PR #6196: one green + one foreign-flaky red.
+ */
+function runForeignFlakyIn(
+  dir: string,
+  attributed: boolean,
+): { sha: string; code: number; out: string } {
+  const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6197-"));
+  dirs.push(scriptDir);
+  const script = join(scriptDir, "foreign-flaky.ts");
+  writeFileSync(
+    script,
+    `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+     runScenario(
+       {
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [
+           {
+             id: "build",
+             run: () => ({
+               check: "build",
+               title: "Build",
+               pass: true,
+               blocking: true,
+               durationMs: 10,
+             }),
+           },
+           {
+             id: "tests",
+             run: () => ({
+               check: "tests",
+               title: "Tests (root: scripts)",
+               pass: false,
+               blocking: true,
+               durationMs: 186300,
+               stats: { passed: 3766, failed: 1 },
+               rawTail:
+                 "ACCEPT: identity-snapshotted group members are escalated when their leader exits on TERM",
+             }),
+           },
+         ],
+         attribution: () => ({
+           attributed: ${attributed},
+           notice: ${JSON.stringify(
+             attributed
+               ? [
+                   "### Attribution — foreign red",
+                   "",
+                   "> Distinct colour from a confirmed in-diff regression. The overall verdict is PASS;",
+                 ].join("\n")
+               : undefined,
+           )},
+         }),
+       },
+       process.argv,
+     );`,
+  );
+  const r = spawnSync("bun", [script], { cwd: dir, encoding: "utf8", env: childEnv(dir) });
+  const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+  return { sha, code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+}
+
+describe("#6197 — attributed PASS must not render Overall FAIL", () => {
+  test("弄坏: attribution grants PASS, header FAIL on the same report is the bug", () => {
+    // Mutation: renderReport goes back to passed(results), or scenario.ts
+    // forgets to pass `derived` → header and `.result` disagree → this is red.
+    const dir = repo();
+    const r = runForeignFlakyIn(dir, true);
+    expect(r.code).toBe(0);
+    expect(liveResult(dir, r.sha)).toBe("PASS");
+    const md = liveMd(dir, r.sha);
+    expect(md).toContain("**Overall: ✅ PASS**");
+    expect(md).not.toContain("**Overall: ❌ FAIL**");
+  });
+
+  test("恢复: the foreign-flaky row stays red — #5877 colour-separation is not washed", () => {
+    const dir = repo();
+    const r = runForeignFlakyIn(dir, true);
+    expect(r.code).toBe(0);
+    const md = liveMd(dir, r.sha);
+    expect(md).toMatch(/\| Tests \(root: scripts\) \| ❌ FAIL \|/);
+    expect(md).toContain("passed=3766 failed=1");
+    expect(md).toContain("The overall verdict is PASS;");
+  });
+
+  test("ACCEPT: in-diff FAIL (attribution refused) still renders Overall FAIL and .result FAIL", () => {
+    const dir = repo();
+    const r = runForeignFlakyIn(dir, false);
+    expect(r.code).toBe(1);
+    expect(liveResult(dir, r.sha)).toBe("FAIL");
+    const md = liveMd(dir, r.sha);
+    expect(md).toContain("**Overall: ❌ FAIL**");
+    expect(md).not.toContain("**Overall: ✅ PASS**");
+    expect(md).toMatch(/\| Tests \(root: scripts\) \| ❌ FAIL \|/);
+  });
+
+  test("误拦: TIMEOUT .result stays TIMEOUT; Overall stays ❌ FAIL (not a new colour)", () => {
+    const dir = repo();
+    const { sha, code } = runScenarioIn(dir, false, "", { timedOut: "true" });
+    expect(code).toBe(1);
+    expect(liveResult(dir, sha)).toBe("TIMEOUT");
+    const md = liveMd(dir, sha);
+    expect(md).toContain("**Overall: ❌ FAIL**");
+    expect(md).not.toContain("**Overall: ✅ PASS**");
+    expect(md).not.toMatch(/\*\*Overall:[^*]*TIMEOUT/);
+  });
+
+  test("误拦: PARTIAL .result stays PARTIAL; Overall stays ✅ PASS", () => {
+    const dir = repo();
+    const { sha, code } = runMultiIn(dir, `, "--only", "a,b"`);
+    expect(code).toBe(0);
+    expect(liveResult(dir, sha)).toBe("PARTIAL");
+    const md = liveMd(dir, sha);
+    expect(md).toContain("**Overall: ✅ PASS**");
+    expect(md).not.toContain("**Overall: ❌ FAIL**");
+    expect(md).toContain("PARTIAL VERIFICATION");
+  });
+
+  test("wiring: runScenario passes the adjudicated derived into renderReport", () => {
+    const src = readFileSync(join(LIB, "scenario.ts"), "utf8");
+    expect(src).toMatch(/renderReport\(\s*results,\s*\{[\s\S]*?\bderived,/);
+  });
+});
+
+/**
+ * #6239 — a leftover pre-merge PASS is not a blank pre-pr miss.
+ *
+ * The production hole: pre-merge PASS on the same SHA, then git push, then
+ * `--deliver-cached` says only "no current pre-pr cache". The leftover
+ * scenario is on disk the whole time. Naming it is what makes "run pre-pr"
+ * the next step instead of a mystery, and what stops a file-existence
+ * consumer from treating the two colours as one.
+ *
+ * Equivalence is the wrong fix: pre-merge is not a superset (different
+ * affected base; arc omits metadata/skills/publishDrift). The hard fix is
+ * to name the leftover as not a token.
+ */
+describe("#6239 — leftover foreign-scenario cache is named, not silently missing", () => {
+  test("弄坏: leftover pre-merge PASS must not look like a blank miss", () => {
+    const lines = foreignScenarioMissNotice({
+      wanted: "pre-pr",
+      leftover: { scenario: "pre-merge", result: "PASS" },
+    });
+    const said = lines.join("\n");
+    expect(said).toContain("pre-merge");
+    expect(said).toContain("not a pre-pr token");
+    expect(said).toContain("bun .claude/verify/pre-pr.ts");
+  });
+
+  test("ACCEPT: no leftover is a blank miss — do not invent a foreign scenario", () => {
+    expect(foreignScenarioMissNotice({ wanted: "pre-pr", leftover: undefined })).toEqual([]);
+  });
+
+  test("ACCEPT: leftover of the SAME scenario is not this notice (stale/current handle it)", () => {
+    expect(
+      foreignScenarioMissNotice({
+        wanted: "pre-pr",
+        leftover: { scenario: "pre-pr", result: "PASS" },
+      }),
+    ).toEqual([]);
+  });
+
+  test("弄坏: pre-merge without a pre-pr token must name pre-pr before any lock", () => {
+    const notice = pushTokenMissingNotice({
+      thisScenario: "pre-merge",
+      pushScenario: "pre-pr",
+      pushTokenPresent: false,
+    });
+    expect(notice).toBeDefined();
+    expect(notice).toContain("will NOT satisfy pre-push");
+    expect(notice).toContain("pre-pr");
+    expect(notice).toContain("bun .claude/verify/pre-pr.ts");
+  });
+
+  test("ACCEPT: pushTokenMissingNotice is silent when the token is present", () => {
+    expect(
+      pushTokenMissingNotice({
+        thisScenario: "pre-merge",
+        pushScenario: "pre-pr",
+        pushTokenPresent: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  test("ACCEPT: the push scenario itself does not warn about itself", () => {
+    expect(
+      pushTokenMissingNotice({
+        thisScenario: "pre-pr",
+        pushScenario: "pre-pr",
+        pushTokenPresent: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  function namedScript(scenario: string): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), `agentloop-6239-${scenario}-`));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "run.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: ${JSON.stringify(scenario)},
+         resolveBase: () => "HEAD",
+         checks: [{ id: "only", run: () => ({ check: "only", title: "Only", pass: true, blocking: true, durationMs: 1 }) }],
+       }, process.argv);`,
+    );
+    return script;
+  }
+
+  function runAt(script: string, dir: string, args: string[] = []): { code: number; out: string } {
+    const r = spawnSync("bun", [script, ...args], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  }
+
+  test("弄坏: --deliver-cached on pre-pr with leftover pre-merge PASS names the leftover", () => {
+    const dir = repo();
+    const merge = namedScript("pre-merge");
+    const pr = namedScript("pre-pr");
+    expect(runAt(merge, dir).code).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(readFileSync(join(dir, ".verify", `${sha}.metadata.json`), "utf8")).toContain(
+      '"scenario":"pre-merge"',
+    );
+    const delivery = runAt(pr, dir, ["--deliver-cached"]);
+    expect(delivery.code).toBe(1);
+    expect(delivery.out).toContain("AGENTLOOP_CACHE_STATE=missing");
+    expect(delivery.out).toContain("pre-merge");
+    expect(delivery.out).toContain("not a pre-pr token");
+    expect(delivery.out).toContain("bun .claude/verify/pre-pr.ts");
+    // #5635: naming a leftover is not retiring it. ENV_GAP / NA / PARTIAL
+    // local-only tokens live in these files.
+    expect(existsSync(join(dir, ".verify", `${sha}.result`))).toBe(true);
+    expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
+  });
+
+  test("ACCEPT: a matching pre-pr PASS still delivers — not an always-name-leftover implementation", () => {
+    const dir = repo();
+    const pr = namedScript("pre-pr");
+    expect(runAt(pr, dir).code).toBe(0);
+    const delivery = runAt(pr, dir, ["--deliver-cached"]);
+    expect(delivery.code).toBe(0);
+    expect(delivery.out).toContain("AGENTLOOP_CACHE_STATE=current");
+    expect(delivery.out).not.toContain("not a pre-pr token");
+    expect(delivery.out).not.toContain("leftover");
+  });
+
+  test("REJECT: leftover pre-merge PASS is still not a token (exit 1)", () => {
+    const dir = repo();
+    expect(runAt(namedScript("pre-merge"), dir).code).toBe(0);
+    const delivery = runAt(namedScript("pre-pr"), dir, ["--deliver-cached"]);
+    expect(delivery.code).toBe(1);
+    expect(delivery.code).not.toBe(0);
+  });
+});
+
+/**
+ * #6209 — dirty trees reused same-SHA green. Mutation verification does not
+ * change HEAD; the working tree is the subject. A reused PASS here is the
+ * same colour as "this dirty tree is green".
+ *
+ * Chosen hard-fix (issue comment): dirty trees never reuse — they re-run
+ * under the shared lease and say why. Clean-tree reuse (#5223 / #5875) stays.
+ */
+describe("#6209 — a dirty tree must not reuse same-SHA green evidence", () => {
+  function countingScript(runs: string, scenario = "unit"): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6209-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "counting.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: ${JSON.stringify(scenario)}, resolveBase: () => "HEAD", checks: [{ id: "one", run: () => {
+         appendFileSync(${JSON.stringify(runs)}, process.cwd() + "\\n");
+         return { check: "one", title: "One", pass: process.env.TEST_FAIL !== "1", blocking: true, durationMs: 1 };
+       }}] }, process.argv);`,
+    );
+    return script;
+  }
+
+  function countingScriptWithExempt(runs: string, exempt: readonly string[]): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6209-exempt-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "counting.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({ scenario: "unit", resolveBase: () => "HEAD",
+         evidenceExemptPaths: ${JSON.stringify(exempt)},
+         checks: [{ id: "one", run: () => {
+         appendFileSync(${JSON.stringify(runs)}, process.cwd() + "\\n");
+         return { check: "one", title: "One", pass: true, blocking: true, durationMs: 1 };
+       }}] }, process.argv);`,
+    );
+    return script;
+  }
+
+  function runsLog(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agentloop-6209-runs-"));
+    dirs.push(dir);
+    const runs = join(dir, "runs.log");
+    writeFileSync(runs, "");
+    return runs;
+  }
+
+  const countRuns = (runs: string): number =>
+    readFileSync(runs, "utf8")
+      .split("\n")
+      .filter((l) => l.trim()).length;
+
+  const exec = (script: string, cwd: string, env: Record<string, string> = {}) => {
+    const r = spawnSync("bun", [script], {
+      cwd,
+      encoding: "utf8",
+      env: childEnv(cwd, env),
+    });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+  };
+
+  function addWorktree(dir: string, name: string): string {
+    const peer = join(tmpdir(), `agentloop-6209-peer-${name}-${Date.now()}-${Math.random()}`);
+    dirs.push(peer);
+    expect(
+      spawnSync("git", ["worktree", "add", "-b", `${name}-${Date.now()}`, peer, "HEAD"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    shareEvidence(dir, peer);
+    return peer;
+  }
+
+  function peekIn(
+    dir: string,
+    extraArgv: string[] = [],
+    evidenceExemptPaths?: readonly string[],
+  ): { peeked: boolean; result: string | null } {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6209-peek-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "peek.ts");
+    const exemptField =
+      evidenceExemptPaths === undefined
+        ? ""
+        : `evidenceExemptPaths: ${JSON.stringify(evidenceExemptPaths)},`;
+    writeFileSync(
+      script,
+      `import { peekReusableSharedEvidence } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const peeked = peekReusableSharedEvidence(
+         { scenario: "unit", resolveBase: () => "HEAD", ${exemptField}
+           checks: [{ id: "only", run: () => { throw new Error("peek must not run checks"); } }] },
+         process.argv,
+       );
+       console.log(JSON.stringify({ peeked: peeked !== undefined, result: peeked?.result ?? null }));`,
+    );
+    const r = spawnSync("bun", [script, ...extraArgv], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    expect(r.status).toBe(0);
+    return JSON.parse(r.stdout) as { peeked: boolean; result: string | null };
+  }
+
+  test("弄坏: same-tree dirty mutation must not inherit the clean SHA's PASS", () => {
+    // Mutation: drop the dirty-tree reuse skip → second invocation reuses the
+    // banked green while TEST_FAIL would have made this tree red.
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    expect(countRuns(runs)).toBe(1);
+
+    writeFileSync(join(dir, "f.txt"), "mutated\n");
+    const second = exec(script, dir, { TEST_FAIL: "1" });
+    expect(second.out).not.toContain("reused shared");
+    expect(second.out).toMatch(/is dirty \([^)]*f\.txt[^)]*\)/);
+    expect(countRuns(runs)).toBe(2);
+    expect(second.code).not.toBe(0);
+  });
+
+  test("弄坏: a dirty sibling of a clean PASS must not be laundered green", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+
+    const peer = addWorktree(dir, "dirty-sibling");
+    writeFileSync(join(peer, "f.txt"), "reviewer mutation\n");
+    const second = exec(script, peer, { TEST_FAIL: "1" });
+    expect(second.out).not.toContain("reused shared");
+    expect(second.out).toMatch(/is dirty \([^)]*f\.txt[^)]*\)/);
+    expect(countRuns(runs)).toBe(2);
+    expect(second.code).not.toBe(0);
+    expect(readFileSync(runs, "utf8")).toContain(realpathSync(peer));
+  });
+
+  test("恢复: dirty re-run names the files and still does not publish", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout.trim();
+    writeFileSync(join(dir, "named-dirty.txt"), "leak\n");
+    const second = exec(script, dir);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("named-dirty.txt");
+    expect(second.out).toMatch(/is dirty \([^)]*named-dirty\.txt[^)]*\)/);
+    expect(second.out).toContain("running under the shared coordination lease");
+    expect(second.out).not.toContain("reused shared");
+    expect(countRuns(runs)).toBe(2);
+    // Dirty greens still must not become this SHA's reusable answer.
+    expect(existsSync(join(dir, ".verify", `${sha}.md`))).toBe(true);
+    const byLocation = join(brokerRoot(dir), sha, "unit", "HEAD", "by-location");
+    expect(readdirSync(byLocation)).toHaveLength(1);
+  });
+
+  test("ACCEPT: a second run on a still-clean tree still reuses (#5223)", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    const second = exec(script, dir);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("reused shared");
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("ACCEPT: a clean sibling still reuses a PASS (#5875)", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    const peer = addWorktree(dir, "clean-sibling");
+    const second = exec(script, peer);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("reused shared");
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("ACCEPT: peek misses on a dirty tree so the lane is still taken", () => {
+    const dir = repo();
+    expect(runScenarioIn(dir, true).code).toBe(0);
+    expect(peekIn(dir)).toEqual({ peeked: true, result: "PASS" });
+    writeFileSync(join(dir, "f.txt"), "mutated\n");
+    expect(peekIn(dir)).toEqual({ peeked: false, result: null });
+  });
+
+  test("误拦: an evidence-exempt dirty path is still a reuse hit", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScriptWithExempt(runs, ["scratch.brief"]);
+    expect(exec(script, dir).code).toBe(0);
+    writeFileSync(join(dir, "scratch.brief"), "runner brief\n");
+    const second = exec(script, dir);
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("reused shared");
+    expect(second.out).not.toMatch(/\bis dirty\b/);
+    expect(countRuns(runs)).toBe(1);
+    expect(peekIn(dir, [], ["scratch.brief"])).toEqual({ peeked: true, result: "PASS" });
+  });
+
+  test("误拦: --deliver-cached on a dirty tree still delivers the banked PASS", () => {
+    const dir = repo();
+    const runs = runsLog();
+    const script = countingScript(runs);
+    expect(exec(script, dir).code).toBe(0);
+    writeFileSync(join(dir, "f.txt"), "mutated\n");
+    const cached = spawnSync("bun", [script, "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    expect(cached.status).toBe(0);
+    expect(`${cached.stdout}${cached.stderr}`).toContain("Reused evidence");
+    expect(countRuns(runs)).toBe(1);
+  });
+
+  test("wiring: peek and acquire consult dirtiness before reuse", () => {
+    const src = readFileSync(join(LIB, "scenario.ts"), "utf8");
+    expect(src).toMatch(
+      /export function peekReusableSharedEvidence[\s\S]*?cleanForEvidence\([^)]*evidenceExemptPaths/,
+    );
+    expect(src).toMatch(/acquireSharedScenarioLease\([\s\S]*?reuse:\s*cleanAtAdmission/);
+  });
+});
+
+/**
+ * #6399 — coverage metadata used to paint "never ran" the same colour as "ran".
+ *
+ * Two independent holes, one shape:
+ *
+ *   1. `fullScenario` was `!only && !skip` (argv) even when `when` omitted a
+ *      check or `failFastSkip` jumped the rest after the first blocking red.
+ *   2. `coverage.checks` was `selected.map((c) => c.id)` — the pre-loop list —
+ *      so a fail-fast skip was recorded as executed. That contradicts the field's
+ *      own comment: "the check ids that actually executed, in run order".
+ *
+ * The composable failure: an unscoped run on a `failFastSkip` repo, first
+ * blocking red, remainder skipped, attribution flips the aggregate to PASS,
+ * `publishable` is satisfied, and the broker banks a "full coverage PASS"
+ * whose skipped checks never ran.
+ *
+ * `when` is applicability (a skills-only check gated off is still the full
+ * scenario for that diff) — it is reflected by *omission from `checks`*, not
+ * by flipping `fullScenario` (that would stamp every plugins-untouched PR
+ * PARTIAL and refuse the push token). `failFastSkip` is a selected check that
+ * did not execute: `fullScenario` must go false, and `checks` must not list it.
+ */
+describe("#6399 — coverage records execution, not argv-or-selected", () => {
+  const shaOf = (dir: string): string =>
+    spawnSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).stdout.trim();
+
+  function brokerRecordCount(dir: string): number {
+    const root = brokerRoot(dir);
+    let n = 0;
+    const walk = (p: string): void => {
+      try {
+        for (const e of readdirSync(p, { withFileTypes: true })) {
+          const next = join(p, e.name);
+          if (e.isDirectory()) walk(next);
+          else if (e.name === "metadata.json") n += 1;
+        }
+      } catch {
+        return;
+      }
+    };
+    walk(root);
+    return n;
+  }
+
+  function failFastScript(opts: { attribute?: boolean } = {}): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6399-ff-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "failfast-coverage.ts");
+    const attribution = opts.attribute
+      ? `attribution: () => ({ attributed: true, notice: "foreign red (#6399)" }),`
+      : "";
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const ran = ${JSON.stringify(join(scriptDir, "ran.log"))};
+       const mark = (id) => appendFileSync(ran, id + "\\n");
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         failFastSkip: ["expensive"],
+         ${attribution}
+         checks: [
+           { id: "cheapFail", title: "Cheap fail", run: () => { mark("cheapFail"); return { check: "cheapFail", title: "Cheap fail", pass: false, blocking: true, durationMs: 1, rawTail: "lint red" }; } },
+           { id: "expensive", title: "Expensive", run: () => { mark("expensive"); return { check: "expensive", title: "Expensive", pass: true, blocking: true, durationMs: 1 }; } },
+           { id: "tail", title: "Tail", run: () => { mark("tail"); return { check: "tail", title: "Tail", pass: true, blocking: false, durationMs: 1 }; } },
+         ],
+       }, process.argv);`,
+    );
+    writeFileSync(join(scriptDir, "ran.log"), "");
+    return script;
+  }
+
+  function whenScript(): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6399-when-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "when-coverage.ts");
+    writeFileSync(
+      script,
+      `import { appendFileSync } from "node:fs";
+       import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       const ran = ${JSON.stringify(join(scriptDir, "ran.log"))};
+       const mark = (id) => appendFileSync(ran, id + "\\n");
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         checks: [
+           { id: "always", title: "Always", run: () => { mark("always"); return { check: "always", title: "Always", pass: true, blocking: true, durationMs: 1 }; } },
+           { id: "skillsOnly", title: "Skills only", when: () => false, run: () => { mark("skillsOnly"); return { check: "skillsOnly", title: "Skills only", pass: true, blocking: true, durationMs: 1 }; } },
+         ],
+       }, process.argv);`,
+    );
+    writeFileSync(join(scriptDir, "ran.log"), "");
+    return script;
+  }
+
+  function allGreenFailFastScript(): string {
+    const scriptDir = mkdtempSync(join(tmpdir(), "agentloop-6399-green-"));
+    dirs.push(scriptDir);
+    const script = join(scriptDir, "green-failfast.ts");
+    writeFileSync(
+      script,
+      `import { runScenario } from ${JSON.stringify(join(LIB, "scenario.ts"))};
+       runScenario({
+         scenario: "unit",
+         resolveBase: () => "HEAD",
+         failFastSkip: ["expensive"],
+         checks: [
+           { id: "cheap", run: () => ({ check: "cheap", title: "Cheap", pass: true, blocking: true, durationMs: 1 }) },
+           { id: "expensive", run: () => ({ check: "expensive", title: "Expensive", pass: true, blocking: true, durationMs: 1 }) },
+         ],
+       }, process.argv);`,
+    );
+    return script;
+  }
+
+  const exec = (script: string, cwd: string, extraArgv: string[] = []) => {
+    const r = spawnSync("bun", [script, ...extraArgv], {
+      cwd,
+      encoding: "utf8",
+      env: childEnv(cwd),
+    });
+    return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}`, sha: shaOf(cwd) };
+  };
+
+  test("弄坏: fail-fast skip is listed in coverage.checks and fullScenario stays argv-true", () => {
+    const dir = repo();
+    const r = exec(failFastScript(), dir);
+    expect(r.code).toBe(1);
+    const recorded = meta(dir, r.sha);
+    // The skip stub is on disk (report row + log) — coverage must not treat that as ran.
+    expect(readFileSync(join(dir, ".verify", `${r.sha}.expensive.log`), "utf8")).toContain(
+      "did not run",
+    );
+    expect(recorded.checks).toEqual(["cheapFail", "tail"]);
+    expect(recorded.checks).not.toContain("expensive");
+    expect(recorded.fullScenario).toBe(false);
+  });
+
+  test("弄坏: fail-fast + attribution PASS must not bank a full-coverage token", () => {
+    const dir = repo();
+    const r = exec(failFastScript({ attribute: true }), dir);
+    expect(r.code).toBe(0);
+    const recorded = meta(dir, r.sha);
+    expect(recorded.fullScenario).toBe(false);
+    expect(recorded.checks).toEqual(["cheapFail", "tail"]);
+    // #5067: a green with incomplete execution is PARTIAL, not PASS. Same-coloured
+    // artifact + a correction stored elsewhere is the bug this field exists to close.
+    expect(readFileSync(join(dir, ".verify", `${r.sha}.result`), "utf8").trim()).toBe("PARTIAL");
+    expect(brokerRecordCount(dir)).toBe(0);
+    const delivery = spawnSync("bun", [failFastScript({ attribute: true }), "--deliver-cached"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: childEnv(dir),
+    });
+    expect(delivery.status).toBe(1);
+    expect(`${delivery.stdout}${delivery.stderr}`).toContain("PARTIAL");
+  });
+
+  test("ACCEPT: unscoped all-green with failFastSkip configured is still full coverage", () => {
+    // Load-bearing: "never set fullScenario" satisfies every reject above and
+    // breaks every normal push, which is worse than the bug (#5067 arm 1 shape).
+    const dir = repo();
+    const r = exec(allGreenFailFastScript(), dir);
+    expect(r.code).toBe(0);
+    const recorded = meta(dir, r.sha);
+    expect(recorded.fullScenario).toBe(true);
+    expect(recorded.checks).toEqual(["cheap", "expensive"]);
+    expect(readFileSync(join(dir, ".verify", `${r.sha}.result`), "utf8").trim()).toBe("PASS");
+    expect(brokerRecordCount(dir)).toBe(1);
+  });
+
+  test("when-gated checks are omitted from coverage.checks (they never executed)", () => {
+    const dir = repo();
+    const r = exec(whenScript(), dir);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("gated off by `when`");
+    expect(r.out).toContain("skillsOnly");
+    const recorded = meta(dir, r.sha);
+    expect(recorded.checks).toEqual(["always"]);
+    expect(recorded.checks).not.toContain("skillsOnly");
+    // `when` is applicability, not argv-scope: the selected set fully ran.
+    expect(recorded.fullScenario).toBe(true);
+    expect(readFileSync(join(dir, ".verify", `${r.sha}.result`), "utf8").trim()).toBe("PASS");
+    expect(brokerRecordCount(dir)).toBe(1);
+  });
+
+  test("ACCEPT: --only is still PARTIAL and still names only the executed subset", () => {
+    const dir = repo();
+    const r = exec(allGreenFailFastScript(), dir, ["--only", "cheap"]);
+    expect(r.code).toBe(0);
+    const recorded = meta(dir, r.sha);
+    expect(recorded.fullScenario).toBe(false);
+    expect(recorded.checks).toEqual(["cheap"]);
+    expect(readFileSync(join(dir, ".verify", `${r.sha}.result`), "utf8").trim()).toBe("PARTIAL");
+    expect(brokerRecordCount(dir)).toBe(0);
   });
 });

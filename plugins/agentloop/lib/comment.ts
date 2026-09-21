@@ -12,7 +12,7 @@
  * This is I/O (not pure render), so it lives OUTSIDE report.ts.
  */
 import { claimLinkedIssues } from "./linked-issue-claim.ts";
-import { run, stripAnsi, tail, trimFullLogsSection } from "./report.ts";
+import { redactPublicEvidencePaths, run, stripAnsi, tail, trimFullLogsSection } from "./report.ts";
 import { shQuote } from "./shell.ts";
 
 export { shQuote } from "./shell.ts";
@@ -105,6 +105,39 @@ export const HTML_DECODE_JQ = (
 export const MARKER_PREFIX = "<!-- verification-report";
 
 /**
+ * Canonical pr-review verdict sticky. Distinct from `MARKER_PREFIX`: verification
+ * reports and verdicts are different comments, upserted independently. Matching
+ * on the prefix (not the closing `-->`) keeps a slightly longer first line
+ * findable the same way `MARKER_PREFIX` does.
+ *
+ * Skills must NOT look this up with unanchored `contains()` — that PATCHed a
+ * comment that only *quoted* the marker in a table cell (aside#1514 / arc#6404).
+ * Use `postOnce(pr, body, runner, VERDICT_MARKER_PREFIX)` or `scripts/post-verdict.ts`.
+ */
+export const VERDICT_MARKER_PREFIX = "<!-- pr-review-verdict";
+export const VERDICT_MARKER = "<!-- pr-review-verdict -->";
+
+/**
+ * jq `select(...)` predicate: `markerPrefix` must open the comment's **first
+ * non-empty line** (HTML-entity decoded). A body that merely mentions or quotes
+ * the marker in prose / a table / a code span does NOT match.
+ *
+ * First-class export so skills and tests share the production filter instead of
+ * each hand-writing a `contains()` / `test()` that can silently drift (#6404).
+ */
+export function anchoredMarkerSelectJq(markerPrefix: string): string {
+  return (
+    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
+    `test("^${markerPrefix}")`
+  );
+}
+
+/** `gh api --jq` filter returning the last matching comment's `id` or `body`. */
+export function anchoredMarkerLookupJq(markerPrefix: string, field: "id" | "body" = "id"): string {
+  return `[.[] | select(${anchoredMarkerSelectJq(markerPrefix)})][-1].${field} // empty`;
+}
+
+/**
  * `BLOCKED` (issue #3010): distinct from `FAIL` — the gate RAN but its required evidence
  * could not be durably published (e.g. an asset upload failed, or evidence exists only
  * as a local file path never posted anywhere readable). `requireStickyGate` already
@@ -139,9 +172,32 @@ export const MARKER_PREFIX = "<!-- verification-report";
  */
 export type VerifyResult = "PASS" | "FAIL" | "NA" | "BLOCKED" | "TIMEOUT" | "PARTIAL";
 
+/**
+ * Optional same-SHA retry trail on the marker line (#6158).
+ *
+ * `prev` is deliberately not named `priorResult`: `gate.ts` parses
+ * `result=([A-Z]+)` unanchored, and `priorResult=FAIL` contains that
+ * substring. `attempts` / `prev` do not. First-green omits both so
+ * absent ≠ 1 on the marker (metadata still writes `attempts: 1`).
+ */
+export interface MarkerExtras {
+  attempts?: number;
+  prev?: VerifyResult;
+}
+
 /** Build a dynamic marker encoding sha + result (parsed by a merge-gate). */
-export function makeMarker(sha: string, result: VerifyResult, prefix = MARKER_PREFIX): string {
-  return `${prefix} sha=${sha} result=${result} -->`;
+export function makeMarker(
+  sha: string,
+  result: VerifyResult,
+  prefix = MARKER_PREFIX,
+  extras?: MarkerExtras,
+): string {
+  const bits = [`sha=${sha}`, `result=${result}`];
+  if (extras?.attempts !== undefined && extras.attempts >= 2) {
+    bits.push(`attempts=${extras.attempts}`);
+    if (extras.prev) bits.push(`prev=${extras.prev}`);
+  }
+  return `${prefix} ${bits.join(" ")} -->`;
 }
 
 export interface CommentArgs {
@@ -192,8 +248,9 @@ export function stickyBody(
   sha: string,
   result: VerifyResult,
   prefix = MARKER_PREFIX,
+  extras?: MarkerExtras,
 ): string {
-  return `${makeMarker(sha, result, prefix)}\n${report}`;
+  return `${makeMarker(sha, result, prefix, extras)}\n${report}`;
 }
 
 /**
@@ -440,12 +497,9 @@ export function postOnce(
   // Decode HTML entities on the extracted first line before testing — an MCP-posted
   // sticky comment (marker escaped to `&lt;!-- ...`) must still be found, or the next
   // `gh`-posted run can't PATCH it and spams a duplicate instead (#4283).
-  const firstLineTest =
-    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
-    `test("^${markerPrefix}")`;
   const found = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
-      `--jq ${shQuote(`[.[] | select(${firstLineTest})][-1].id // empty`)}`,
+      `--jq ${shQuote(anchoredMarkerLookupJq(markerPrefix, "id"))}`,
     ghRepoEnv,
   );
   // Trust the lookup only when the call succeeded AND it looks like a numeric id
@@ -480,12 +534,26 @@ export function postComment(
   result: VerifyResult,
   runner = run,
   markerPrefix = MARKER_PREFIX,
+  extras?: MarkerExtras,
 ): PostCommentResult {
-  const first = postOnce(pr, stickyBody(report, sha, result, markerPrefix), runner, markerPrefix);
+  // #6401: the report markdown is allowed to name the producing tree in full
+  // (local stdout / `.verify/*.md`); the gh payload is not.
+  const publicReport = redactPublicEvidencePaths(report);
+  const first = postOnce(
+    pr,
+    stickyBody(publicReport, sha, result, markerPrefix, extras),
+    runner,
+    markerPrefix,
+  );
   if (first.ok || !isCommentFilterBudgetError(first.out)) return first;
-  const trimmedReport = trimFullLogsSection(report, sha);
-  if (trimmedReport === report) return first; // nothing to trim — retrying repeats the same body
-  return postOnce(pr, stickyBody(trimmedReport, sha, result, markerPrefix), runner, markerPrefix);
+  const trimmedReport = trimFullLogsSection(publicReport, sha);
+  if (trimmedReport === publicReport) return first; // nothing to trim — retrying repeats the same body
+  return postOnce(
+    pr,
+    stickyBody(trimmedReport, sha, result, markerPrefix, extras),
+    runner,
+    markerPrefix,
+  );
 }
 
 /**
@@ -654,12 +722,9 @@ export function readStickyBody(
   runner = run,
   markerPrefix = MARKER_PREFIX,
 ): string | undefined {
-  const firstLineTest =
-    `(.body // "" | split("\\n") | map(select(length > 0)) | (.[0] // "") | ${HTML_DECODE_JQ}) | ` +
-    `test("^${markerPrefix}")`;
   const found = runner(
     `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" ` +
-      `--jq ${shQuote(`[.[] | select(${firstLineTest})][-1].body // empty`)} 2>/dev/null`,
+      `--jq ${shQuote(anchoredMarkerLookupJq(markerPrefix, "body"))} 2>/dev/null`,
     resolveGhRepoEnv(runner),
   );
   if (found.code !== 0) return undefined;
@@ -685,6 +750,10 @@ export interface RunMeta {
   /** null when this round ran no checks (NA exemption, or reused evidence) */
   checksMs: number | null;
   reused?: boolean;
+  /** same-SHA retry count including this round (#6158). Omitted / 1 = first-green. */
+  attempts?: number;
+  /** previous round's VerifyResult; only set when attempts >= 2. */
+  prev?: VerifyResult;
 }
 
 export function deliverComment(
@@ -729,6 +798,9 @@ export function deliverComment(
     attribution.relation === "behind" && attribution.prHead
       ? `${notHeadNotice(pr, sha, attribution.prHead)}\n\n${report}`
       : report;
+  // Dry-run prints this body; postComment redacts again (idempotent). Either
+  // path must not show `/Users/<os-user>` (#6401).
+  const publicAttributed = redactPublicEvidencePaths(attributed);
 
   // ⏱ Append this round to the series the sticky already carries. The read is
   // what makes the history survive the upsert; without it every PATCH would
@@ -737,7 +809,7 @@ export function deliverComment(
   // than dropping the round — the one thing a duration series must never do is
   // silently stop recording.
   const body = meta
-    ? `${attributed}${renderRunHistory([
+    ? `${publicAttributed}${renderRunHistory([
         ...parseRunHistory(readStickyBody(pr, runner, markerPrefix)),
         {
           at: new Date().toISOString(),
@@ -749,15 +821,19 @@ export function deliverComment(
           ...(meta.reused ? { reused: true as const } : {}),
         },
       ])}`
-    : attributed;
+    : publicAttributed;
 
+  const extras: MarkerExtras | undefined =
+    meta?.attempts !== undefined && meta.attempts >= 2
+      ? { attempts: meta.attempts, prev: meta.prev }
+      : undefined;
   if (args.dryRun) {
     console.error(
-      `\n[dry-run] would upsert to PR #${pr}:\n${stickyBody(body, sha, result, markerPrefix)}`,
+      `\n[dry-run] would upsert to PR #${pr}:\n${stickyBody(body, sha, result, markerPrefix, extras)}`,
     );
     return { posted: true, reason: "dry-run" };
   }
-  const res = postComment(pr, body, sha, result, runner, markerPrefix);
+  const res = postComment(pr, body, sha, result, runner, markerPrefix, extras);
   if (!res.ok) {
     console.error(`❌ --comment: failed to post the report to PR #${pr}. Report NOT posted.`);
     if (res.out.trim()) {

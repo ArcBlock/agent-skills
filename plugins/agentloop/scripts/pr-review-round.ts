@@ -99,7 +99,7 @@ export function prReviewRound(
    * PRs it exists for. Same endpoint and flag `requireStickyGate` already uses.
    */
   const r = runner(
-    `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" --jq '.[].body'`,
+    `gh api --paginate "repos/{owner}/{repo}/issues/${pr}/comments" --jq '.[].body | @json'`,
   );
   if (r.code !== 0) {
     return { ok: false, reason: `gh exited ${r.code} — cannot read PR #${pr}'s comments` };
@@ -107,11 +107,16 @@ export function prReviewRound(
   /**
    * One JSON-quoted string PER LINE, not one array.
    *
+   * `gh --jq` is raw-output (like `jq -r`). `.[].body` therefore prints the body
+   * text itself — a comment that contains newlines occupies several lines, and
+   * `JSON.parse` of the first line fail-closes every PR that has a real comment
+   * (#6334). `| @json` is the token that escapes those newlines so one body is
+   * still exactly one line.
+   *
    * With `--paginate`, gh applies `--jq` to each page and concatenates the results,
    * so an array filter (`[.[].body]`) emits `[...][...]` — several JSON documents
    * back to back, which `JSON.parse` rejects. Emitting one value per line survives
-   * concatenation. Bodies keep their newlines escaped inside the quotes, so a body
-   * is still exactly one line.
+   * concatenation.
    */
   const bodies: string[] = [];
   for (const line of r.out.split("\n")) {

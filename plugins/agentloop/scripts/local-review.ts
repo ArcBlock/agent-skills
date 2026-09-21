@@ -11,29 +11,36 @@
  *
  * **cwd 就是被审的工作树** —— 不 clone、不 install。树已在被审 SHA 上、依赖已装好，
  * 这是 coder 与 reviewer 同 worker 的全部理由。只读沙箱不是可选项：reviewer 能写就
- * 可能改坏被审的代码。
+ * 可能改坏被审的代码。带 `--pr` 时 **HEAD 必须等于该 PR 的 head**（spawn 之前断言，
+ * 与是否 `--post` 无关）——否则审的是另一份 diff，输出却像真 review（arc#6195）。
  *
  * 判决由 `reviewResult` 编进 marker 的 `result=`：同引擎 / 独立性未知 / 输出无法解析
  * 一律 `BLOCKED`。`requireStickyGate` 只接受 {PASS, NA}，所以第五道门零新逻辑。
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { postOnce } from "../lib/comment.ts";
 import {
+  assertCwdIsPrHead,
   assertReviewerEngine,
+  collectReviewOutput,
+  contractRetryPrompt,
   convergence,
   dispositionParseDiag,
   formatDispositionParseDiag,
+  formatReviewRawArtifact,
+  fulfillReviewContract,
   LOCAL_REVIEW_PREFIX,
   nextRound,
   parseCodexReview,
   parsePriorDispositions,
   parseReviewState,
+  persistReviewRaw,
   pickDefaultReviewer,
-  REPORT_CONTRACT,
+  REVIEW_OUTPUT_SCHEMA,
   ROUND_CAP,
   renderReviewComment,
   reportContractWithNonce,
@@ -134,6 +141,8 @@ base = base ?? "origin/main";
   // 从这里往下，base 是一个不可变的提交。prompt、marker、state 拿到的都是它。
   base = sha;
 }
+const reviewBase: string = base;
+
 /**
  * 引擎表从**消费仓库**装载（repo-profile 的 `reviewer_engines` 指到一个模块）。
  * 插件自带空表——引擎的值属于消费仓库，装不到就 fail-closed，不退回任何默认。
@@ -222,6 +231,25 @@ if (!/^[0-9a-f]{40}$/.test(sha)) {
   console.error("✗ 取不到 HEAD sha —— cwd 必须是被审的工作树");
   process.exit(2);
 }
+/**
+ * arc#6195 —— **在 spawn 之前**确认 cwd HEAD 就是这个 PR 的 head。
+ *
+ * 旧位置在 `--post` 交付前、引擎跑完之后：wrong-cwd 会先烧掉一整轮 reviewer
+ * （实测 1288s），不带 `--post` 时则静默给出一份格式合法的错 review。
+ * 「读不到 PR head」也停：猜成当前 HEAD 会审错范围，而判决看起来一切正常。
+ */
+if (pr) {
+  const headGate = assertCwdIsPrHead({
+    pr,
+    localSha: sha,
+    cwd: process.cwd(),
+    runner: run,
+  });
+  if (!headGate.ok) {
+    console.error(headGate.reason);
+    process.exit(2);
+  }
+}
 
 // coder 引擎**只能**来自 PR 自己记录的身份行。`--subject-engine` 只能确认、不能改写
 // ——否则一个 codex 作者用 codex reviewer 加 `--subject-engine claude` 就能造出
@@ -245,8 +273,8 @@ let subjectEngine: string | undefined;
  * 写死 codex 会让每一个 `engine:codex` 的 PR 在 merge-gate 印出的重跑命令下
  * 永远 same-engine BLOCKED。默认必须挑一个**与 coder 不同**的已注册引擎。
  */
-const engine = engineFlag ?? pickDefaultReviewer(subjectEngine);
-if (!engine) {
+const engineRaw = engineFlag ?? pickDefaultReviewer(subjectEngine);
+if (!engineRaw) {
   console.error(
     "✗ 没有可用的跨引擎 reviewer —— 停。\n" +
       `  coder 引擎是 ${subjectEngine ?? "(未声明)"}。省略 --engine 时必须能从注册表里挑一个不同的。\n` +
@@ -254,6 +282,7 @@ if (!engine) {
   );
   process.exit(2);
 }
+const engine: string = engineRaw;
 
 // `-o` 把 review 正文单独写出来。不这么做就得从 stdout 里捞，而 stdout 混着
 // reviewer 的事件流——实测那会被当成 finding 正文吞进去，评论超过 GitHub 的
@@ -261,33 +290,66 @@ if (!engine) {
 // arc#6123:每轮一个一次性 nonce。引擎原样复制它 = 这份输出没被截断,于是「完整且
 // 零条」与「没跑完」不再同色。**每轮重新生成**——复用会让上一轮的复述冒充这一轮。
 const nonce = `arc-review-nonce-${randomBytes(8).toString("hex")}`;
-const outFile = join(mkdtempSync(join(tmpdir(), "local-review-")), "review.md");
+const tmpDir = mkdtempSync(join(tmpdir(), "local-review-"));
+const outFile = join(tmpDir, "review.md");
+const retryFile = join(tmpDir, "review.retry.md");
+const schemaFile = join(tmpDir, "review.schema.json");
+writeFileSync(schemaFile, `${JSON.stringify(REVIEW_OUTPUT_SCHEMA, null, 2)}\n`);
 const spec = assertReviewerEngine(engine);
-const cmd = reviewerArgv(engine, {
-  prompt: reviewPrompt(base, round, prior, pr ? `PR #${pr}` : undefined, nonce),
-  base,
-  outFile,
-  ...(pr ? { title: `PR #${pr}` } : {}),
-});
-console.error(`▶ ${cmd.join(" ")}   (cwd=${process.cwd()})`);
+const timeoutMs = Number(flag("--timeout-ms", "1800000"));
+const prompt = reviewPrompt(base, round, prior, pr ? `PR #${pr}` : undefined, nonce);
+
+function spawnOnce(
+  reviewerPrompt: string,
+  dest: string,
+): {
+  stdout: string;
+  failed: boolean;
+  collected: ReturnType<typeof collectReviewOutput>;
+} {
+  const cmd = reviewerArgv(engine, {
+    prompt: reviewerPrompt,
+    base: reviewBase,
+    outFile: dest,
+    schemaFile,
+    ...(pr ? { title: `PR #${pr}` } : {}),
+  });
+  console.error(`▶ ${cmd.join(" ")}   (cwd=${process.cwd()})`);
+  // #6172：两条输出管子都 pipe。stderr inherit 时 grok-build 的模型原文只要打到
+  // stderr 就丢了；file 模式 stdout inherit 时，-o 没写成、答案在 stdout 同样丢。
+  // spawnSync 不直播，结束后把 stderr（以及 file 模式的 stdout 事件流）回放到父进程。
+  const bin = cmd[0];
+  if (!bin) throw new Error("reviewerArgv returned empty argv");
+  const proc = spawnSync(bin, cmd.slice(1), {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    // 没有超时的 reviewer 会让无人值守 worker 永远挂住 —— 而**沉默**正是这道门整个
+    // 设计要消灭的那种失效。超时按 unparseable 处理（BLOCKED），不是「没发现问题」。
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdoutCap = proc.stdout ?? "";
+  const stderrCap = proc.stderr ?? "";
+  if (stderrCap) process.stderr.write(stderrCap);
+  if (spec.outputMode === "file" && stdoutCap) process.stderr.write(stdoutCap);
+  const collected = collectReviewOutput({
+    outputMode: spec.outputMode,
+    stdout: stdoutCap,
+    stderr: stderrCap,
+    outFileText: spec.outputMode === "file" && existsSync(dest) ? readFileSync(dest, "utf8") : "",
+  });
+  const failed = Boolean(proc.error) || proc.signal !== null || (proc.status ?? 1) !== 0;
+  if (failed) {
+    console.error(
+      `⚠ reviewer 进程未正常结束（status=${proc.status} signal=${proc.signal} ${proc.error?.message ?? ""}）—— 判决降为 BLOCKED`,
+    );
+  }
+  return { stdout: collected.text, failed, collected };
+}
+
 const started = Date.now();
-// 两种取法：codex 写进 `-o` 的文件，claude 直接打到 stdout。**不混着读**——
-// 混读正是那次 65536 交付失败的根因（事件流被当成 finding 正文吞了）。
-const proc = spawnSync(cmd[0], cmd.slice(1), {
-  encoding: "utf8",
-  maxBuffer: 64 * 1024 * 1024,
-  // 没有超时的 reviewer 会让无人值守 worker 永远挂住 —— 而**沉默**正是这道门整个
-  // 设计要消灭的那种失效。超时按 unparseable 处理（BLOCKED），不是「没发现问题」。
-  timeout: Number(flag("--timeout-ms", "1800000")),
-  killSignal: "SIGKILL",
-  stdio: ["ignore", spec.outputMode === "stdout" ? "pipe" : "inherit", "inherit"],
-});
-const stdout =
-  spec.outputMode === "stdout"
-    ? (proc.stdout ?? "")
-    : existsSync(outFile)
-      ? readFileSync(outFile, "utf8")
-      : "";
+const first = spawnOnce(prompt, outFile);
 
 // 仓库根显式传给解析器：路径的相对化不靠猜（本地 codex 自审时报的 P2）。
 const repoRoot = run("git rev-parse --show-toplevel").out.trim();
@@ -305,22 +367,44 @@ const repoRoot = run("git rev-parse --show-toplevel").out.trim();
  * 落盘的路径打在 stderr 上，判决非 PASS 时尤其要看它。
  */
 const rawPath = join(process.cwd(), ".verify", `local-review-${Date.now()}.raw.md`);
-try {
-  mkdirSync(dirname(rawPath), { recursive: true });
-  writeFileSync(rawPath, stdout);
-} catch {
-  // 留证据是尽力而为，不该让它挡住 review 本身
-}
-// reviewer 进程失败（超时、被杀、非零退出）时，**产出多少都不算数**：一次没跑完的
-// review 与一次干净的 review 不许同色。上面加了 timeout 却不看结果，等于没加。
-const procFailed = Boolean(proc.error) || proc.signal !== null || (proc.status ?? 1) !== 0;
-if (procFailed) {
-  console.error(
-    `⚠ reviewer 进程未正常结束（status=${proc.status} signal=${proc.signal} ${proc.error?.message ?? ""}）—— 判决降为 BLOCKED`,
-  );
-}
+const persistAttempt = (
+  attempt: { collected: ReturnType<typeof collectReviewOutput> },
+  destPath: string,
+) => {
+  const persisted = persistReviewRaw({
+    destPath,
+    modelText: attempt.collected.text,
+    artifact: formatReviewRawArtifact(attempt.collected, { engine }),
+  });
+  if (persisted.error) {
+    console.error(`⚠ 原文落盘失败：${persisted.error}`);
+  } else {
+    console.error(
+      `↳ reviewer 原始输出：${persisted.path}${persisted.preserved ? `（${persisted.bytes} 字节）` : "（空 — 未接到模型原文）"}`,
+    );
+  }
+  return persisted;
+};
+// #6172：解析之前无条件落盘。preserved 看模型原文，不看文件是否被创建。
+let raw = persistAttempt(first, rawPath);
+const fulfilled = fulfillReviewContract({
+  nonce,
+  ...(repoRoot ? { repoRoot } : {}),
+  first,
+  retry: () => {
+    console.error("⚠ reviewer 输出无法解析 —— 按契约重试一次（arc#6187）");
+    const second = spawnOnce(contractRetryPrompt(nonce, prompt), retryFile);
+    raw = persistAttempt(
+      second,
+      join(process.cwd(), ".verify", `local-review-${Date.now()}.raw.md`),
+    );
+    return second;
+  },
+});
+const stdout = fulfilled.stdout;
+const procFailed = fulfilled.failed;
 const parsed = parseCodexReview(stdout, repoRoot ? { repoRoot, nonce } : { nonce });
-const findings = parsed.ok ? parsed.findings : [];
+const findings = parsed.findings;
 const unparseable = !parsed.ok || procFailed;
 // 第 N 轮的判决必须由**收敛**证明，不是「这轮没报东西」。
 const dispositions = parsePriorDispositions(stdout);
@@ -343,6 +427,8 @@ const body = renderReviewComment({
   ...(prior.length ? { prior } : {}),
   ...(parseDiag ? { parseDiag } : {}),
   unparseable: unparseable || dirty.length > 0,
+  raw,
+  ...(!parsed.ok ? { parseKind: parsed.kind, excerpt: parsed.excerpt } : {}),
 });
 const { result: verdict, escalate } = reviewResultForRound({
   reviewerEngine: engine,
@@ -387,19 +473,16 @@ if (post) {
     console.error("✗ --post 需要 --pr");
     process.exit(2);
   }
-  // 先确认这个 sha 真的属于目标 PR。`postOnce` 是 upsert：--pr 写错、或在错的
-  // checkout 里跑，会**直接覆盖掉那条 PR 上已有的有效证据**，而闸只会在之后拒绝
-  // sha —— 那时旧证据已经没了。
-  const head = run(`gh api "repos/{owner}/{repo}/pulls/${pr}" --jq .head.sha 2>/dev/null`);
-  const headSha = head.code === 0 ? head.out.trim() : "";
-  if (!headSha) {
-    console.error(`✗ 取不到 PR #${pr} 的 head sha —— 不覆盖它已有的评论`);
-    process.exit(2);
-  }
-  if (headSha !== sha) {
-    console.error(
-      `✗ 本地 HEAD ${sha.slice(0, 9)} 不是 PR #${pr} 的 head（${headSha.slice(0, 9)}）—— 拒绝覆盖它已有的评论`,
-    );
+  // 再确认一次：review 期间 HEAD 可能被切走。`postOnce` 是 upsert，写错 PR
+  // 或错 checkout 会直接覆盖已有证据。spawn 前已断言过；这里挡的是期间漂移。
+  const headGate = assertCwdIsPrHead({
+    pr,
+    localSha: sha,
+    cwd: process.cwd(),
+    runner: run,
+  });
+  if (!headGate.ok) {
+    console.error(headGate.reason);
     process.exit(2);
   }
   const r = postOnce(pr, body, run, LOCAL_REVIEW_PREFIX);

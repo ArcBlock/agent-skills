@@ -1,0 +1,1 @@
+已审查完整 diff…未发现可确证的缺陷；git diff --check 通过。

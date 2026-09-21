@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   checkPluginTests,
   discoverTestDirs,
+  isIsolatedTestSource,
   minimalDirs,
   parseBunCounts,
   runPluginTests,
@@ -59,6 +60,18 @@ describe("minimalDirs", () => {
 });
 
 // ── parseBunCounts ───────────────────────────────────────────────────────────
+
+describe("isIsolatedTestSource", () => {
+  test("recognizes the generic tag and @test-shards:solo, with a reason", () => {
+    expect(isIsolatedTestSource(" * @plugin-tests:isolated spawns a child\n")).toBe(true);
+    expect(isIsolatedTestSource("// @test-shards:solo packed LIGHT 30s-timeouts\n")).toBe(true);
+  });
+
+  test("a bare tag without a reason is not isolation — that is a silent skip wearing a costume", () => {
+    expect(isIsolatedTestSource("@plugin-tests:isolated\n")).toBe(false);
+    expect(isIsolatedTestSource("export const a = 1;\n")).toBe(false);
+  });
+});
 
 describe("parseBunCounts", () => {
   test("reads bun's summary lines", () => {
@@ -135,16 +148,19 @@ describe("checkPluginTests (real bun runs)", () => {
     }
   });
 
-  test("plugin with no tests reports `no tests`, not a fake green count", () => {
+  test("plugin with no tests is NON-green — stats say `no tests`, not a fake 0 fail (arc#6439)", () => {
     const root = fixtureRepo("demo", { "lib/a.ts": "export const a = 1;\n" });
     try {
       const r = checkPluginTests({
         changedFiles: ".claude/plugins/demo/lib/a.ts",
         repoRoot: root,
       });
-      expect(r.pass).toBe(true);
+      // 正控 3: empty suite must not share a colour with PASS.
+      expect(r.pass).toBe(false);
+      expect(r.blocking).toBe(true);
       expect(r.stats.demo).toBe("no tests");
       expect(r.stats.pass).toBe(0);
+      expect(r.rawTail).toMatch(/no test suite discovered|empty suite is not a pass/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -162,6 +178,43 @@ describe("checkPluginTests (real bun runs)", () => {
       });
       expect(runs[0].dirs).toEqual(["skills/s/test"]);
       expect(runs[0].pass).toBe(2); // 2, not 3 — the nested file runs exactly once
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an @plugin-tests:isolated file is a separate bun test invocation (arc#6090)", () => {
+    const isolated = `/**
+ * @plugin-tests:isolated spawns a child; must not share a bun process
+ */
+${GREEN}`;
+    const root = fixtureRepo("demo", {
+      "lib/a.test.ts": GREEN,
+      "lib/heavy.test.ts": isolated,
+    });
+    try {
+      const cmds: string[] = [];
+      runPluginTests({
+        changedFiles: ".claude/plugins/demo/lib/a.test.ts",
+        repoRoot: root,
+        exec: (cmd, cwd) => {
+          cmds.push(cmd);
+          const p = Bun.spawnSync(["bash", "-c", cmd], {
+            cwd,
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          return { code: p.exitCode ?? 1, out: `${p.stdout.toString()}${p.stderr.toString()}` };
+        },
+      });
+      const bunCmds = cmds.filter((c) => c.startsWith("bun test "));
+      expect(bunCmds.length).toBe(2);
+      const packed = bunCmds.find((c) => c.includes("lib/a.test.ts"));
+      const solo = bunCmds.find((c) => c.includes("lib/heavy.test.ts"));
+      expect(packed).toBeDefined();
+      expect(solo).toBeDefined();
+      expect(packed).not.toContain("lib/heavy.test.ts");
+      expect(solo).not.toContain("lib/a.test.ts");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

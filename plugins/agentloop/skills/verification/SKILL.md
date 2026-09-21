@@ -67,7 +67,10 @@ substitute a single `tsc`/`build` command for the scenario script.
   pre-push hook and the merge gate all refuse it. Coverage (`fullScenario` + the
   executed check ids) lives in `.verify/<sha>.metadata.json` — before #5067 that
   file carried identity only, so a two-check PASS and a full-gate PASS were
-  indistinguishable and the push gate accepted both.
+  indistinguishable and the push gate accepted both. `fullScenario` is execution,
+  not argv (#6399): a `failFastSkip` jump is the same colour as `--skip`, even
+  when attribution later flips the aggregate. `coverage.checks` is the ids that
+  actually ran (in run order), not the pre-loop selected list.
 - **A report is only delivered to a PR the sha belongs to** (#5060). `--comment`
   refuses a sha with no relationship to the PR's branch (naming both sides),
   labels an older-but-on-branch sha **NOT THE PR HEAD**, and reads the posted
@@ -94,6 +97,21 @@ substitute a single `tsc`/`build` command for the scenario script.
   record: …`): the store lives in the git COMMON dir, so in a linked worktree
   it is NOT under the worktree's own `.git`. A cached FAIL is not retried on
   its own — pass `--retry-failed`, which the reuse line now says out loud.
+- **A scenario may inherit another scenario's PASS when it is the same question.**
+  `ScenarioConfig.equivalentEvidenceFrom: ["pre-pr"]` on pre-merge lets it reuse
+  pre-pr's record at the **same sha, same resolved base, same capabilities** — which
+  is exactly the merge-base == default-branch-tip case, where the two doors run the
+  same checks over the same diff on the same tree (measured: 33 of 88 pre-merge runs
+  on one machine, all re-PASS, ≈81 min). The engine still requires the donor to be a
+  full PASS whose executed checks **cover every check this scenario would select**
+  at that base; a FAIL never crosses scenarios (and an `--na` exemption is local-only,
+  never in the shared store, so it cannot donate); a check the donor lacks turns it
+  off and is named on stderr (`does not cover: <id>`). One-way: pre-pr never inherits
+  from pre-merge (#6239). The report header says `♻️ Equivalent evidence` and names
+  the donor; the local `.verify/<sha>.metadata.json` carries `equivalentFrom`. The
+  lane peek honours it too, so an equivalent run never queues behind another gate.
+  Agents: **always invoke the entrypoint** — the sticky marker carries neither base
+  nor scenario, so "read the fact off the sticky" is not something you can do.
 - **…and by WHAT THE HOST COULD DO while it was produced** (#5386). `location`
   answers *where*, not *with what*. Some checks' answers depend on an
   environment fact — can this host reach the upstream it mirrors, does
@@ -118,6 +136,12 @@ substitute a single `tsc`/`build` command for the scenario script.
     never measured there. This is a publish-time decision, not an identity input,
     and it is the same shape as the dirty-tree rule beside it. The price is that
     a gapped host re-runs every time; declare the capability to get reuse back.
+  - **A check can also opt out of reuse without claiming an env gap (#6420).**
+    `CheckResult.reusable: false` is the other publish-time withhold. Use it when
+    this round's answer is host-local (a true timeout, a machine-bound
+    measurement) but the host is not missing a capability — lying `ENV_GAP` to
+    get the withhold was the hole this field closes. Colours, `passed()`, and
+    the sticky-gate accept set do not move (taxonomy R2); only publish-or-not.
   - **`unknown` is an equality class.** A probe that throws records `unknown`,
     and two hosts whose probes threw for *different* reasons will reuse each
     other's evidence. That is a named residual, accepted deliberately: the

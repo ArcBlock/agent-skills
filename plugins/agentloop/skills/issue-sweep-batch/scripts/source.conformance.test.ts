@@ -172,6 +172,33 @@ describe("★ 认领判据必须权威（Codex P2，#5628 评审）", () => {
   });
 });
 
+describe("timeline empty window vs 未采集 (#6330)", () => {
+  test("MemoryWorkItemSource has no timeline — that is 未采集, not a collected all-zero series", () => {
+    const s: WorkItemSource = new MemoryWorkItemSource([
+      { id: "1", title: "a", body: null, labels: ["bug"] },
+      { id: "2", title: "b", body: null, labels: ["feature"] },
+    ]);
+    expect(s.timeline).toBeUndefined();
+  });
+
+  test("WorkObjectSource.timeline(0) is collected empty, and the method is present", async () => {
+    let execs = 0;
+    const src = new WorkObjectSource({
+      read: async () => ({ data: null }),
+      readMany: async () => new Map(),
+      write: async () => ({}),
+      exec: async () => {
+        execs += 1;
+        return { success: true, data: { entries: [] } };
+      },
+    });
+    expect(typeof src.timeline).toBe("function");
+    expect(await src.timeline!(0)).toEqual([]);
+    expect(src.lastReadCount).toBe(0);
+    expect(execs).toBe(0);
+  });
+});
+
 describe("★ default sweep source is WorkObjectSource (#6000)", () => {
   test("DEFAULT_SWEEP_SOURCE is work-object; createSweepSource(default) is not GitHub", () => {
     expect(DEFAULT_SWEEP_SOURCE).toBe("work-object");
