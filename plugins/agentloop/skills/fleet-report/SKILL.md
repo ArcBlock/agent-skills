@@ -1,6 +1,9 @@
 ---
 name: fleet-report
-description: Read a fleet's own telemetry (fleet.jsonl) back — how many rounds ran vs were skipped and why, what they produced, per-repo×skill duration, and whether any round left processes behind. Runs the deterministic reporter, then flags what is worth acting on. Use to answer "is the fleet healthy", "what did it actually accomplish", "why has this repo not moved", or to open the HTML dashboard.
+description: >-
+  Read a fleet's telemetry (fleet.jsonl): rounds run vs skipped and why, output, per-repo×skill
+  duration, leftover processes. Use for "is the fleet healthy", "what did it accomplish", "why
+  hasn't this repo moved", or the HTML dashboard.
 allowed-tools: Bash(bun *), Bash(open *), Bash(ls *), Bash(test *), Read
 ---
 

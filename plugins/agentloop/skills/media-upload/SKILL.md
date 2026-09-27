@@ -1,12 +1,9 @@
 ---
 name: media-upload
-description: >
-  Upload a media file (image OR video/screen-recording) — or a whole directory of them — to the
-  shared public asset repo and get back raw.githubusercontent.com/main URLs. For images that URL
-  embeds inline via ![](); for video it is a LINK (GitHub won't inline-play raw video). Binary-safe:
-  never MCP file-write (#1079). The mechanism is two universal plugin scripts (gh-upload-media.sh
-  single, gh-upload-dir.sh dir); this skill is the discoverable entry + the doctrine. Used by
-  test-sweep, ui-verify, and any repo's screenshot/recording flow.
+description: >-
+  Upload an image, video or a directory of them to the shared public asset repo and get
+  raw.githubusercontent.com/main URLs (images embed inline, videos link). Binary-safe via the
+  plugin's gh-upload scripts. Used by screenshot and recording flows.
 ---
 
 # media-upload — 媒体上传（图片/视频），输出 raw.githubusercontent.com URL
@@ -58,7 +55,7 @@ SCREENSHOT_DIR="$SHOT_DIR" CONTEXT="pr${PR}" bash "$PLUGIN/scripts/gh-upload-dir
 ## 上传器两通道都不可用时：浏览器原生附件上传（第三层兜底，issue #3010）
 
 `SendUserFile` 只把文件发给当前对话的人，**不会**让证据落地到 GitHub——PR/issue 上依旧没有可核验的
-截图。这类 review 门控（`ui-verify` 的 UI 证据闸最典型）需要证据**持久发布在 GitHub 上**，`gh` 与图床
+截图。这类 review 证据（`ui-verify` 的 UI 截图最典型；是否是合并闸由仓库 profile 的 `additional_merge_gates` 决定，arc 上是 advisory）需要**持久发布在 GitHub 上**，`gh` 与图床
 仓 clone 又都不可用时，唯一确定性可重复的兜底是**驱动一个已登录 GitHub 的浏览器**走原生附件上传
 （本轮真实产出过 arc#2991 / arcblock-site#165 / Site PR #166 的截图证据）：
 

@@ -1,6 +1,9 @@
 ---
 name: setup-routines
-description: Interactive one-shot setup/update of a runner's repo-declared cloud routines and durable local cron jobs, driven by the consuming repo's .claude/routines/ catalog (canonical names, base crons, prompt templates). Reconciles cloud triggers via RemoteTrigger (create-or-update by canonical name, per-runner minute stagger, per-trigger sources), prints the one-time environment prerequisites that have no API (plugin-install setup script, network access, env vars), and reconciles a crontab marker block for local routines in a dedicated worktree/clone (never the shared checkout). The generic issue-sweep/pr-sweep loop is scheduled by fleet-setup, NOT here — this skill owns everything a repo declares beyond that loop. Interactive (AskUserQuestion is core) — never run unattended.
+description: >-
+  Interactive setup/update of a runner's repo-declared cloud routines and local cron jobs from the
+  repo's .claude/routines/ catalog (RemoteTrigger reconcile, crontab marker block, one-time
+  prerequisites). The issue/pr-sweep loop belongs to fleet-setup.
 ---
 
 # Setup Routines — one Q&A pass, a repo's custom routines fully reconciled

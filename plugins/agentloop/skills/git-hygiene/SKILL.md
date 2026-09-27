@@ -1,17 +1,9 @@
 ---
 name: git-hygiene
-description: >
-  After a merge or when ending multi-branch work: switch the primary checkout
-  to the default branch, fast-forward from origin, then remove local worktrees
-  and branches that have no unique work left. Use when the user says "切回
-  main 清理", "清理 worktree", "prune branches", "git hygiene", "收工清分支",
-  or after confirming a PR merged. Safe by default: never delete a branch or
-  worktree that still has commits not on origin/<default> unless squash-merge
-  parity is verified. On explicit request ("这些是不是该补 PR"), also does a
-  provenance investigation on each KEPT branch — merged-elsewhere / superseded
-  / actively-tracked-via-open-PR / genuinely-orphaned — with a content-level
-  redundancy check (not just commit-count) before rebasing and opening a
-  belated PR for anything confirmed still-unique. Works in any git repo.
+description: >-
+  After a merge or multi-branch work: switch the primary checkout to the default branch,
+  fast-forward, prune worktrees and branches with no unique work (safe by default); on request ("这些是不是该补 PR") investigates kept branches and opens belated PRs. Triggers: "切回
+  main 清理", "清理 worktree", "prune branches", "git hygiene", "收工清分支".
 ---
 
 # git-hygiene

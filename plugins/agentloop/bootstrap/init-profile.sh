@@ -55,6 +55,7 @@ reference implementation to copy patterns from.
 | \`pre_merge_entry\` | \`bun .claude/verify/pre-merge.ts\` |
 | \`reviewer_engines\` | \`<FILL>\` — 指向本仓导出 \`REVIEWER_ENGINES\` 的模块（如 \`.claude/verify/reviewer-engines.ts\`）。跨引擎 review 用；没有它 local-review 直接 exit 2，不退回任何默认。 |
 | \`merge_gate_entry\` | \`bun .claude/verify/merge-gate.ts\` (optional; only if you use the SHA-match merge gate) |
+| \`change_set_record_entry\` | \`none\` — <FILL: the command that records a PR head on your work ledger as a Change Set (arc: \`arc work changeset record --skip-outside-run\`); \`none\` if the repo has no work ledger. land / epic-conductor run it via record-change-set.sh after every PR push> |
 | \`additional_merge_gates\` | \`[]\` — extra gates on backend diffs; empty for most repos |
 | \`docs_na_flag\` | \`--na "docs-only change"\` |
 | \`pr_sweep_freeze_ttl_days\` | \`14\` — an \`awaiting-*\` PR untouched this long stops costing a round anything (pr-sweep 冻结集); \`updatedAt\` moving unfreezes it |

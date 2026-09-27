@@ -71,6 +71,17 @@ import {
 
 const FIXTURE_DIR = fileURLToPath(new URL("./fixtures", import.meta.url));
 const SKILL = fileURLToPath(new URL("../SKILL.md", import.meta.url));
+/**
+ * #7105: the per-state table and the vendor-enumeration doctrine moved verbatim into the
+ * shared receipt protocol that Step 0.4 links (lib/skill-rigor.golden.test.ts pins the
+ * link). Wiring assertions still read SKILL.md alone; doctrine assertions read SKILL.md
+ * plus that one shared file — the only place an agent is sent for the state table.
+ */
+const SHARED_PROTOCOL = fileURLToPath(
+  new URL("../../../reference/review-receipt-protocol.md", import.meta.url),
+);
+const readDoctrine = () =>
+  `${readFileSync(SKILL, "utf8")}\n${readFileSync(SHARED_PROTOCOL, "utf8")}`;
 
 /* ------------------------------------------------------------------ *
  * The fixture instrument
@@ -1198,6 +1209,8 @@ describe("pr-review SKILL.md wires the judge into Step 0.4", () => {
   });
 
   test("the doc routes every non-clean state, including the new ones", () => {
+    const text = readDoctrine();
+    expect(readFileSync(SKILL, "utf8")).toContain("reference/review-receipt-protocol.md");
     for (const s of [
       "stale",
       "unbound",
@@ -1536,7 +1549,7 @@ describe("#6164 F4 — the reviews face is read, and unread ≠ empty", () => {
 });
 
 describe("#6164 SKILL.md names the three residual holes", () => {
-  const text = readFileSync(SKILL, "utf8");
+  const text = readDoctrine();
 
   test("the enumerator judges recognised vendors that left no trace, not only those present", () => {
     expect(text).toMatch(/absent/i);

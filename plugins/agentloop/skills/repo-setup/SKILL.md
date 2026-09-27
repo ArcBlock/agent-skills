@@ -1,6 +1,9 @@
 ---
 name: repo-setup
-description: One-time setup that makes a repo consumable by the agentloop skills — scaffold repo-profile, create the controlled GitHub labels, scaffold the verification gate, and preflight the environment. Run this once when onboarding a new repo to the loop-engine skills. Does NOT schedule routines (that's the repo's own infra).
+description: >-
+  One-time onboarding of a repo to the agentloop skills: scaffold repo-profile, create the
+  controlled labels, scaffold the verification gate, preflight the environment. Does not schedule
+  routines.
 ---
 
 # Repo Setup — adopt the agentloop plugin in a repo

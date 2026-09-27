@@ -1,6 +1,9 @@
 ---
 name: test-audit
-description: Find tests that cannot fail — bodies that assert nothing, assertions swallowed by `catch {}`, and changes that weaken, delete or disable coverage. Parses with the TypeScript AST (never regex) and reports every finding with a machine-checkable witness. Use when reviewing a PR that touches `*.test.*` and you need to know whether it made the suite weaker (a gutted test passes MORE reliably, so a green test run proves nothing); when asked what is wrong with a repo's tests or to sweep for tests that verify nothing; when asked to file issues for test-quality debt; or when deciding whether a rule is trustworthy enough to block on. Also triggers on "空跑的测试", "测试有没有用", "test quality", "vacuous test", "did this PR weaken the tests".
+description: >-
+  Find tests that cannot fail (no assertions, swallowed by catch, weakened / deleted / disabled
+  coverage) via the TypeScript AST, each with a witness. Use on PRs touching *.test.*,
+  test-quality sweeps, "vacuous test", "空跑的测试", "测试有没有用", "did this PR weaken the tests".
 ---
 
 # Test Audit
@@ -44,7 +47,7 @@ actually asked; do not run all of them.
 
 | What you were asked | Mode | Then |
 |---|---|---|
-| "review this PR's tests" / a PR number / you are inside `pr-review` | `diff --base <merge-base>` | **Read the gate row first.** In a repo where this is wired as a verification check (arc: `testQuality`), `pre-merge` already ran it — quote that row rather than re-running. Only run it yourself when there is no such row. |
+| "review this PR's tests" / a PR number / you are inside `pr-review` | `diff --base <merge-base>` | **Read the gate row first.** In a repo where this is wired as a verification check (arc: `testQuality`), the PR's verification report (`<verification_entry>`, arc: `pre-pr`) already ran it — quote that row from the same-SHA report rather than re-running. Only run it yourself when there is no such row. |
 | "what's wrong with our tests" / "sweep" / "backlog" | `scan` | Report the NEW-vs-baseline split, not the raw total. The baseline is accepted debt; re-announcing it every time is how a report becomes wallpaper. |
 | "file issues for this" | `issues` | Print the drafts. Add `--create --repo <owner/name>` **only if the human asked for issues to be created** — the flag is the authorisation, and it is never inferred. |
 | "should rule X block?" / "is this rule any good?" | `replay --rule X --verbose` | Read the hits. A rule earns `block` only with a demonstrated true positive and a near-zero false-positive rate on that history. |
@@ -71,7 +74,7 @@ actually asked; do not run all of them.
 
 In arc the diff mode is also wired into the verification gate as the
 `testQuality` check (`.claude/verify/checks/check-test-quality.ts`), so
-`pre-pr` / `pre-merge` carry it automatically.
+`pre-pr` carries it on every PR (and `pre-merge` also lists it, but pre-merge is not part of the PR loop — read the pre-pr row).
 
 ## The five ways a suite fails
 

@@ -25,7 +25,9 @@
  *                          scenario names that leftover (#6239) instead of
  *                          looking like a blank "no cache".
  *   --retry-failed         explicitly retry a cached FAIL/TIMEOUT full gate
- *   --only a,b,c           run only these check ids (unknown id → hard error)
+ *   --no-carry-forward     run the checks even when `ScenarioConfig.carryForward`
+ *                          would re-issue an ancestor's PASS (see carry-forward.ts)
+ *   --only a,b,c          run only these check ids (unknown id → hard error)
  *   --skip x,y             run all but these check ids
  *
  * Coverage is part of the record, not just identity (#5067 / #6399): every cached
@@ -50,6 +52,13 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  type CarryDeltaFile,
+  type CarryJudge,
+  carryForwardNotice,
+  parseNameStatusZ,
+  planCarryForward,
+} from "./carry-forward.ts";
 import {
   type CommentArgs,
   deliverComment,
@@ -224,6 +233,25 @@ export interface ScenarioConfig {
    * #6239). Omit it and the scenario behaves exactly as before.
    */
   equivalentEvidenceFrom?: readonly string[];
+  /**
+   * Evidence carry-forward (see `./carry-forward.ts`). When set together with
+   * {@link carryForwardChecks}, a full, clean, unscoped run first looks for the
+   * nearest ancestor of HEAD (past the resolved base) that has ANY record for
+   * this scenario at the same resolved base — in any location slot, any result.
+   * If that nearest record is a full PASS (with matching capabilities, no env
+   * gap, that executed every carried check) and this judge accepts every file
+   * changed since then, the checks named in `carryForwardChecks` are NOT
+   * executed: each renders as a PASS row carried from that ancestor. EVERY
+   * OTHER CHECK STILL RUNS on HEAD, so a cheap check that reads the changed
+   * file (a whole-corpus lint, a metadata scan) judges it for real.
+   *
+   * The judge is the repo's statement of which files the CARRIED checks cannot
+   * observe; returning a string refuses and says why. `--no-carry-forward`
+   * forces every check to run. Omit either field and nothing is carried.
+   */
+  carryForward?: CarryJudge;
+  /** The check ids carry-forward may carry (see {@link carryForward}). */
+  carryForwardChecks?: readonly string[];
 }
 
 /**
@@ -886,6 +914,8 @@ interface SharedEvidence extends EvidenceCoverage {
   priorResult?: VerifyResult;
   priorFailureClass?: FailureClass;
   retryHistory?: RetryAttempt[];
+  /** donor sha when this record was carried forward (disclosure, never keyed). */
+  carriedFrom?: string;
   sourceHead: string;
   sourceClean: true;
   completedAt: string;
@@ -1068,6 +1098,11 @@ export interface CachedEvidence {
    * local cache; never keyed. Absent on a same-scenario record.
    */
   equivalentFrom?: string;
+  /**
+   * Set when this record was re-issued from an ancestor commit's PASS by
+   * `ScenarioConfig.carryForward`: the donor sha. Disclosure, never keyed.
+   */
+  carriedFrom?: string;
 }
 
 /** An unscoped run whose selected checks all executed (NA: empty executed set). */
@@ -2093,6 +2128,8 @@ function writeLocalCache(
       // Inherited from another scenario's record (`equivalentEvidenceFrom`)?
       // Disclosure only; `undefined` drops out on a same-scenario record.
       equivalentFrom: cached.equivalentFrom,
+      // Re-issued from an ancestor's PASS (`carryForward`)? Disclosure only.
+      carriedFrom: cached.carriedFrom,
     })}\n`,
   );
 }
@@ -2150,6 +2187,10 @@ function readLocalCache(
       priorFailureClass: parseFailureClass(metadata.priorFailureClass),
       retryHistory: parseRetryHistory(metadata.retryHistory),
       equivalentFrom: typeof inherited === "string" ? inherited : undefined,
+      carriedFrom:
+        typeof (metadata as { carriedFrom?: unknown }).carriedFrom === "string"
+          ? (metadata as { carriedFrom: string }).carriedFrom
+          : undefined,
     };
   } catch {
     return undefined;
@@ -2395,6 +2436,7 @@ function publishSharedEvidence(lease: ScenarioLease | undefined, cached: CachedE
     priorResult: cached.priorResult,
     priorFailureClass: cached.priorFailureClass,
     retryHistory: cached.retryHistory ?? [],
+    carriedFrom: cached.carriedFrom,
     sourceHead: sha,
     sourceClean: true,
     completedAt: new Date().toISOString(),
@@ -2761,12 +2803,166 @@ function evidenceEquivalence(
  * single entrypoint a repo's thin scenario script (e.g. `.claude/verify/pre-pr.ts`)
  * calls: `runScenario(config, process.argv)`.
  */
+/** How far back carry-forward looks for a donor. A branch is rarely longer. */
+const CARRY_FORWARD_MAX_ANCESTORS = 50;
+
+/**
+ * Every published record for (sha, scenario, base), from EVERY location slot,
+ * of ANY result and ANY capability vector. The donor choice must see a newer
+ * red wherever it was produced: `findReusableSharedEvidence` filters sibling
+ * slots to PASS/NA (right for reuse, wrong here — it made a newer FAIL in
+ * another worktree invisible, so an older PASS carried past it; review P2 on
+ * #7065).
+ */
+function everySharedRecord(
+  coordination: string,
+  sha: string,
+  scenario: string,
+  base: string,
+): { result: string; fullScenario: boolean; capabilities: CapabilitySet | undefined }[] {
+  const byLocation = resolve(coordination, "by-location");
+  let slots: string[];
+  try {
+    slots = readdirSync(byLocation);
+  } catch {
+    return [];
+  }
+  const found: {
+    result: string;
+    fullScenario: boolean;
+    capabilities: CapabilitySet | undefined;
+  }[] = [];
+  for (const slot of slots) {
+    try {
+      const m = JSON.parse(
+        readFileSync(`${byLocation}/${slot}/metadata.json`, "utf8"),
+      ) as Partial<SharedEvidence>;
+      if (m.schemaVersion !== EVIDENCE_SCHEMA_VERSION) continue;
+      if (m.sha !== sha || m.scenario !== scenario || m.base !== base) continue;
+      if (typeof m.result !== "string") continue;
+      found.push({
+        result: m.result,
+        fullScenario: m.fullScenario === true,
+        capabilities: parseCapabilities(m.capabilities),
+      });
+    } catch {
+      // Half-written slot: not a record. (A red that exists but cannot be
+      // read is indistinguishable from none; the local record still counts.)
+    }
+  }
+  return found;
+}
+
+/** A decided carry: which ancestor, what changed, and whether it may travel. */
+interface CarryDecision {
+  donor: string;
+  files: CarryDeltaFile[];
+  /** false when the donor PASS exists only in this host's local cache */
+  publishable: boolean;
+}
+
+/**
+ * Find a donor for HEAD and ask the repo's judge about the delta. Pure
+ * planning lives in `planCarryForward`; this is the git + evidence wiring.
+ */
+function tryCarryForward(
+  config: ScenarioConfig,
+  judge: CarryJudge,
+  carried: readonly string[],
+  sha: string,
+  base: string,
+  here: EvidenceLocation,
+  capabilities: CapabilitySet,
+): ({ kind: "carry" } & CarryDecision) | { kind: "refused"; reason: string } | { kind: "none" } {
+  const revs = run(
+    `git rev-list --max-count=${CARRY_FORWARD_MAX_ANCESTORS + 1} HEAD ^${base} 2>/dev/null`,
+  );
+  if (revs.code !== 0)
+    return {
+      kind: "refused",
+      reason: `could not list ancestors of HEAD past ${base.slice(0, 12)}`,
+    };
+  const ancestors = revs.out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && l !== sha);
+  const root = sharedRoot();
+  const verdicts = new Map<string, { publishable: boolean; refusal?: string }>();
+  const recordFor = (donor: string) => {
+    const shared = root
+      ? everySharedRecord(
+          sharedDir(root, donor, config.scenario, base),
+          donor,
+          config.scenario,
+          base,
+        )
+      : [];
+    const local = readLocalCache(donor, config.scenario, base, here, capabilities);
+    if (shared.length === 0 && !local) return undefined;
+    // The nearest record decides, and ANY red among its copies is its answer.
+    const red =
+      shared.find((r) => r.result !== "PASS" || !r.fullScenario) ??
+      (local && (local.result !== "PASS" || !local.coverage.fullScenario)
+        ? { result: local.result, fullScenario: local.coverage.fullScenario }
+        : undefined);
+    if (red) return { result: red.result, fullScenario: red.fullScenario };
+    // Every copy is a full PASS. Carry needs one produced under THIS host's
+    // capability vector — the shared one first (publishable), else local.
+    const sharedHere = root
+      ? findReusableSharedEvidence(
+          sharedDir(root, donor, config.scenario, base),
+          donor,
+          config.scenario,
+          base,
+          here,
+          capabilities,
+        )?.cached
+      : undefined;
+    const usable = sharedHere ?? local;
+    if (!usable || usable.equivalentFrom) {
+      verdicts.set(donor, {
+        publishable: false,
+        refusal: `the PASS at ${donor.slice(0, 12)} was produced under a different capability vector (or inherited from another scenario)`,
+      });
+    } else if (usable.envGaps.length > 0) {
+      verdicts.set(donor, {
+        publishable: false,
+        refusal: `donor ${donor.slice(0, 12)} reported environment gap(s) (${usable.envGaps.join(", ")})`,
+      });
+    } else if (!carried.every((id) => usable.coverage.checks.includes(id))) {
+      verdicts.set(donor, {
+        publishable: false,
+        refusal: `donor ${donor.slice(0, 12)} did not execute every carried check (${carried.join(", ")})`,
+      });
+    } else {
+      verdicts.set(donor, { publishable: sharedHere !== undefined });
+    }
+    return { result: "PASS", fullScenario: true };
+  };
+  const plan = planCarryForward({
+    ancestors,
+    recordFor,
+    deltaFor: (donor) => {
+      const d = run(`git diff --name-status -z --no-renames ${donor} HEAD 2>/dev/null`);
+      return d.code === 0 ? parseNameStatusZ(d.out) : undefined;
+    },
+    judge: (delta) => verdicts.get(delta.donor)?.refusal ?? judge(delta),
+  });
+  if (plan.kind !== "carry") return plan;
+  return {
+    kind: "carry",
+    donor: plan.donor,
+    files: plan.files,
+    publishable: verdicts.get(plan.donor)?.publishable === true,
+  };
+}
+
 export function runScenario(config: ScenarioConfig, argv: string[]): never {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(
       [
         `Usage: ${config.scenario} [--json] [--comment [<pr#>]] [--comment-dry-run]`,
-        "       [--na <reason>] [--deliver-cached] [--retry-failed] [--only a,b] [--skip x,y]",
+        "       [--na <reason>] [--deliver-cached] [--retry-failed] [--no-carry-forward] [--only a,b] [--skip x,y]",
       ].join("\n"),
     );
     process.exit(0);
@@ -3130,6 +3326,40 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
     if (!lease) process.exit(3);
   }
 
+  // Evidence carry-forward (./carry-forward.ts). Only for a full, clean,
+  // unscoped, non-retry run of a scenario whose repo supplied a judge AND the
+  // list of checks it may carry. Deciding here does not end the run: every
+  // other check still executes below; the carried ones render a carried row.
+  let carry: CarryDecision | undefined;
+  const carriedIds = new Set(config.carryForwardChecks ?? []);
+  if (
+    config.carryForward &&
+    carriedIds.size > 0 &&
+    unscoped &&
+    cleanAtAdmission &&
+    !retryFailed &&
+    !argv.includes("--no-carry-forward")
+  ) {
+    const decided = tryCarryForward(
+      config,
+      config.carryForward,
+      [...carriedIds],
+      shaForBroker,
+      baseForBroker,
+      here,
+      declaredCapabilities,
+    );
+    if (decided.kind === "refused") {
+      console.error(`ℹ evidence carry-forward declined: ${decided.reason}`);
+    } else if (decided.kind === "carry") {
+      carry = decided;
+      console.error(
+        `ℹ carrying ${[...carriedIds].join(", ")} forward from ${decided.donor.slice(0, 9)} ` +
+          `(${decided.files.length} file(s) changed, all accepted by the repo's judge); every other check runs.`,
+      );
+    }
+  }
+
   const base = baseForBroker;
   const sha = head();
   const changedFiles = run(`git diff --name-only ${base}..HEAD 2>/dev/null`).out;
@@ -3181,6 +3411,28 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
         logPath,
       });
       console.error(`ℹ fail-fast: skipping ${c.id}`);
+      continue;
+    }
+    // Carried (./carry-forward.ts): the donor's PASS for this check stands for
+    // HEAD. A carried row from a host-local donor is `reusable: false`, so the
+    // run's own publish rule (#6420) keeps it off the shared store.
+    if (carry && carriedIds.has(c.id)) {
+      const donor = carry.donor;
+      results.push(
+        persistCheckLog(sha, {
+          check: c.id,
+          title: `${c.title ?? c.id} ⏩ carried from ${donor.slice(0, 9)}`,
+          pass: true,
+          blocking: c.blocking ?? true,
+          durationMs: 0,
+          stats: { carriedFrom: donor.slice(0, 12) },
+          ...(carry.publishable ? {} : { reusable: false }),
+          rawTail:
+            `not executed: ${donor.slice(0, 12)} PASSED this check and every file changed since ` +
+            "then was accepted by the repo's carry-forward judge (see the notice above).",
+        }),
+      );
+      executed.push(c.id);
       continue;
     }
     // Guarded, not bare: a check that throws must yield a check-level UNKNOWN
@@ -3274,8 +3526,17 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
   const undeclared = undeclaredEnvGapNotice(undeclaredGaps);
   if (undeclared) console.error(undeclared);
   const retryNotice = retryTrail ? renderRetryHistoryNotice(retryTrail) : undefined;
+  const carryNotice = carry
+    ? carryForwardNotice({
+        scenario: config.scenario,
+        sha,
+        donor: carry.donor,
+        files: carry.files,
+        carried: [...carriedIds].filter((id) => executed.includes(id)),
+      }).trimEnd()
+    : undefined;
   const notice =
-    [partialNotice, envDrift, undeclared, elsewhere, retryNotice, attribution.notice]
+    [carryNotice, partialNotice, envDrift, undeclared, elsewhere, retryNotice, attribution.notice]
       .filter(Boolean)
       .join("\n\n") || undefined;
   const report = renderReport(results, {
@@ -3334,6 +3595,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       failureClass,
       checkFailures,
       ...trail,
+      ...(carry ? { carriedFrom: carry.donor } : {}),
     });
   }
   // A shared record is only committed for an unscoped, clean checkout.  A
@@ -3384,6 +3646,7 @@ export function runScenario(config: ScenarioConfig, argv: string[]): never {
       failureClass,
       checkFailures,
       ...trail,
+      ...(carry ? { carriedFrom: carry.donor } : {}),
     });
   }
 

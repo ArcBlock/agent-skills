@@ -61,10 +61,11 @@ describe("--na static-reader conformance against arc's tracked corpus", () => {
       "providers/basic/index/test/arch-qa-corpus-query.test.ts",
     ],
     // #5806 turned the root contributor guide into a tested artifact: the
-    // stash-pop guard asserts CLAUDE.md still carries the corrected wording, so
+    // stash-pop guard asserts it still carries the corrected wording, so
     // rewording that paragraph alone reds a test. Same shape as the two doc
     // sentinels above — a prose-only PR to it is not exempt from the gate.
-    ["CLAUDE.md", "scripts/test/stash-pop-policy.test.ts"],
+    // #7026 moved the body to AGENTS.md (CLAUDE.md is a symlink to it).
+    ["AGENTS.md", "scripts/test/stash-pop-policy.test.ts"],
   ])(
     "MUST refuse %s via its actionable reader",
     (path, expectedReader) => {

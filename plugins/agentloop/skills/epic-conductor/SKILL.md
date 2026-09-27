@@ -1,28 +1,17 @@
 ---
 name: epic-conductor
 description: >-
-  Attended multi-agent implementation of a WHOLE epic. One resident conductor
-  decomposes an epic into dependency-ordered sub-issues, fans out an isolated
-  worker per sub-issue (implement, verify, open PR), spawns an independent
-  clean-context reviewer per PR, routes review and bot findings to a fixer,
-  then gates and merges each PR and unlocks the next wave. Bot review (Codex +
-  Cursor Bugbot) is short-wait (≤10m): findings or 👍 or silence-then-advance —
-  never multi-hour stall. Every actionable inline review has an in-thread resolution;
-  P1/High are fixed or REJECT-replied before merge; every
-  fix re-stamps SHA-matched gates before merge. Human stays for high-level
-  forks only (safe-default ratchet). Distinct
-  from issue-sweep and pr-sweep (unattended batch over existing items) and
-  build-phases (single agent phases of one issue). Use when implementing a whole
-  epic end-to-end with a reachable human. Composes pr-review, verification, and
-  the repo merge gate.
+  Attended end-to-end implementation of a whole epic: decompose into sub-issues, one isolated
+  worker each, independent review before the gate, one batched fix, one gate (≤2 heavy at once),
+  bot-clean once, merge-gate, merge, next wave. Use to build an epic with a reachable human.
 allowed-tools: Agent, Bash, Read, Grep, Glob, Edit, Write, Task, AskUserQuestion, Skill
 ---
 
 # epic-conductor — drive a whole epic to merged, autonomously
 
-> **Repo profile — read `.claude/repo-profile.md` first.** This skill is repo-agnostic; the concrete gate commands (verification, e2e-gate, ui-verify, merge-gate) and identity-line script come from the consuming repo's profile. Where this doc names arc paths (`.claude/verify/pre-pr.ts`, `merge-gate.ts`, `scripts/agent-identity.sh`, `scripts/gh-upload-media.sh`) they are EXAMPLES — substitute the repo's own.
+> **Repo profile — read `.claude/repo-profile.md` first.** Gate commands (`verification_entry`, `merge_gate_entry`, `additional_merge_gates`) and the identity script come from that profile. Arc paths below are examples.
 
-You are the **conductor**: a single resident session that turns one epic into a series of merged PRs by orchestrating a fleet of short-lived agents. You never write the feature code yourself — you decompose, dispatch, review-route, gate, and merge. You stay alive across the entire epic.
+You are the **conductor**. You decompose, dispatch, review-route, gate, and merge. You do not write the feature code. You stay for the whole epic.
 
 Hired factory/worker children still `status=running` (pid alive) make it **forbidden** to `end_turn` / close the session. Allowed: true closeout after each hire has GitHub evidence (PR URL or skip-comment) **or** the child was explicitly `stop`ped. Watch pid + `runs/*.json` + cwd, not `lastTurn` alone. Before treating yourself as done:
 ```bash
@@ -32,354 +21,219 @@ bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/
 ```
 Exit 0 only when none of those ids are live. Ghost `status=running` with a dead pid does not block (recover-territory). Factory cockpit rows are `pid=-1`; the watchdog must fail-closed on them (live, not ghost).
 
-That watchdog covers live **workers**. Its artifact-side twin — no PR of yours left hanging on someone else's red — is the §9 closeout gate `assert-no-blocked-prs.ts`.
+Live workers are that watchdog. A PR of yours still blocked on someone else's red is §9.
 
-## When this skill applies (and when it doesn't)
+## When this skill applies
 
-USE IT when: a human hands you an epic (or a decomposable body of multi-issue work) and wants it implemented end-to-end, and **they remain reachable** for high-level decisions ("safe default + object-if-wrong"), not per-step approval.
+USE IT when a reachable human hands you an epic (or decomposable multi-issue work) to build end-to-end. They stay reachable for high-level calls ("safe default + object-if-wrong"), not per-step approval.
 
-Do NOT use it for:
-- **A single issue / single PR** → that's a plain worker, or `build-phases` (phases of one issue).
-- **Unattended batch over existing issues/PRs** → that's `issue-sweep` / `pr-sweep`.
-- **No human reachable at all** → downgrade to the sweeps' `needs-human-confirm` discipline; this skill assumes an attended principal.
+Do NOT use it for: one issue or one PR (plain worker or `build-phases`); an unattended batch (`issue-sweep` / `pr-sweep`); no human reachable (sweeps' `needs-human-confirm`). Each sub-issue gets its own worker, reviewer, fix loop, and merge.
 
-The distinction is the point: this is the **epic factory** — decompose a NEW body of work, then give every sub-issue its own isolated worker + its own independent reviewer + its own fix loop + its own merge.
+## Neighboring skills
 
-## Relationship to the neighboring skills (compose, don't replace)
+Altitude: **design-review** (a plan; `--max-rounds 2`, skip when the human recorded the decisions) → **epic-conductor** → { plain worker | **build-phases** } → **pr-review** (the §3.5 / §4 engine). No reachable human → do not run conductor.
 
-epic-conductor does not supersede the others — it **reframes them as composable parts** at different altitudes and attendedness. Know which to reach for:
+Why each neighbour stays: Read [reference/background.md](reference/background.md).
 
-- **design-review** reviews a *plan/design document* (multi-perspective, clean-context per round) — it does not build. It is epic-conductor's **plan gate**: run it on the epic's design and your proposed decomposition (step 0/1) *before* you dispatch workers. Complementary, upstream, not replaced.
-- **build-phases** drives *one* issue as checkpointed phases in a *single* context — **no independent review between phases**. Its distinct niche survives: an **unattended** complex single issue (issue-sweep calls it), or one issue too big for a single shot yet not worth splitting into sub-issues. Inside a well-decomposed epic each sub-issue is already one-PR-sized, so a plain worker handles it and you rarely need build-phases *within* conductor — but it remains the right tool *outside* it. Where conductor's model dominates (attended + decomposable work): it inserts an independent clean-context review per unit, which build-phases' single-context phasing cannot.
-- **pr-review** reviews *one* PR — it is literally the engine conductor spawns at step 4 (`agentloop:pr-review`).
-- **issue-sweep / pr-sweep** are the *unattended batch* over *existing* issues/PRs, single runner inline. conductor is the *attended* driver of a *new* epic with per-sub-issue fan-out. If no human is reachable, don't run conductor — use the sweeps' `needs-human-confirm` discipline.
+## Load-bearing idea
 
-Altitude ladder: **design-review** (a plan) → **epic-conductor** (an epic = many sub-issues) → { plain worker | **build-phases** } (one issue) → **pr-review** (one PR).
+Independent clean-context review is the point. Enforce **the accept-path iron law**: any check that rejects bad input also has a test that admits good input.
 
-## The load-bearing idea (why it works — do not skip)
+The full argument: Read [reference/background.md](reference/background.md).
 
-**Independent, clean-context review is the whole point.** A worker that just wrote the code cannot see the class of defect that a green test suite also cannot see: the **accept/reject-same-color** bugs — a check that rejects everything (so all reject-tests pass), a path that was only ever tested with text (so a binary bug hides), a gate installed on two of three doors (so the untested door is wide open), a value that can be forged through an untested channel. A separate agent that starts from zero context, reads the diff adversarially, verifies every claim against live code, and **reproduces security findings against the code**, catches these. In practice this pattern has caught, per epic: an `exec` bypass letting any app write a user's whole space, a binary-content hash collapsing to one constant hash (forgeable signatures), a canonical-hijack via forged front-matter, a truncated scan silently deleting a subset. None had a failing test. Budget for the review; it is not optional overhead, it is the mechanism.
+## Orchestration invariants
 
-Corollary you enforce on every worker and reviewer: **the accept-path iron law** — any check that rejects bad input MUST also have a test asserting it admits good input, because "reject everything" satisfies every reject-only test.
+- **Resident, serial-inline.** React to completions. Do not nest a Workflow. No plan mode; decisions live in issue/PR comments.
+- **No `end_turn` with live hired children.** `status=running` and pid alive → stay (script above). A ghost dead pid is not live.
+- **Workers ~3; at most 2 heavy gates** on this machine. Heavy = `<verification_entry>`, `<pre_merge_entry>`, a daily run, an advisory gate, or a full suite. No slot while `load1` ≥ cores or two known gates run. `ARC_GATE_LANE` stays unset. Gates you did not start count when visible.
+- **Model.** Runtime / gates / security / data-model → opus. Docs / mechanical / small blocklet → sonnet.
+- **Worktree** (`isolation: "worktree"`). **Workers do not merge.**
 
-## Orchestration invariants (how you run)
+When scheduling a slot or picking a model, read [reference/orchestration.md](reference/orchestration.md).
 
-- **Resident + serial-inline.** You stay in one session and orchestrate by launching agents and reacting to their completion notifications. Do NOT nest a Workflow inside the conductor; drive it inline. (Unattended-ops norm: no plan mode for the epic; decisions live in issue/PR comments.)
-- **No `end_turn` with live hired children.** `status=running` and pid still alive → stay. Assert with [`assert-no-live-children.ts`](./scripts/assert-no-live-children.ts) before you treat yourself as done. True closeout after PR URL / skip-comment evidence or explicit `stop` is allowed; a ghost dead pid is not a live child.
-- **Concurrency ~3.** Local machines build under contention; 3 in-flight agents is a sane default. Cloud/remote can go higher.
-- **Model by task weight.** Runtime / gates / security / data-model → opus. Docs / mechanical / small blocklet → sonnet. State it per dispatch.
-- **Isolated worktree per worker** (`isolation: "worktree"` on the Agent call) so parallel workers never collide on files.
-- **Every worker DOES NOT MERGE.** Merging is the conductor's gated act, always.
+### Identity (work DID)
 
-### Identity (Wave 4 / #6000)
+Dispatch by **work DID**. Issue/PR numbers are a projection (`sourceUrl`), not identity. Do not start at `gh issue view`:
 
-Dispatch and report by **work DID**. GitHub issue/PR numbers are an outbound projection (`sourceUrl`), not scheduling identity.
-
-Resolve a sub-issue (executable; do not start at `gh issue view`):
 ```bash
 arc --json afs exec /.actions/query --args '{"path":"/work","where":{"field":"meta.objectId","eq":"<DID>"},"limit":8}'
 ```
-A Change Set is `workType=change-set` with `meta.head` a 40-char git sha. Merge-gate keys off that `head`. The documented command **must** carry `--cs-head` when the CS exists — dropping it and running `merge-gate.ts <PR#>` is GitHub-as-truth, forbidden:
+
+A Change Set is `workType=change-set` and `meta.head` is a 40-char sha. Merge-gate keys off that head. `merge-gate.ts <PR#>` without `--cs-head` is forbidden:
 
 ```bash
 bun .claude/verify/merge-gate.ts --cs-head <40-char-sha> <PR#>
 # --cs-head is the 40-char PR/CS head, must be current HEAD.
-# add --source-url <url> only when the CS has sourceUrl (headRefOid cross-check).
-# --data-file still requires an explicit PR#.
+# Only the merger runs this, immediately before merge-verified-pr.sh (§7) — its exit 0 writes the
+# verdict record that authorizes the merge, so it is never a "read" for reviewers.
+# --source-url only when the CS has sourceUrl. --data-file still needs an explicit PR#.
 ```
 
 ## The loop
 
-### 0. (Optional) Design hand-off — when the epic has a visual/UX surface
-If the epic ships user-facing UI, split the design BEFORE decomposing:
-- Hand the **display layer** to a design tool (e.g. Claude Design): give it a clean, self-contained brief — neutral/themeable shell, and **multiple concrete example datasets** so it produces genuinely different layouts per data type. Do NOT ask it to design config/settings pages that the platform's **auto-surface** can generate from a declared schema — scope those out; one source of truth.
-- The design output becomes the **visual basis** for the display sub-issue. Read it (via the design MCP / artifact) and pass the real design reference into that worker's brief.
+### 0. Design hand-off (UI only)
+
+User-facing UI: design the display layer first (self-contained brief, several datasets; never auto-surface config pages) and pass that reference into the worker brief.
+
+Detail: Read [reference/loop-detail.md](reference/loop-detail.md).
 
 ### 1. Decompose
-Break the epic into **dependency-ordered, PR-sized sub-issues**, grouped into **waves** (a wave = issues with no unmet dependency, runnable in parallel). Open a GitHub issue per sub-issue. Each issue body MUST carry: the spec, **acceptance criteria written to the accept-path iron law**, the discipline constraints it must respect (the repo's architecture rules), concrete file pointers, its dependencies, and an explicit "this is one PR; do not merge."
 
-Before dispatching, gate the plan: run **`agentloop:design-review`** on the epic's design and your proposed decomposition to settle it clean-context (especially if step 0's design hand-off happened). Decompose only what survives that review.
+**Dependency-ordered, PR-sized sub-issues**, in waves. Open a GitHub issue per sub-issue. Body: spec, acceptance criteria to the accept-path iron law, architecture constraints, file pointers, dependencies, "one PR; do not merge."
 
-Record scope decisions on the epic as a pinned comment: what's in this build wave, what's deferred and why (e.g. gated on an unbuilt primitive), what's handled by an existing mechanism (don't rebuild). Use the **safe-default ratchet**: for any choice you can make safely, decide it and note "proceeding with X, object if wrong." Reserve the human for genuine forks only (irreversible, security, undecidable A-vs-B, aesthetic, resource-level). **Never package decomposable work as a decision menu** — if the "options" are not mutually exclusive, they're a dependency order, not a question.
+Human already recorded the design decisions → skip design-review and say so. Otherwise **`agentloop:design-review <path> --max-rounds 2`** before dispatch. Decompose only what survives.
 
-### 2. Group + fence off (prevent fleet collisions, keep epics untangled)
-This repo may have `issue-sweep`/`pr-sweep` cron runners that will otherwise grab your issues and open duplicate PRs — and once this mechanism exists you'll run *several* epics whose issues/PRs must not tangle. Two standing labels do both jobs (the load-bearing fix; the old advisory `agent:processing` lock is racy — add-then-check, 30min TTL — and has really collided, e.g. a fleet runner opening a duplicate PR seconds before the lock landed):
+Pinned scope comment: this wave / deferred and why / already handled. **Safe-default ratchet** — "proceeding with X, object if wrong." Human only for a real fork. **Never package decomposable work as a decision menu.**
 
-- **`epic-managed`** (standing, epic-agnostic) — the **fleet-exclusion key**. Apply it to the epic + every sub-issue + every PR your pipeline opens, the moment each exists. `issue-sweep`/`pr-sweep` skip anything carrying it ENTIRELY (not triaged, not claimed, not reviewed, not commented) — the conductor is the sole driver. One rule covers all epics, present and future. This is stronger than `agent:hold` (which only freezes *terminal* actions but still responds to human comments): `epic-managed` means "another agent owns this end-to-end."
-- **`epic:<epic#>`** (per-epic) — the **grouping/filter key**. Apply to the epic + every sub-issue + PR. `gh issue list --label "epic:<n>"` / `gh pr list --label "epic:<n>"` pulls exactly one epic's items — so multiple concurrent epics stay cleanly separable.
-- Create both labels up front (`gh label create`). Optionally also open a **milestone** per epic and assign the sub-issues to it — purely for the GitHub UI's native progress bar (X/Y closed); the machine mechanism is the labels, not the milestone.
-- Keep `agent:hold` on each opened PR too as belt-and-suspenders (and as the human-facing "reserved" signal), and remove it at merge time — but `epic-managed` is the primary fence. `agent:processing` becomes optional (only meaningful if two *conductors* could run the same repo); the standing exclusion, not the TTL lock, is what keeps the fleet out.
-- Keep the label list / epic number in a file a small background refresher reads; the refresher re-asserts labels periodically and exits when you clear the list at closeout. At closeout, remove `epic-managed` (and `agent:hold`) as each item reaches terminal state; the `epic:<n>` label stays as a permanent grouping record.
+### 2. Fence off
 
-### 3. Dispatch a worker per ready sub-issue
-Launch an Agent (isolated worktree, model by weight) with a precise brief. Every worker brief MUST include:
-- **Spec = the work DID** (`arc --json afs read /work/<id>.json` + `/work` query). GitHub `gh issue view <n> --comments` is the projection alias **after** a `/work` miss (or to read human comments on `sourceUrl`). Plus the epic's scope-decision comment.
-- **Invariants**: strict TDD; the repo's I/O / architecture rules; reuse existing primitives (name them + their files) rather than re-inventing; no new error classes unless the repo lacks one; the accept-path iron law.
-- **Verify before push**: run the repo's verification gate to PASS; never `--no-verify`; never skip.
-- **Open a PR, DO NOT merge — and label it atomically at create time** (Codex P1 on arc#3558: the window between `gh pr create` and the conductor learning the PR# is when hourly `pr-sweep` can still grab an unlabeled PR). PR title = Conventional Commits; body starts with the repo's identity line (`scripts/agent-identity.sh …`), then summary / design decisions / acceptance evidence / `Closes #<n>` / the repo's footer. **Create command MUST carry all three labels in one shot** (do not open bare then label later as the primary path):
+On create: **`epic-managed`** (sweeps skip it) and **`epic:<epic#>`** on the epic, every sub-issue, and every PR. `agent:hold` until merge. Refresher re-asserts until you clear the lock list. Drop both labels at terminal state; `epic:<n>` stays.
+
+Why labels beat the TTL lock: Read [reference/loop-detail.md](reference/loop-detail.md).
+
+### 3. Dispatch one worker per ready sub-issue
+
+Isolated worktree, model by weight. Every brief:
+- **Spec = the work DID** (`arc --json afs read /work/<id>.json` and the `/work` query). `gh issue view` only after a `/work` miss, or for human comments on `sourceUrl`. Include the scope comment.
+- **Invariants**: strict TDD; repo I/O and architecture rules; reuse named primitives; no new error class; the accept-path iron law.
+- **Order: implement → review → one batch → ONE gate → open the PR** (§3.5). Targeted tests while implementing. Full gate only after findings are fixed and you release a slot. It must PASS before push; never `--no-verify`.
+- **Timeout (raise-only)**: `TIMEOUT` and `failed=0` → re-run once (`ARC_VERIFY_TEST_TIMEOUT_MS` on arc) and record the value. `failed>0` → fix or `--blocked-by` (§8). Never raise a timeout to force green.
+- **Open the PR; do not merge; labels at create** (a bare PR can be grabbed by `pr-sweep`). Conventional Commits title. Body: identity line, summary, acceptance evidence, `Closes #<n>`.
   ```bash
   gh pr create ... \
     --label epic-managed \
     --label "epic:<epic#>" \
     --label agent:hold
   ```
-  If create without labels somehow happens (tooling gap), the **first** action after create is `gh pr edit <PR#> --add-label epic-managed --add-label "epic:<epic#>" --add-label agent:hold` before any long verify wait.
-- **Post the verification report** to the PR (`… --comment <PR#>` or equivalent).
-- **Bot review self-handling is NON-BLOCKING** (see §6). The worker brief MUST require: reply **in-thread** (not a new top-level comment); after any fix commit, re-run verification `--comment` **and** every SHA-matched sticky this diff needs (e2e-gate / ui-verify); do not merge.
-- **Report back**: work DID, Change Set `head` (40-char), projection PR#/URL if `sourceUrl` exists, decisions made, gate results, bot P1/High status (fixed sha / REJECT thread / OPEN), deviations/concerns — raw facts, no marketing. GH PR# is projection, not identity.
-When a worker returns, the conductor **re-asserts** `agent:hold` + `epic-managed` + `epic:<n>` (idempotent) — that is a safety net, **not** the first time those labels appear.
-
-### 3.5 Pre-PR adversarial review (left-shift, before `gh pr create`)
-
-Right before the worker would run `gh pr create`, dispatch a **separate clean-context agent**
-(never the worker itself — same-session self-review does not count, mirrors §4's rule) to review
-`merge-base..HEAD` on the worker's own branch/worktree. This is finding-shaped, not the merge
-contract:
-
-- **In scope**: correctness bugs, security holes, missing tests, regressions in the diff.
-- **Out of scope — this is not a second `pr-review`.** Do not run `pre-merge`, do not emit a
-  MERGE/COMMENT/BLOCK verdict, do not post a `<!-- pr-review-verdict -->` comment, do not check
-  cross-PR conflicts or bot status. §4's independent `agentloop:pr-review` after the PR opens is
-  still mandatory — this step never substitutes for it.
-- **Findings** → filter through [`compact-findings.ts`](./scripts/compact-findings.ts) (same
-  tool as §5), then the **original worker**, same worktree, fixes and re-runs verification —
-  only then `gh pr create`.
-- **Zero findings** → `gh pr create` proceeds immediately; do not wait longer "just in case".
-- **Worker report must state one of**: the reviewer agent id + what it fixed, or explicitly
-  "pre-PR review: zero findings". Missing this line means step 3 is not done.
-- No roborev-style daemon, no post-commit hook, no polling GitHub for this — one in-session
-  agent round-trip on a branch range, not a running service.
-
-### 4. Independent review per PR
-
-Two paths, chosen by what the PR touches. Do not open a panel for every PR just for
-symmetry — the cost only buys something on the face where a single reviewer's
-single-lens read is the known failure mode (§0's load-bearing idea: an *accept/reject-same-color*
-defect a green suite also can't see).
-
-**Determine the PR's class first** — diff hits repo-profile's **Backend Face Paths**
-(`.claude/repo-profile.md`), or touches auth/authz, an exec-gate, secrets/vault,
-a sandbox boundary, or payment/billing:
-
-- **No** → **A. Normal PR.** Spawn one **separate, clean-context** reviewer agent (never the
-  worker) that runs `agentloop:pr-review <PR#> --post`. In its brief, point it at the exact
-  things to scrutinize hardest for THIS PR (the security boundary, the forge channel, the
-  accept-path coverage, the reuse claims), and for security-relevant PRs tell it to
-  **reproduce the exploit against the code**, not just read it. It emits a verdict (MERGE /
-  COMMENT / BLOCK / …) and posts one verdict comment. **This is the common path — docs,
-  test-only, mechanical, and anything that doesn't hit the face above stays single-reviewer.**
-
-- **Yes** → **B. Security / data-plane PR.** Fan out **at least two** independent
-  clean-context reviewers, each a distinct named role, then synthesize:
-
-  | Role | Reads | Does not need to |
-  |---|---|---|
-  | `correctness` | Behavior, regressions, missing tests, cross-cutting effects | Re-run the full merge-gate read (§7 still does that) |
-  | `security` | Authz, injection, path traversal, forged channels; **reproduce any claimed security property against the code (accept-path + exploit attempt), not just read it** | Write the MERGE/COMMENT/BLOCK vocabulary — its output is an input to synthesis, not a second verdict |
-
-  A member never posts `<!-- pr-review-verdict -->` itself — only the synthesis step does.
-
-  **Synthesis** (one agent; the rules below apply in order):
-  1. **Neither role has a blocking finding** → synthesize `MERGE` (or `COMMENT` with
-     non-blocking notes). This does not replace §7's gate — the repo's `pre-merge`
-     verification, e2e-gate, and ui-verify still *apply* exactly as for a normal PR. Reviewer /
-     fixer / conductor obtain the verification fact by **invoking the entrypoint**, never by
-     reading identity off a sticky by hand (the marker carries only `sha=`/`result=`). The
-     entrypoint decides whether to reuse: a same-scenario PASS at `{HEAD SHA, resolved base,
-     capabilities}` (own or sibling location), or — where the repo declares it — an
-     equivalent scenario's covering PASS (arc: pre-pr's full PASS stands in for pre-merge when
-     merge-base == `origin/main` tip; the report header says `♻️ Equivalent evidence`). A hit
-     costs nothing and skips the gate lane. Independent code review of the diff stays. That
-     efficiency never substitutes for the independent code-review roles.
-  2. **Only one role produced findings** → pass them through directly as the verdict basis;
-     do not spend an agent on synthesis just for symmetry.
-  3. **Both roles have findings** → read-only merge: dedupe, order by severity, keep every
-     `path:line`. Run the pile through
-     [`compact-findings.ts`](./scripts/compact-findings.ts) (same tool §5 uses) before
-     handing it to a fixer.
-  4. **Synthesis never edits files and never pushes** — it is read-only, exactly like the
-     members it merges.
-  5. **Any round that errors, or a reviewer that fails to return, is uncertain — uncertain
-     stays a finding, never a pass.** A crashed/timed-out reviewer never synthesizes to
-     `MERGE` — see the anti-pattern in §0 (a reviewer that silently accepts everything is
-     indistinguishable, on green output, from one that works).
-  6. Panel roles and the security-face trigger above are defined here (and in
-     repo-profile's Backend Face Paths) — **not** configurable from the PR's own branch;
-     a feature diff must not be able to change who reviews it.
-
-  The synthesized result still posts as **one** canonical `<!-- pr-review-verdict -->`
-  comment, upserted exactly as a single-reviewer verdict would be (§4A's convention,
-  [`pr-review`](../pr-review/SKILL.md)'s marker) — members' output is working material, never
-  a second canonical verdict.
-
-  **Round cap per PR: 3.** A round is one re-verification at a new head SHA that refreshed
-  the verdict — whatever produced the findings (panel, bot, a red gate, a human comment).
-  Read the count, never remember it:
-
+  If labels were omitted, `gh pr edit <PR#> --add-label epic-managed --add-label "epic:<epic#>" --add-label agent:hold` before any long wait.
+- Post `<verification_entry> --comment <PR#>` right after `gh pr create` (same-SHA reuse; runs no checks).
+- **Record the Change Set** right after `gh pr create`, and again after **every push** (fixes included):
   ```bash
-  bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/pr-review-round.ts" --pr <n>   # completed rounds
+  bash <plugin_root>/scripts/record-change-set.sh --entry "<change_set_record_entry>" --work <member work DID> --pr <PR URL>
   ```
+  `--work` is the **member** DID, never the epic. Same head is a replay, not a new round. A non-zero exit means it is NOT on the ledger: stop (no `|| true`).
+- **Bots are not waited on** (§6). One push and one `<verification_entry> --comment <PR#>` per batch; record the new head (`record-change-set.sh`). Do not merge.
+- **Report**: work DID, CS `head`, PR URL if any, decisions, gate result, bot P1/High. Facts only. On return, re-assert `agent:hold` + `epic-managed` + `epic:<n>`.
 
-  `0`–`2` → another round is allowed. `3` or more → **no fourth round**: collapse the finding
-  into the current fix, file it as a separate issue, REJECT it with reasoning, or fail the PR
-  (stop at "open, unmerged" and hand it back). The third round's fix must be single-point /
-  mechanical — otherwise fail rather than review again. A non-zero exit means the count is
-  unknown; stop, do not read it as round 0.
+When writing the brief, the PR body, or a Change Set N/A, read [reference/dispatch.md](reference/dispatch.md).
 
-  Why a count and not judgement: a complex enough diff can always yield one more finding, so
-  "one more round and it's clean" reads true at every round. The cap is what separates "this
-  PR is not good enough" from "we are polishing forever" — they look identical per round.
+### 3.5 Independent review BEFORE the first gate run (round 1)
 
-### 5. Route findings to a fixer
-**Compact first — mandatory, no exceptions.** Before a fixer is dispatched, run the raw pile
-(independent-review findings + bot P1/High + any still-open inline comments) through
-[`compact-findings.ts`](./scripts/compact-findings.ts):
+Review first, gate once. A gate before review is wasted: a real finding changes the SHA.
+
+| # | Who | Step |
+|---|---|---|
+| 1 | worker | Strict TDD; targeted tests only. No full gate. |
+| 2 | separate clean-context reviewer (not the worker) | `merge-base..HEAD`, class from §4. It **never runs a gate**. |
+| 3 | worker | `compact-findings.ts`, then every still-valid finding in **one batch**. |
+| 4 | worker, after a slot | `<verification_entry>` once, to PASS. |
+| 5 | worker | Push, `gh pr create` (labels, §3), `<verification_entry> --comment <PR#>`, then `record-change-set.sh` for the pushed head. |
+| 6 | conductor | Post round 1 (`post-verdict.ts`, `sha` = reviewed pre-fix sha, not the PR head). Stay `COMMENT` until the verification fact you **read** and the `bot-clean.ts` line (`botFindings=` / `vendorsSeen=`) are on it. Never `MERGE` before that. |
+
+Zero findings → step 4 now. Report the reviewer and the fix, or "pre-PR review: zero findings". Re-review the delta only if substantive or security-relevant (always for §4B); it counts toward the cap. A mechanical batch must read `stale` from `compact-findings.ts`. No daemon or poll.
+
+When posting round 1 or re-reviewing a delta, read [reference/review.md](reference/review.md).
+
+### 4. Review class (at §3.5, before the gate)
+
+The §3.5 reviewer is the review. No second full pass after open. Do not panel for symmetry.
+
+**Class** — Backend Face Paths, or auth/authz, an exec gate, secrets/vault, a sandbox boundary, or payment/billing:
+
+- **No:** one reviewer, `agentloop:pr-review` Steps 1–2.5. Security-relevant work must **reproduce the exploit against the code**. Docs, tests, and mechanical edits stay single-reviewer.
+- **Yes:** panel, then one synthesis. Members do not post `<!-- pr-review-verdict -->`.
+
+| Role | Reads | Does not |
+|---|---|---|
+| `correctness` | Behavior, regressions, missing tests | Run any gate |
+| `security` | Authz, injection, traversal, forged channels; reproduce the exploit or claimed security property against the code | Emit a verdict |
+
+Synthesis: neither blocking → `MERGE` or non-blocking `COMMENT` (read the sticky and `bot-clean.ts`; never run a gate, including `<merge_gate_entry>`). One role passes through. Both → dedupe, keep `path:line`, `compact-findings.ts`. Synthesis never edits files and never pushes. A crash is a finding, never a pass. The PR branch does not pick reviewers. One verdict comment.
+
+**Round cap per PR: 3.** A round is a refreshed verdict at a new head. Read it:
+
+```bash
+bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/pr-review-round.ts" --pr <n>
+```
+
+`0`–`2` → another round is allowed. `3` or more → no fourth: fold in, file an issue, REJECT, or stop unmerged. The third fix is single-point or you stop. Non-zero → count unknown; stop.
+
+Why a count: [reference/closeout-gate.md](reference/closeout-gate.md). When the class or the synthesis is unclear, read [reference/review.md](reference/review.md).
+
+### 5. Fixer
+
+**Compact first**, against current PR HEAD:
 ```bash
 bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/compact-findings.ts" <raw-findings.json>
 ```
-It judges each finding against the **current PR HEAD** (not the commit it was originally posted
-against — GitHub reassociates stale `commit_id`s onto new HEADs) and returns `still-valid` /
-`stale` / `duplicate` for every one, never a bare count. The fixer brief is
-`fixerBrief(compacted)` — **only** `still-valid` entries. A conductor that skips this step and
-hands the fixer the raw pile is not following this skill: that is exactly the failure this step
-exists to close (fixers re-fixing already-patched defects, two bots on one line producing two
-fix attempts). Compact's only permitted failure mode is under-killing — a finding it cannot
-judge (no expected-snippet to compare, or the file/line is unreadable) stays `still-valid`;
-losing a real P1 silently is strictly worse than keeping a stale one one round longer.
+`still-valid` / `stale` / `duplicate`. Brief only `still-valid`. Unjudgeable stays `still-valid`.
 
-If the verdict is BLOCK/COMMENT with real findings (or a bot left legit P1/High), route the
-**compacted, still-valid** findings to a fixer:
-- Prefer **resuming the original worker** with the consolidated findings (comment id + `path:line` + intended direction).
-- If its transcript is gone, **spawn a fixer on its existing worktree** (pass the worktree path; it inherits the branch).
-- **Conflicting bot Highs are one synthesis, not a ping-pong.** If fix A (to satisfy finding 1) *is* finding 2, do not undo A and do not ignore 2. Keep the constraint from 1 and the accept-path from 2 in **one** commit.
-- The fixer: commit on the existing branch; **reply in-thread** on every cited comment id (`gh api …/pulls/{n}/comments/{id}/replies` — never a new top-level PR comment); re-run verification `--comment` to the **new** HEAD; re-run e2e-gate / ui-verify when those stickies apply (any push makes the old SHA stale); do not merge.
-Re-review if the fix was substantial or security-relevant (a security fix deserves a second independent agent that runs the original exploit against the patched code).
+Real BLOCK/COMMENT findings, or a legit bot P1/High: resume the worker, or spawn a fixer on its worktree. Conflicting Highs are one commit, not a ping-pong.
+- The fixer: fix every still-valid finding of the round in one batch and push once; record the new head (`record-change-set.sh`, §3); run `<verification_entry> --comment <PR#>` once after a slot; reply in-thread; do not merge.
+Wording-only nits (not P1/High) ride the next real batch or defer (§6). They are not their own gate. Re-review a substantial or security fix on the delta; a security fix re-runs the exploit.
 
-### 6. Inline code-review — short-wait, address in-thread, then advance
+When compact's classes or a conflicting High need the worked rule, read [reference/fixer.md](reference/fixer.md).
 
-This is the **single home** of the pre-merge bot protocol. [`pr-sweep`](../pr-sweep/SKILL.md) Step 5 and [`pr-review`](../pr-review/SKILL.md) Step 0.4 point here. Do not fork a second wait policy.
+### 6. Inline review, once before merge
 
-**Vendors are one class** (this org; treat similarly):
-- `chatgpt-codex-connector[bot]` — P1/P2 badges, or a single **👍** = no suggestions (positive, not "still thinking")
-- `cursor[bot]` (Bugbot) — High / Medium / Low
-- any future connector that posts **inline** findings after open / ready / push
+Vendors, fallbacks, the `bot-clean.ts` table: [`reference/review-receipt-protocol.md`](../../reference/review-receipt-protocol.md). Read it the first time a PR has an inline comment or bot activity. Every run:
 
-**Severity and communication are separate:** Codex **P1** and Cursor **High** block merge until resolved. Every actionable inline comment—human or bot, P0/P1/P2, High/Medium/Low—still needs a same-thread resolution before merge. P2 / Medium / Low may be fixed, REJECTed, or deferred to a follow-up issue; they do not require a long re-review wait, but they must never be silently fixed or dropped.
+1. **No inline wait.** Check bots once before merge. One short wait (≤10 min) only when the last push is under 10 minutes old and a vendor is `running` / `incomplete` / `stale` / `absent`. Do not block the next wave.
+2. A fetch error is not "no findings" (GraphQL `reviewThreads` or `gh pr view --comments`).
+3. Every actionable inline comment gets a same-thread conclusion before merge: fixed (SHA + change + verification), REJECT, or — P2/Medium/Low only — defer with owner and re-entry. P1/High never defer. Reply in-thread, never a new top-level comment. A later reply does not close an older thread.
+4. Agree + fix joins that round's one batch: one commit, `record-change-set.sh`, one `<verification_entry> --comment <PR#>`, then the replies.
+5. After merge → [`codex-review-backlog`](../codex-review-backlog/SKILL.md). Do not reopen the wave.
 
-**Short-wait:** default **≤10 minutes** after `gh pr create` **and after every fix push** (one mid-window re-check is fine; no long poll). Use `created_at >= last_push` only to notice **new arrivals**; GitHub often reassociates old comments onto the new `commit_id`, so `commit_id == HEAD` is not "new." The final resolution inventory is all actionable threads, not a timestamp-filtered subset.
+### 7. Gate + merge
 
-**Fetch (must succeed or you have no evidence):**
-```bash
-gh api repos/{owner}/{repo}/pulls/<n>/comments --paginate
-gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate
-```
-If REST 404s / flakes, fall back to GraphQL `pullRequest { reviews, reviewThreads { comments } }` or `gh pr view <n> --comments`. **A fetch error is not "no findings."**
+All of these, in order:
 
-**Procedure (workers, fixers, and conductor all obey):**
+1. MERGE, or COMMENT with only non-blocking notes, and every actionable inline thread resolved. `MERGE (held)` while `agent:hold` is on.
+2. Merge gate exits 0: `bun .claude/verify/merge-gate.ts --cs-head <40-char-sha> <PR#>`. Doors: same-SHA verification (the PR's `<verification_entry> --comment` satisfies it; `<pre_merge_entry>` is not part of the PR loop), merge-load on current main, `additional_merge_gates`, cross-engine review only for a Factory run. Advisory gates do not block. If you pushed (a rebase or a merge of main to clear `CONFLICTING`), record that head first (`record-change-set.sh --work <member work DID>`, §3; non-zero stops). Do not drop `--cs-head`. `sha=` must equal the CS head. Stale fact → owner re-posts `<verification_entry> --comment`, never `<pre_merge_entry>`. Carry-forward is the gate's call, not yours.
+3. Every actionable thread is addressed (§6). Unfixed, unrejected P1/High blocks.
+4. The single pre-merge `bot-clean.ts` check has run on the last head. No green human GitHub review is required.
+5. `scripts/merge-verified-pr.sh` immediately after step 2. Only the merger runs this gate, immediately before merge-verified-pr.sh. The exit-0 `merge-gate.<sha>.json` for this PR and head is the authorization (same machine, same head).
 
-1. After create or a fix push, short-wait, then:
-   - **👍 / review shell with no new inline findings** → clean. Proceed to step 4 / step 7. Do **not** wait longer "just in case."
-   - **New actionable inline finding** → handle **now** (item 3). Do not open the next wave with any OPEN P1/High, and do not merge until every smaller finding has a same-thread resolution.
-   - **Silence past the short wait** → **proceed**. Do not park the epic. Pre-merge re-check still re-fetches (item 5).
-2. **Hard ban:** multi-hour `sleep`/poll; "waiting for re-review" as a status past the short wait; blocking wave *N+1* because wave *N*'s bot has not 👍'd; asking the human to wait for a bot.
-3. **On findings:**
-   - **Agree + fix** → commit on the PR branch; re-run verification `--comment` to the **new** HEAD; re-run e2e-gate / ui-verify if those stickies apply (**any push stale-dates them**); **reply in-thread** with sha + what changed. Then **one** short re-check (≤10m); if silent, proceed.
-   - **Disagree (by design / wrong layer / false positive)** → **in-thread REJECT** with reasoning + architecture pointer. Thread left open ≠ block. Record REJECT for backlog if useful.
-   - **Out of scope but real** → open a **follow-up issue**; in-thread pointer; never silently fold in; never drop.
-   - **In-thread only.** Do not open a new top-level PR comment to "address" a review thread.
-     ```bash
-     gh api -X POST repos/{owner}/{repo}/pulls/<n>/comments/<comment_id>/replies \
-       -f body="$(cat reply.md)"
-     ```
-4. **Addressed** = every actionable inline comment in the current complete inventory has a same-thread conclusion: **fixed** in a later commit + reply with full SHA, change, and verification; or **REJECT** with reasoning. Only P2/Medium/Low may instead **defer** with a follow-up issue / owner / re-entry condition; P1/High can never defer their way to merge. A top-level verdict, verification sticky, or "already pushed" is not a reply. Timestamps may optimize detection of new arrivals but never remove an older unresolved thread: replying to A or pushing a later unrelated commit cannot close B.
-5. **Pre-merge re-check (once, cheap):** re-fetch and enumerate all inline comments. Any actionable thread without its conclusion → fixer/conductor posts the required same-thread resolution; an OPEN P1/High blocks until fixed or REJECTed. Do not wait hours for a second bot pass after a valid resolution. **Bot reviews are not human `CHANGES_REQUESTED`** — pr-sweep's human Review 闸 does not apply; you own bots via this section.
-6. **Late findings after merge** → do **not** reopen the wave; [`codex-review-backlog`](../codex-review-backlog/SKILL.md) (and the same backlog for Cursor High if it lands late). Closeout may note OPEN_HARD.
+Security-face: a short risk-summary (opens / why safe / residual / revert), then drop `agent:hold`, squash-merge, delete the branch, clear the lock entry, dispatch the next wave.
 
-**Anti-patterns:**
-- Treating "no bot comment yet" after 10m as blocked.
-- Waiting hours for a second pass after you already fixed and replied.
-- Holding merge because a disagreed-by-design thread is still open.
-- A new top-level comment instead of an in-thread reply.
-- Shipping a fix that satisfies finding 1 by creating finding 2, then flipping back and forth (§5 synthesis).
+When a door or the verdict file is unclear, read [reference/gate-merge.md](reference/gate-merge.md).
 
-### 7. Gate + merge (the conductor's act)
-Merge a PR only when ALL hold, **in this order** (do not skip to squash):
+### 8. Hazards
 
-1. Independent review verdict is MERGE, or COMMENT with **only** non-blocking notes **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
-2. Repo **merge gate** exits 0 on the Change Set `head` you are about to merge (`verification` + e2e-gate + ui-verify + native, per what the diff touches — **plus a cross-engine review door that applies only when this branch has a Factory run record**, i.e. when you are running inside the Factory. Attended runs on a developer machine do not hit it, and the gate prints which of the two N/As it means). Invoke it with `--cs-head <40-char-sha> <PR#>` — `--cs-head` is the 40-char PR/CS head, must be current HEAD (PR# is the projection handle). Do **not** drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity. Every applicable sticky comment's `sha=` **must equal** that CS `head` — a fixer commit stale-dates all of them; for base-sensitive `pre-merge`, a resolved-base advance also stale-dates the evidence. **One measured exception, decided by the gate and not by you**: an e2e-gate PASS whose sha is older is CARRIED FORWARD when every file changed since is off the backend surface (a Swift-only or docs-only fixer commit cannot change what a data-plane boot observed). The gate prints `e2e-gate=PASS (carried from <sha9>; …)` when it does this; it refuses — and says which of its four fail-closed conditions tripped — otherwise. The cross-engine door carries forward too but only under the strictest form of the same rule (the two commits have an **identical tree** — an amend that rewrote only the message, a clean rebase replay); `verification` never carries, because it is diff-sensitive by construction. All three decisions are the gate's, computed from git. Do not reproduce the reasoning by hand. The verification fact comes from **invoking `<pre_merge_entry> --comment <PR#>`** — always; the entrypoint reuses a current same-scenario PASS (own or sibling location) or, where declared, an equivalent scenario's covering PASS (arc: pre-pr at the same sha when merge-base == `origin/main` tip), and re-runs only when nothing matches. It prints what it reused. Do not try to read base/scenario identity off the sticky yourself — the marker does not carry them.
-3. **Every actionable inline review thread is addressed** per §6 (fixed with SHA/change/verification or REJECTed with reasoning; only P2/Medium/Low may defer with tracking/owner/re-entry condition). Any P1/High that is not fixed or REJECTed is a hard blocker; lower severity is not a risk blocker but is still never mergeable without its in-thread conclusion.
-4. Short-wait / 👍 / silence-after-short-wait after the **last** push, per §6. You do **not** need a green human GitHub review from Codex or Cursor.
+- **Duplicate PR**: keep the better one; close the twin with a coordination comment.
+- **Transcript lost**: fixer on the existing worktree.
+- **Main moved**: rebase only for `mergeable=CONFLICTING`, a needed main feature, or a red already fixed on main (`--blocked-by` needs an open witness; build-input diffs are refused). Record the new head after the push (`record-change-set.sh`, §3). Behind main is not a reason to rebase.
+- **Out of scope**: file a follow-up. Do not fold it in.
+- **Not this PR's red**: there are exactly two ways forward. (1) Bisect to the smallest red set and fix it. (2) `--blocked-by <issue#>` on `<verification_entry> --comment <PR#>`; the gate attributes it or stays FAIL. Never re-run until green. Timeout exception: §3 only (`TIMEOUT`, `failed=0`).
+- **Bot silence** is not a gate. One `bot-clean.ts` check (§6). Late comments → `codex-review-backlog`.
+- **429 death, not a task failure**: do not re-dispatch blind. Verbatim harness text, `bump` before retry, WIP-commit. Commands: [reference/capacity-retry.md](reference/capacity-retry.md).
+- **Worktrees**: remove / prune at the end.
 
-5. The merge itself goes through `scripts/merge-verified-pr.sh`, which now **verifies step 2 actually happened** — it requires the verdict record `merge-gate.ts` writes on exit 0 — `merge-gate.<sha>.json` under `$ARC_MERGE_VERDICT_DIR`, else `<repo root>/.verify/` (both sides resolve that identically on purpose) — matching this PR and this head. So gate and merge must run on the same machine at the same head. Before this existed, "the gate ran" and "the gate was skipped" left identical traces, and five arc CLI epic PRs merged on stale or failed evidence.
+When the incident or the longer procedure is needed, read [reference/hazards.md](reference/hazards.md).
 
-For a **security-face** PR, post a short **risk-summary** comment before merging (what it opens, why it's safe, residual risk, revert path). Then: remove `agent:hold`, squash-merge (Conventional-Commit title if branch commits drifted), delete the branch, drop the issue from the lock list. Unblock dependents and dispatch the next wave.
+### 9. Closeout
 
-### 8. Hazards you WILL hit (name them so you handle, not flail)
-- **Fleet collision**: another runner opened a duplicate PR for your issue → keep the better one, dedup-close the twin with a coordination comment.
-- **Worker transcript lost**: resume fails → spawn a fixer on the existing worktree.
-- **Main moved under a branch**: rebase when `CONFLICTING` or you need main's features; resolve keeping both. **Do not rebase just to "be current"** if `mergeable=MERGEABLE` and main has **pre-existing red tests in files this PR does not touch** (`git diff origin/<default> -- <failing files>` empty) — that turns a green verification into a false FAIL. Document overlap + merge order in the PR body; squash-merge is allowed. Confirm the fail on merge-base / main before treating it as this PR's defect.
-- **Out-of-scope findings**: a reviewer/bot surfaces something real but outside this PR's scope → open a **follow-up issue**, never silently fold it in, never drop it.
-- **Flaky pre-existing test**: confirm it fails on merge-base too; don't let it block; file a flaky-test issue.
-- **Bot-review multi-hour hang**: treating Codex silence (or waiting for re-👍 after a fix) as a hard gate freezes the wave while the real gates are already green. Obey §6 short-wait; late comments → `codex-review-backlog`.
-- **A worker dies on a provider capacity limit (429), not on its task** (arc#6204): both arrive as
-  `status=failed`, so the work is dropped unless you happen to be watching. Measured twice in one
-  run — one worker had already committed its fix and died queued behind a gate; another died
-  mid-edit holding uncommitted work. Do NOT re-dispatch blindly and do NOT treat it as a task
-  outcome. Classify it, record it, retry after the reset:
-  ```bash
-  R="${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/scripts/agent-retry.ts"
-  bun "$R" record --agent <id> --target "<owner>/<repo>#<n>" --brief-file <p> --summary-file <p> [--wip <ref>]
-  bun "$R" due                                        # prints scanned=/pending=/inFlight= even when nothing is due
-  bun "$R" bump --target "<key>" --holder-pid $$      # CLAIM it, then dispatch
-  bun "$R" resolve --target "<key>"                   # after the retry lands
-  ```
-  **`--summary-file` must hold the harness's death text VERBATIM.** Do not paraphrase it, do not
-  summarise it, do not reformat it. The classifier keys on the harness's own termination notice and
-  reads the capacity error type *inside* that notice; your retelling ("worker o/r#1 died: HTTP 429
-  from the provider") is prose and lands on needs-a-human. Capture the text, write it to a file,
-  pass the file.
-  The classifier is fail-closed: an unrecognised death is NOT retryable, because auto-retrying a
-  real failure burns budget and repeats side effects. It needs BOTH an agent-termination notice and
-  a capacity error type **within that notice** — a worker reporting that the endpoint *under test*
-  answered `HTTP 429` is a task outcome, not a death, and so is a death notice about something else
-  that happens to be followed by a sentence mentioning 429. `due` always prints the scanned count —
-  an empty ledger and a full one with nothing ripe otherwise render identically, and the first means
-  the RECORDER never fired.
-  **`bump` before you dispatch, and pass `--holder-pid`.** `bump` CLAIMS the record and takes it out
-  of `due`; without that step the next poll hands you the same brief again — duplicate agents,
-  repeated PR/comment side effects, the attempt cap burned in seconds. `--holder-pid` must name the
-  process that will still be alive while the retry runs (`$$` for your own session), never the
-  `bump` invocation itself: that is what lets a crashed retry be offered again within seconds
-  instead of waiting out the 6h lease ceiling. A claim is released automatically when its holder
-  dies, and `due` prints `reclaimed=` when that happens.
-  **Preserve the partial work first.** Put every worker brief on notice: on a capacity limit, stop
-  cleanly and WIP-commit to a side branch rather than half-writing, and report the ref. Pass it as
-  `--wip`. A classifier cannot recover work an agent never left behind.
-- **Worktree cleanup**: `git worktree remove` / `prune` leftover worktrees at the end.
-
-### 9. Closeout (mandatory — the epic isn't done until this is posted)
-
-**Hard exit gate — run this BEFORE any of the wrap steps below.** You may not close out while you still own a PR that is blocked by a foreign red whose referenced issue is still open:
+**Before any wrap step**, no PR of yours may still cite an open witness:
 
 ```bash
 bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/assert-no-blocked-prs.ts" --epic <epic#>
 ```
 
-Exit 0 is required to proceed. Exit 1 = a PR you own cites a witness issue that is still open. Exit 2 = usage, or a precondition could not be checked — **fail-closed, "couldn't check" is never "clear"**, and the refusal names which precondition (`gh` / `prs` / `evidence` / `issue`) was unavailable. There is no bypass: the way past a hold is to clear the foreign red, or to merge/close the PR itself.
+Exit 0 is required. Exit 1 = witness still open. Exit 2 = unchecked — **fail-closed** (`gh` / `prs` / `evidence` / `issue`); "couldn't check" is never "clear". No bypass. Do not exit on unfinished state you created.
 
-This is the **artifact-side twin** of the `assert-no-live-children.ts` rule in *Orchestration invariants* — that one says no worker is still running, this one says no product is still hanging. One discipline: **a conductor must not exit on unfinished state it created.** Foreign-red ownership was assigned to the conductor precisely so those PRs would have an owner; a conductor that closes the epic while one still hangs hands it straight back to nobody.
+The witness is human-supplied (exists and open only). Scope is `epic:<n>` PRs. Limits: [reference/closeout-gate.md](reference/closeout-gate.md).
 
-> ⚠️ **Read the refusal, don't just obey it.** The witness issue in the attribution evidence is a **human-supplied** input: the attribution gate machine-checks only that it EXISTS and is OPEN, never that it has any causal relation to the reds — any open issue passes. So this gate's precision is capped by the witness's. Every refusal prints the witness number and the state it read for exactly that reason: if the cited issue has nothing to do with that PR's red, the evidence is wrong and the fix is to correct the attribution, not to route around the gate. The converse also holds — a closed witness releases the gate without proving the red is gone.
->
-> Two more limits, stated so they are not mistaken for coverage: **(1)** the gate's scope is the `epic:<n>` label, which you apply yourself — a blocked PR that never got labelled is invisible to it; **(2)** only the gate's own verification comments count as evidence (marker-checked), so a PR whose report was never posted reads as "no claim". Neither is detectable from inside the gate.
+- **Cohesion**: read the catch-net covering the last merge. Green → record the id. Red → link its issue. Not covered → wait; no private suite. **You never write, edit or "confirm" a catch-net verdict** or its heartbeat. No catch-net → gate the touched packages on main.
+- **End-to-end** on real infrastructure. Say user-reachable vs mechanism-level; file the seam.
+- **UI**: screenshots of every real surface, one epic walkthrough.
+- **Wrap**: close the issues, clear the lock list, report URLs.
 
-- **Cohesion check**: on the merged main, run the deterministic gate / full suites across the touched packages — N PRs merged in sequence MUST cohere; catch integration breakage no single PR's CI saw.
-- **End-to-end verification**: drive the epic's actual thesis end-to-end on real infrastructure (real data, real services), as far as the merged code allows. Be HONEST about **user-reachable vs mechanism-level** where a wiring seam remains, and file the seam as a follow-up.
-- **Visual verification when there's a UI**: capture **screenshots of every real rendered surface**, upload them so they inline in GitHub (raw host on the default branch — a bare comment post can drop images), and post ONE walkthrough comment on the epic with captioned inline screenshots + the terminal evidence for non-UI steps. If the human asked for a screenshotted closeout, this step is the deliverable, not an extra.
-- **Wrap**: close sub-issues + the epic with a summary (deliverables table, closeout verdict, follow-ups filed), clear the lock list (refresher exits), report to the human with the epic + PR URLs and what each screenshot proves.
+When reading the catch-net, shooting UI, or writing the wrap, read [reference/closeout.md](reference/closeout.md).
 
 ## Tracking
-Keep a task list mirroring the sub-issues with dependencies (`addBlockedBy`), mark in_progress on dispatch and completed on merge, plus one closeout task blocked by all. It's how you and the human both see wave progress.
 
-## One-line mental model
-Decompose → lock → (design hand-off) → per sub-issue { isolated worker → independent review → fix → gate → merge → unlock next } → screenshotted closeout. You are the only thing that persists; everything else is a fresh agent with a precise brief.
+Mirror sub-issues (`addBlockedBy`). In progress on dispatch, done on merge, one closeout task blocked by all.
+
+## Mental model
+
+Decompose → lock → { worker → review → one batch → one gate → PR → bot-clean once → merge } → catch-net closeout.

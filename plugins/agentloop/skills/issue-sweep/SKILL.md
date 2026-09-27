@@ -1,6 +1,10 @@
 ---
 name: issue-sweep
-description: Sweep open GitHub issues for unprocessed human input and act on each via the issue-review skill — delete-PRs for human-approved deprecated docs, doc-update PRs for approved drifted docs, fix-PRs for approved bugs, grounded analysis for feature/design requests followed by autonomous execution when no real human-only fork remains, close issues whose PR merged, and comment-only on conditional/security/needs-decision ones. The actionable signal may be a comment OR the issue body. With --autofix-green, also auto-fixes "green" issues that have no human reply yet (unambiguous + verifiable-here + low-risk + non-security) — reproduce→fix→test→PR, never auto-merge. Run manually (/agentloop:issue-sweep) or on a schedule. Designed for a doc-audit + spin-off + feature workflow.
+description: >-
+  Sweep open issues for unprocessed human input (comment or body) and act via issue-review: doc
+  delete/update PRs, bug fixes, feature pipelines, closes after merge, comment-only for security
+  or real decisions. --autofix-green also fixes unambiguous verifiable issues. Manual or
+  scheduled.
 ---
 
 # Issue Sweep — batch-process issues with new human replies
@@ -40,278 +44,54 @@ examples below do); if it's absent, use the `mcp__github__*` tools instead
 
 ## Step 0 — Sync the local repo FIRST (do not skip)
 
-Everything downstream — `git grep` safety checks, `check-types`, and every
-branch you cut for a fix/deletion — must run against **the latest
-`<default_branch>`** (some repos use `master` instead of `main`), not whatever
-stale tree the container happened to clone. A prior
-sweep may have merged PRs that moved `<default_branch>`; processing against a
-stale checkout risks branching off old code, deleting a file someone else
-already changed, or a safety grep that misses a freshly-added reference.
-
-Before scanning, bring the local clone current. **⚠️ The checkout may be SHARED
-with a human or another live agent session** (this repo runs several actors on
-one machine) — uncommitted changes are possibly someone's in-flight work, NOT
-necessarily "leftover junk from an aborted run". Never blind-`reset --hard`:
-stash first (reversible), so a human can recover with `git stash list` / `pop`.
-
-Run these as PLAIN commands and read each result — **you are the control flow**; do not
-wrap them in shell loops/conditionals/`$(…)` (a sandboxed Bash guard refuses those, and
-this step then hard-fails before the sweep even starts — seen live).
+Run as PLAIN commands and read each result (no shell loops / `$(…)` — the sandbox guard refuses them):
 
 ```bash
-git fetch origin <default_branch>   # transient failure? just run it again (you are the retry loop)
-git status --porcelain              # READ this: any output = dirty tree → stash on the next line
+git fetch origin <default_branch>
+git status --porcelain              # any output = dirty tree
+git stash push -u -m "issue-sweep preempted"   # only if dirty: the checkout may be shared — stash, never discard
+git reset --hard origin/<default_branch>
+git log --oneline -1
 ```
 
-- **Do NOT `git checkout <default_branch>`.** In a git worktree (e.g. a fleet checkout) the
-  branch is held by the PRIMARY worktree and checkout hard-fails; the fetch + reset below
-  works whether you're on the branch or detached.
-- **Dirty tree → stash (recoverable), never discard**: it may be a concurrent session's
-  uncommitted work (a blind hard-reset here has previously destroyed in-flight edits from
-  another session — arc case-law). Only if the `git status --porcelain` above printed
-  something:
+Do **not** `git checkout <default_branch>` (fails in a worktree). Cut every fix branch from the freshly synced `origin/<default_branch>`.
 
-```bash
-git stash push -u -m "issue-sweep preempted"
-```
-
-Then, tree clean:
-
-```bash
-git reset --hard origin/<default_branch>   # only moves the ref now
-git log --oneline -1                       # confirm you're at the real tip
-```
-
-Then cut every fix branch from the freshly-synced `origin/<default_branch>`
-(`git checkout -B <branch> origin/<default_branch>`), as Step 4 already requires. A sweep
-starts from a clean, current tree — but "clean" is achieved by stashing, not
-destroying.
+Why, and what a shared checkout means: Read [reference/sync-and-graph.md](reference/sync-and-graph.md).
 
 ## Step 0.5 — 确定性图计算（[`issue-graph`](../issue-graph/SKILL.md)，每轮必跑）
-
-label 扫描之前先跑一次图计算（只读，REST-only，秒级）：
 
 ```bash
 bun <plugin_root>/skills/issue-graph/scripts/graph-scan.ts --window-hours 2
 ```
 
-消费它的三个输出：
+- `kicks` → 并入候选集(无需人类 comment)。
+- `rollupCandidates` → [`issue-review` ★父级 rollup](../issue-review/SKILL.md);**`agent:hold` 一票否决 close**。
+- `blocked` → 确定性 SKIP。
+- `agent:ready` 只是索引提示:领取后回 GitHub 重验;处理完由消费方摘掉;producer 挂了就退化回 graph-scan。
+- `agent:ready` 与 `needs-human-confirm` 并存 → 读 label 事件时序,**最后贴的赢**(`labelStance()`,`test/sweep-golden/lib.ts`)。
 
-- **`kicks` → 直接并入候选集，无需人类 comment。** 这是对 Step 2 谓词的结构性补丁：
-  子 issue 关闭是状态变化、不产生人类 comment，旧谓词永远看不见「孩子做完了，父该
-  收尾 / 兄弟被解锁」。kick 让关闭事件确定性传播。
-- **`rollupCandidates`（全部孩子已关的 open 父）→ 走 [`issue-review` ★父级 rollup](../issue-review/SKILL.md)**
-  （fencing 互斥 + 验收核对 + 综合 comment + close）。
-  **`agent:hold` 一票否决 close**：带 hold 的父 issue 仍可综合 comment，但**绝不 close**——
-  hold 禁止一切终态动作，优先级高于 rollup 的「全覆盖则 close」例外（实盘发现：#1104 同时是
-  rollup 候选且带 hold，两条规则直接冲突）。留开，等人摘 label。
-- **`blocked` → 确定性 SKIP**（有 open blocker 的连候选都不进，本轮记录原因即可）。
-  被 block 的 issue 不再靠模型猜「是不是还没轮到」。
-
-`ready` 的顺序已按 hostname 旋转（多机同分钟起跑时错峰，降低锁竞争）。图只决定
-「谁进候选、谁跳过」——注入的候选照常走 Step 2 谓词、Step 3 分派、锁与认领检查，
-不绕过任何既有纪律；无边的 issue（人手开的）= 图中孤立点，照常走 label/catch-all。
-
-**`agent:ready` label 消费（producer routine 在维护它时）**：producer 定期跑
-`producer.ts` 把 kick/rollup 事件物化成 `agent:ready` label（人可观察的 queue 视图）。
-sweep 可以**优先**从 `gh api "repos/{owner}/{repo}/issues?state=open&labels=agent:ready"`
-领取，但三条铁律：① **label 只是索引提示，领取后必回 GitHub 重验**（仍 open、图上
-仍成立、无 hold、无未处理人类输入——重验就是本轮 graph-scan + Step 2 谓词）；
-② **处理完（终态 disposition 落定）由消费方摘掉 `agent:ready`**——producer 只加和
-清理失效（closed/hold/blocked），不知道"事做完没"；③ producer 挂了 = label 陈旧或
-缺失,**退化回本节的 graph-scan 自算**,行为不变、无单点。
-
-**`agent:ready` vs `needs-human-confirm` 矛盾——按【贴标签的先后】裁决(权威信号)。**
-一个 issue 同时带 `agent:ready`(该做)和 `needs-human-confirm`(等人)时,**不要靠评论内容猜**
-(人和 agent 的评论格式无法区分,见 Step 2)——读 **label 事件时序**:
-`gh api "repos/{owner}/{repo}/issues/{n}/events"`,取 `labeled`/`unlabeled` 事件(带 actor +
-`created_at`,GitHub 权威记录、不可伪造)。**谁最后贴的谁赢**:
-- `agent:ready` 晚于 `needs-human-confirm`(尤其人类亲手贴)→ **人已确认/解锁 → 开干**(接手实现)。
-- `needs-human-confirm` 晚于 `agent:ready` → **人在 ready 之后按下暂停 → 等人**,本轮不做终态动作。
-- 只有其一 → 按其一;一个被后来的 `unlabeled` 摘掉 → 不再计入。
-参考实现 `labelStance()`(`test/sweep-golden/lib.ts`)。**实盘 arc#1722**:Phase 4 方案已就绪、
-带 `agent:ready`,但 `needs-human-confirm` 更晚贴 → 正确判为"等人拍板轴 B 决定",人一确认(摘标
-或贴 ready)即接手。
-
-## Why a windowed "recently updated" scan is NOT enough
-
-The naive scan — "list issues by `UPDATED_AT` desc, take the top N" — **misses
-early human replies that were never re-bumped**. Real misses this caused: one
-issue whose only human reply came early and was never re-bumped (archetype:
-`test/sweep-golden/fixtures/328-early-human-reply-sank.json`), and another
-labeled only `P3` — no `doc-audit`/`bug` — so it wasn't even in the label
-union. **Scan by label coverage + the unlabeled catch-all + last-comment,
-not by an updated-at window.**
+When you need the detail (ordering, producer contract, the arc#1722 case): Read [reference/sync-and-graph.md](reference/sync-and-graph.md).
 
 ## Step 1 — Build the candidate set (by label, not by recency)
 
-`mcp__github__list_issues` with `state: OPEN`, once per label, union the results.
-Candidate labels = the **Label Vocabulary** in `.claude/repo-profile.md`
-(Priority + Work-type rows; arc: `doc-audit`, `bug`/`P0`-`P3`,
-`enhancement`/`feature`, `research`, `idea`). Case-law: a priority-only label
-is exactly how a real issue slipped through; `research`/`idea` issues are
-often created unlabeled entirely — Step 3 has the
-per-work-type dispatch row for each, and the unlabeled catch-all below closes
-the discovery hole by triaging and backfilling the label.
+1. `state: OPEN` once per candidate label (the **Label Vocabulary** in `.claude/repo-profile.md`), union, de-dup.
+2. **Unlabeled catch-all, every run**: list all open issues and keep those with **no** candidate label, excluding `epic-managed` / `epic:<n>` / `doc-audit-kb` / `test-sweep-failure` / `test-sweep-report` in the jq itself. For each: infer the work-type and **add the label** (reversible triage); if it cannot be inferred, `needs-human-confirm` + a triage comment with your guess — never skip silently.
+3. **Drop reserved/locked**: `agent:hold` = terminal freeze, not a processing freeze (never close / terminal-dispose; a new human comment is still answered); fresh `agent:processing` (last `labeled` event < 30 min) → SKIP, stale → do not skip; `epic-managed` → excluded entirely (no triage, claim, work or comment — the conductor owns it).
 
-De-dup by issue number. Optional args override this default label list.
-
-**Unlabeled / off-label catch-all(每轮必扫——label 并集对它们天然失明):**
-founder/人随手开的 issue 常常 **0 label、0 comment**,actionable 信号全在 body。
-真实 miss:一条 feature issue(无 label)、一条 research issue(无 label——创建后
-2 小时内 hourly sweep 照常跑了,但 label 扫描永远看不见它,只能靠人手工 `/agentloop:issue-review`
-点名)。上面 research/idea 行写的「扫到就补 label」在纯 label 扫描下是**循环依赖**
-(没 label 就扫不到,扫不到就没人补 label)——这条 catch-all 通道打破它。**别依赖
-人打 label**,每轮追加一次全量 open 列表,把「不带任何候选 label」的捞出来:
-
-```bash
-# 一次列全部 open issue,本地滤出没有任何候选 label 的。
-# doc-audit-kb(KB/repo-map 基础设施 issue,即 kb_issue)不是工作项,一并排除;
-# test-sweep-failure/test-sweep-report 同理排除——它们是 test-sweep skill 自动开的 QA
-# 发现,不是「founder 随手开的」catch-all 目标,有自己专属的处理通道(见 Step 3b「test-sweep
-# 发现的 issue」),混进这里会被误当人类工作项二次 triage。
-# 下一节的 reserved 规则仍然适用——带 agent:hold 的冻结终态动作(人类新评论仍要响应)。
-# ★ epic-managed / epic:<n> 必须在 catch-all 的 select 里就排除(Codex P2 on arc#3558):
-#   conductor 子 issue 常常只有这两类 label、尚无 work-type label;若不在 jq 里滤掉,
-#   下面「对捞出的每条补 label / triage comment」会在 reserved 检查之前就 mutation,
-#   与 epic-managed「不 triage、不评论」矛盾。
-# -R <repo_slug> from repo-profile.md.
-gh issue list -R <repo_slug> --state open --limit 500 --json number,title,labels --jq '
-  .[]
-  | select(([.labels[].name] | any(. == "epic-managed" or startswith("epic:"))) | not)
-  | select(([.labels[].name] | map(select(
-    . == "doc-audit" or . == "bug" or . == "P0" or . == "P1" or . == "P2" or . == "P3"
-    or . == "enhancement" or . == "feature" or . == "research" or . == "idea"
-    or . == "doc-audit-kb" or . == "test-sweep-failure" or . == "test-sweep-report")) | length) == 0)
-  | "#\(.number) \(.title)"'
-```
-
-> 这条命令稳定捞出两位数条对 label 扫描不可见的 open issue,全是 founder 直开的
-> 工作项——系统性缺口,不是单条偶发个案(archetype:
-> `test/sweep-golden/fixtures/869-research-no-labels.json`)。
-
-**Before any catch-all mutation:** drop anything that still slipped through with
-`epic-managed` (belt-and-suspenders; the jq above is the primary filter). Never
-add work-type labels or post triage comments on epic-managed issues.
-
-对捞出的每条:读 title+body 判 work-type(`调研`/`研究`/`[research]` → `research`;
-`idea:`/提案语气 → `idea`;带 spec/验收标准 → `feature`;报错/复现步骤 → `bug`),
-**先补上对应 label**(可逆 triage,自动做——这样它下轮起进入正常 label 扫描,且
-Step 3 的分派行有了正确的 work-type),再并入本轮候选集走 Step 2/3。**判不出类型
-的也不静默跳过**:挂 `needs-human-confirm` + 留一条 triage comment 列出你的猜测让
-人一键确认——静默跳过 = 这条 issue 对自动化永久不可见,这正是本通道要消灭的状态。
-
-**Then drop the reserved/locked ones (并发协调,见 [`issue-review` ★并发锁](../issue-review/SKILL.md)):**
-
-- **`agent:hold`** — 人类保留 = **终态冻结,不是处理冻结**("没我反馈别做不可逆动作",不是"别理它")。hold 期间**绝不 close / 绝不代表它做终态处置**,直到人摘掉 label;但**人类新评论照常进 Step 2 候选**——人专门在 hold 的条目上说话,恰是最高优先级输入,必须读并响应(回 comment / 按人类明确要求干活)。无人类新输入的 hold 条目才跳过。可执行闸是 hook `deny-guarded-issue-close.ts`（#5426）；散文不是闸。
-- **`agent:processing`(新鲜)** — 正被另一个 run 处理。每候选读它有没有这个 label;有就查锁龄(见下),**TTL 30min 内 → SKIP**(别人在做),**过期 → 不跳**(上一个 runner 崩了,Step 3 会重新 acquire 抢锁)。锁龄取该 label 最后一次 `labeled` 事件时间:
-  ```bash
-  gh api --paginate repos/{owner}/{repo}/issues/<N>/timeline \
-    --jq '[.[]|select(.event=="labeled" and .label.name=="agent:processing")]|last|.created_at'
-  ```
-  (无 `gh` 时用 `mcp__github__*` 读 timeline。)`agent:processing` 是 advisory——**硬去重仍靠 Step 4 的确定性分支 + 认领检查**;这一步只是早点短路、省掉重复的读/核验/测试。
-- **`epic-managed`** — 该 issue 属于一个 **epic-conductor 独占驱动**的 epic(见 [`epic-conductor`](../epic-conductor/SKILL.md))。**整条排除:不 triage、不认领、不做、不评论。** 这不是 `agent:hold`(冻结终态但仍响应人类评论)——epic 子 issue 由那个 conductor 端到端调度自己的一批 worker 处理,sweep 插手只会撞车、开重复 PR(archetype:#3407 撞 #3395)。`agent:hold` 是「人类保留」,`epic-managed` 是「另一个 agent 保留」;两者都跳过认领,但 `epic-managed` 连人类评论也不由 sweep 代答(那是 conductor 的活)。一条规则管所有现在与未来的 epic。**过滤某个具体 epic 的全部子项**:`gh issue list --label "epic:<父issue#>"`(issue+PR 通用)。
+The exact catch-all command, lock-age query and case law: Read [reference/candidates.md](reference/candidates.md).
 
 ## Step 2 — Keep only "last comment = unprocessed human reply"
 
-For each candidate, read comments (`mcp__github__issue_read method:get_comments`).
-**Critical detail of this repo:** the AI audit/agent posts under the *same*
-account as humans. So
-distinguish by **content, not author**:
+Keep an issue only if **the latest human input — last comment, or the body of a fresh issue with no agent response — has no agent response**. Decide by **machine marker, not author or header**:
 
-- A comment is **agent-authored** only if it carries a **machine-emitted marker**: a
-  `<!-- sweep-trace: … -->` (every autonomous sweep/review comment MUST carry one — see
-  §sweep-trace), **or** the `_Generated by [Claude Code]` footer, **or** its GitHub author is
-  a **Bot** (`user.type == "Bot"` — cloud runners post as `claude[bot]` via the GitHub App
-  token). Markers can arrive HTML-escaped (`&lt;!-- … --&gt;`, the #1278 double-escape bug) —
-  **decode entities before matching**.
-- **The `> 🤖 AI Agent` header and the `runner:… · skills@…` identity line are NOT sufficient
-  on their own.** `<agent_identity_script>` generates that exact header for **both agents
-  and humans**, so a human posting locally (e.g. a design/decision comment from your own
-  machine) produces a byte-identical opener. Keying on the header misread **arc#1722**'s
-  human Phase-4 directive as an agent verdict and skipped the issue for 19h. So a `> 🤖`
-  comment **without** a machine marker is treated as **human** — respond to it. (Pre-convention
-  comments predating the sweep-trace mandate also fall here; that is the intended new norm,
-  old data is not specially handled.)
-- **Exception — the presence board `> 📡` heartbeat**: script-authored WITHOUT a trace, so
-  recognize it by its `> 📡` opener and treat it as non-human; otherwise a content check
-  reads it as fresh human input and re-processes the board every round (#1361).
-- **Exception — zero-comment `test-sweep-failure`/`test-sweep-report` issues**: test-sweep
-  opens these directly (not through `issue-publish`'s `test-sweep-key` marker path), so the
-  BODY carries the `> 🤖 AI Agent` identity header but **no** machine marker — by the letter of
-  the rule above that reads as "human, unprocessed". It isn't: it's an automated QA finding.
-  **Label wins over content here**: a zero-comment issue carrying `test-sweep-failure` or
-  `test-sweep-report` is never a Step 2 human-reply candidate (archetype: `#2271`,
-  "[test-sweep] aistro: 1 failures detected" — see `test/sweep-golden/fixtures/2271-*.json`).
-  It's a distinct discovery source Step 3b handles on its own — see Step 3b「test-sweep 发现的
-  issue」. Once the issue gets an actual human comment, this exception no longer applies — the
-  ordinary last-comment rule takes back over.
-- A **human comment** is anything else (including a `> 🤖`-headed comment with no marker).
+- agent-authored = carries a `<!-- sweep-trace: … -->` (decode HTML entities first), **or** the `_Generated by [Claude Code]` footer, **or** a Bot author. The `> 🤖 AI Agent` identity header alone is **not** a marker (humans produce the same bytes) → treat as human.
+- `> 📡` presence heartbeat = non-human. Zero-comment `test-sweep-failure` / `test-sweep-report` issues are not human-reply candidates (Step 3b handles them).
+- A **conclusion-style batch-disposition list** ("建议关闭/合并/删除") is evidence, **never** authorization: an item in it is actionable only after a human removed its `agent:hold` or explicitly confirmed that specific action.
+- A **non-terminal** agent comment (排队中 / 本轮未做 / 留开放 / in-progress / queued …) is unfinished → re-process. Order is the rule: (1) strip code, (2) **terminal wins** (PR / closed / needs-human-confirm / needs-design / security-sensitive / not-verifiable-here), (3) only then the deferral regex.
 
-Keep the issue only if the **last comment is a human comment that the agent has
-not yet responded to** (i.e. no later `🤖 AI Agent` comment, no PR-link/close
-note answering it). Cheap pre-filter: `doc-audit` issues with `comments == 1`
-are AI-audit-only (no human) — skip. But do NOT rely on count alone: human-first
-spin-offs have a single human comment and no audit. When in doubt, read.
+Executable form of every predicate: `test/sweep-golden/lib.ts` (unit-tested in `golden.test.ts`).
 
-**The actionable signal can be the issue BODY, not a comment.** A human-authored
-**feature / design request** (archetype:
-`test/sweep-golden/fixtures/367-body-only-no-labels.json`) often has **zero
-comments** — the directive lives in the body itself ("analyze this, discuss
-unclear points, then write an executable TDD plan; implement after I confirm").
-Treat such an issue as unprocessed when there is **no `🤖 AI Agent` comment yet**.
-So the real predicate is: *"the latest human input — last comment, or the body
-of a fresh design issue — has no agent response."* Don't require a comment to
-exist.
-
-**A conclusion-style batch-disposition list embedded in an issue body/comment is NEVER itself
-an executable instruction (arc#2914, archetype #1863).** An audit/rollup issue's "建议关闭"/
-"建议合并"/similar suggested-batch-action table — even one that reads as a finished
-conclusion — is **evidence**, not a directive: sweep may read it and cite it when it
-independently reasons about one of the named issues, but must **not** treat the list itself as
-authorization to close/merge any issue it names. `#1863` is the live incident this guards
-against: a one-off 138-issue backlog audit ended with "『建议关闭』一栏本次没有代关，等人扫
-一眼表格后批量关即可" (an explicit human-review caveat, not an executable command) — a later
-unattended sweep consumed that table directly and closed 12 issues with zero human
-confirmation, bypassing the gate the audit issue itself declared. An item named in such a list
-becomes actionable only when **either** (a) its `agent:hold` — applied per
-[issue-review's 建议关闭-list rule](../issue-review/SKILL.md) at the moment the list was
-posted — has since been deliberately removed by a human, **or** (b) an independent human
-comment explicitly confirms this specific action (a generic "LGTM"/"谢谢" does not count, and
-neither does the list's own caveat sentence). Absent both, sweep may read/cite the list but
-must not act on any item in it.
-
-**A non-TERMINAL agent comment does NOT count as "responded" — re-pick it up.** Skip
-only when the last agent comment is a **terminal** state with a real unlock condition:
-done→PR, closed, or an explicit needs-human/needs-design/security/not-verifiable-here
-verdict. **An agent comment that says it deferred its own work — "🟢 排队中 / 本轮未做 /
-留开放 / candidate-queued / in-progress" — is UNFINISHED, not terminal → treat the issue as
-still to-process and DO it this run** (per Step 3b: 可做即做,不排队;archetype:
-`test/sweep-golden/fixtures/533-non-terminal-deferred.json`). This is the fix for the
-self-freeze the user hit: a "我会晚点做" comment was making the next sweep skip forever, so a
-whole class of doable issues never advanced. Cheap detection — **do these IN ORDER; the
-order IS the rule** (a live arc sweep proved that getting it backwards inverts the intent):
-
-1. **Strip fenced/inline code first.** A marker word inside a snippet is not a deferral —
-   a live sweep called an issue "deferred" because the YAML key `cancel-in-progress: false`
-   inside a code block matched `in-progress`.
-2. **TERMINAL WINS.** If the comment carries a real unlock condition (`PR #…` / closed /
-   `needs-human-confirm` / `needs-design` / `security-sensitive` / `not-verifiable-here`)
-   → terminal → **skip**, even if some other word looks deferral-ish. A live sweep
-   re-picked a *terminal security escalation* because its prose ("不在本轮自动修") tripped
-   the deferral regex, which used to be evaluated first.
-3. Only then: a last agent comment matching `排队中|本轮未做|留开放|不在.{0,8}范围|非单 PR|多.?phase.*(留开放|不在)|candidate-queued|queued|in-progress|稍后|will do|TODO`
-   → re-process. Note **`排队中`, not bare `排队`** (bare 排队 matched prose describing
-   GitHub Actions queueing), and **no bare `不在本轮`** (it matched the terminal
-   `不在本轮自动修`).
-
-The executable form of all three predicates lives in `test/sweep-golden/lib.ts` and is
-unit-tested (`golden.test.ts`, incl. each live misclassification above as a regression).
-(Going forward the skill no longer emits these; this clause also unsticks the backlog already
-frozen by old runs.) The suggestion-list gate above has its own executable form —
-`containsSuggestionList()` / `hasIndependentConfirmation()` / `suggestionListIsActionable()` in
-the same `lib.ts` — exercised by the `#1863` archetype fixture
-(`test/sweep-golden/fixtures/1863-audit-suggestion-list-not-instruction.json`).
+Full predicate text, the regex, and each live misclassification: Read [reference/detection.md](reference/detection.md).
 
 ## Step 3 — For each kept issue, run the issue-review engine + act
 
@@ -321,91 +101,41 @@ human's latest comment — this is `issue-review`'s resolve phase:
 
 ### Bounded per-issue orchestration（无人值守默认并行）
 
-候选集确定后,主控按以下契约运行 `issue-review`:
+**Concurrency:** `--concurrency <N>` → env `AGENTLOOP_SKILL_CONCURRENCY` (the fleet driver injects `skillConcurrency["issue-sweep"]` from `repos.json`) → default `3`; integer `1..16` else config error; shrink to the runtime's free agent slots; 没有非交互 agent 能力时降到 `1`. It caps **active issue workers**, not issues per run.
 
-**并发配置（repo × skill）:**按优先级取值:显式 `--concurrency <N>` →
-环境变量 `AGENTLOOP_SKILL_CONCURRENCY`（fleet driver 从 `repos.json` 当前 repo 的
-`skillConcurrency["issue-sweep"]` 注入）→ 默认 `3`。值必须是 `1..16` 的整数,非法值
-直接报配置错误;当前 runtime 可用 agent slot 更少时向下收敛,没有非交互 agent 能力时
-降到 `1`。这个值限制 **active issue workers**,不是本轮最多处理多少 issue。
+**重闸另算,同一台机器最多 2 个。** Workers may be 3, but at most 2 heavy gates (`<verification_entry>` / e2e-gate / ui-verify / full build/test) run at once: a worker asks the controller for a gate slot; the controller checks machine load first (`load1` ≥ cores → wait). Scheduling, not a lock. Inside a worker, **review before the gate**, fix the findings in one batch, then gate once; `design-review` is skipped when the human already recorded the decisions, else `--max-rounds 2`.
 
-1. **主控分配,worker 即时 claim。** 主控只维护去重后的候选 queue 和空闲 slot,
-   **不预加** `agent:processing`。某个 slot 准备立即开工时才把一条 issue 交给 worker;
-   worker 的第一个动作是运行 `issue-review` Step 0,自行重验
-   open/hold/blocked/`agent:processing` 并 acquire。抢锁失败就返回 `SKIP_LOCKED`,
-   主控继续投递下一条。未进入 active slot 的候选保持未锁,避免排队超过 TTL。
-2. **一个 worker 只拥有一个 issue。** worker 运行完整 `issue-review` engine,只写该
-   issue 的 comment/label/PR/branch;不同 issue 之间不得共享可变任务状态。
-3. **会改 repo 的 worker 必须使用独立 worktree。** comment-only / research / idea /
-   triage 等只读代码的 worker 可共用主 checkout;任何会 edit/format/test/commit/push/
-   open PR 的 worker,开工前从最新 `origin/<default_branch>` 建独立临时 worktree。
-   主控把由已核验执行计划得到的结构化 `allowedPaths` 一并交给 `issue-review` worker；worker
-   在 claim 成功后、创建/写入 worktree 前运行
-   `bun <plugin_root>/scripts/check-pr-path-overlap.ts --run-args '{"allowedPaths":[...]}'`。
-   不得从标题猜路径。checker 的 `overlap` 要报告 PR/文件，`clean` 才能继续；`unavailable`
-   必须停止实现并显式回报，不能塌陷为“无重叠”。
-   **worktree 必须建在 `$AGENTLOOP_WORKTREE_BASE` 下,禁止硬编码 `/tmp/...`**——fleet
-   driver 已把这个变量注入 worker 环境(专属 agentloop 的固定目录,不是系统 `/tmp`、
-   也不是部署方的 `TMPDIR`),字面照抄即可:
+1. **主控分配,worker 即时 claim。** The controller keeps the deduped queue and free slots and does **不预加** `agent:processing`; the worker's first act is `issue-review` Step 0 (re-verify + acquire); lost race → `SKIP_LOCKED`.
+2. **One worker owns one issue** and writes only that issue's comment/label/PR/branch.
+3. **会改 repo 的 worker 必须使用独立 worktree** from the latest `origin/<default_branch>`, under `$AGENTLOOP_WORKTREE_BASE` (never a hard-coded temp dir, never a harness worktree under `<repo>/.claude/worktrees/`):
    ```bash
    git -C "$(pwd)" worktree add --detach \
      "$AGENTLOOP_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" \
      origin/<default_branch>
-   # 本 issue 处理完(无论成功/失败/跳过)务必清理,别只指望 driver 下一轮的兜底清扫:
+   # when done (success, failure or skip):
    git worktree remove --force "$AGENTLOOP_WORKTREE_BASE/$(basename "$(pwd)")-issue-<N>.$$" 2>/dev/null || true
    ```
-   硬编码 `/tmp/...` 会绕开部署方的 `checkoutBase` 配置,在系统盘上越攒越多——实测:
-   未做限制时一天在 `/private/tmp` 下堆了约 36G 孤儿 worktree,而配置的外置盘却几乎
-   是空的。**driver 每轮都会兜底清扫一次 `$AGENTLOOP_WORKTREE_BASE` 下超过 15 分钟、
-   且没有活跃进程的残留**,但那是安全网,不是借口——worker 自己清理不了的话,残留
-   至少要撑到下一轮才会被回收,别指望它替代及时清理。
+   Before writing, run `bun <plugin_root>/scripts/check-pr-path-overlap.ts --run-args '{"allowedPaths":[...]}'` with structured `allowedPaths` from the verified plan: `overlap` → report PR/files; `clean` → continue; `unavailable` → stop. Then run `AGENTLOOP_SETUP_COMMAND` in the worktree; no successful setup → no edit/test/verification claim.
+4. **共享 KB 由主控单写,worker 仍贡献 KB**: workers return structured results incl. a KB delta; the controller writes the KB body, the run summary and the heartbeat after the barrier.
+5. **Failure isolation**: one worker failing cancels none; the worker releases its own lock (`issue-review` Step 7); the controller **绝不代删** a lock it does not own (TTL recovers crashes); a dirty failed worktree is kept and reported, never force-deleted.
+6. **嵌套 fan-out 也受 runtime 总 slot 限制** — an issue that fans out again checks free slots first, else runs inline.
 
-   > **★ 同理:不要用会在 `<repo>/.claude/worktrees/` 下建树的 harness 工具**(编码 harness
-   > 自带的 worktree/隔离开关)。那个位置**不由 `$AGENTLOOP_WORKTREE_BASE` 管**,而且它建的树会
-   > **一直 check out 着 `claude/issue-<N>` 分支**——于是下一次(任何机器、任何轮次)对同一个
-   > issue 跑 Step 4 的确定性认领 `git checkout -B claude/issue-<N>` 会 **fatal: already used by
-   > worktree at …,exit 128**,这个 issue 号就此永久锁死。实测(arc,2026-08-20):一个 base clone
-   > 里攒了 16 棵,占 60G,横跨 15 天;已在隔离环境复现过 exit 128。driver 从 0.29.4 起也会兜底
-   > 清扫这些位置(clean 的才删,脏的留下并报告),同样是安全网不是借口——**照上面的
-   > `$AGENTLOOP_WORKTREE_BASE` 显式建、显式删**。
+**Action by the human's latest reply** (full table with each row's detail in the reference):
 
-   分支仍严格使用 Step 4 的
-   `claude/issue-<N>`（或 phase 变体）。禁止
-   多个写 worker 在 sweep 主 checkout 中切分支或改文件。进入 worktree 后读取
-   `AGENTLOOP_SETUP_COMMAND`（fleet driver 从当前 repo 的 `setupCommand` 注入）并在
-   该 worktree 执行;未配置时按 repo profile/toolchain 完成等价 bootstrap。setup
-   未成功不得编辑、测试或声称可验证。
-4. **共享 KB 由主控单写,worker 仍贡献 KB。** 并行 sweep 调用 `issue-review` 时,
-   本条显式覆盖其“收尾直接编辑 KB body”:worker 只返回结构化结果（issue、disposition、证据、
-   PR/claim、KB 增量、错误）;共享 KB body、整轮汇总、presence heartbeat 由主控在
-   barrier 后统一写,避免 read-modify-write 覆盖。worker 不直接编辑共享 KB body。
-5. **失败隔离 + ownership-safe 清理。** 一个 worker 失败不取消其他 worker。正常
-   收尾由 worker 按 `issue-review` Step 7 release 自己的 `agent:processing`;主控
-   **绝不代删**无 owner token 的 label 锁,worker 崩溃留给 TTL 恢复。写 worker 成功且
-   worktree clean 后移除临时 worktree;失败且有未提交内容时不 force-delete,返回路径、
-   branch、status 和 blocker 供恢复。不得把半成品汇报为完成。
-6. **嵌套 fan-out 也受 runtime 总 slot 限制。** `--concurrency` 只限制 active
-   issues;Research 等 issue 内部要再开 subagent 时先看 runtime 剩余 slot,不足就
-   在该 worker 内 inline/串行,不得因 3 个 issue 各自再扇出而突破 runtime 上限。
-
-主控只在候选分配与最终共享写入处串行;issue 的取证、实现、验证和 per-issue GitHub
-写入在上述边界内并行。并发上限是安全阀,不是本轮处理上限:worker 完成后继续从
-unclaimed queue 取下一条,直到候选耗尽或触及真实的运行预算/外部限流。
-
-| Human's latest reply | Action |
+| Reply | Action |
 |---|---|
-| Agrees to **delete** a `deprecated` doc-audit ("可以删除"/"同意删除") | **Delete PR**, but **safe-delete only** — `git grep` for live refs first. Live code/test/doc dependency, a still-needed sub-package, a pending third-party confirm, or a blocking precondition → **do NOT delete; leave a comment** explaining the blocker. Relabel `status:*`→`status:deprecated` if needed. |
-| Asks to **update** a `drifted` doc ("update 文档"/"补齐发 pr") | First check doc kind: **`planning/`/`intent/` docs default to historical-archive, NOT doc-update** (2026-07-17 policy, see issue-review「historical 归档」— shipped planning docs are historical artifacts; syncing them to code is negative-ROI, they re-drift immediately). Tombstone banner PR, no content rewrite; extract still-valuable rationale into `docs/guides/` first if any. Only `docs/` living guides get doc-update: decide **doc-drift vs code-drift** (verify the shipped surface); if doc-drift, edit the doc to match shipped reality, each addition checked against `path:line`. **Doc-update PR**, no code change. If another human is already drafting a PR for the same cluster, **skip to avoid collision**. |
-| Approves a **bug fix** ("同意"/"easy fix") | Implement the fix; verify locally where possible (typecheck / targeted test). **One PR per bug.** |
-| **Feature / design request**(multi-phase / 架构 / feature) | **先判大小(match vehicle to size):小而明确的 feature(单点、验收清晰、代码可触达)= 直接 reproduce→fix→test→PR,不启动 design-review/build-phases(那套对 leaf 是杀鸡用牛刀);只有真正多阶段/架构级才走下面的 pipeline。** **评估 → 能做就做,绝不冻结。** 旧的「(1) 只发计划、不写码 →(2) 等 human 确认才执行」是 bug:卡在等确认,而那个确认基本会变成「你先评估试试」,于是永远不动。改为:**(a) 评估(必做)** —— 读 issue + 引用代码,判「本环境能否自主起步」:issue 自带 spec/验收标准 + 代码可触达 = 能起步(绝大多数 feature 属此)。**(b) 能起步就直接跑 pipeline,不等确认**:`/agentloop:design-review` 定/优化方案(精炼计划 post 回 issue;**post 的设计必须 grounded:现状断言 `path:line` 坐实、代码权威优先于文档并指出文档过时、数字实测或显式标注估计——design-review 的事实+数字 grounding 是 HARD GATE,别手 post 未审的设计**)→ `/agentloop:build-phases` 分阶段实现(phase = issue checkbox;每 phase 一 commit + 进度评论;PR 按耦合切——见 design-review/build-phases「Issue-driven plans」)。issue 即 source of truth;**drive 能做的 phase 到完成**;跨 hourly run 的用 **in-progress** 续做(round-aware 接力 phase N→N+1,不重做、不冻结)。**(c) 只有真正 human-only fork 才停**(无法判定的架构 A-vs-B、安全、不可逆),且停时给**评估结论 + 具体待决项 + 你的推荐 + 已完成的 phase**,**绝不写「不在本轮范围 / 留开放」**那种冻结性 disposition。**(d) 撞墙 → 给详细问题**:实现中卡住,贴**具体 blocker(试了什么、什么失败、确切缺哪个决定/信息)**作为 in-progress 续做点,不是含糊的「需人定方向」。Never skip 评估;never freeze。 |
-| **Research 请求**(`research` label / `[research]` 标题,如「研究 perkeep 和 did space 的结合点」;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Research](../issue-review/SKILL.md):**调研这一轮不改 repo 代码、不开 PR**(转进 feature 管道后不受此限)。并行 fan-out 两个 subagent 双侧代码级调研(外部 repo shallow clone 到 scratchpad + 本 repo `path:line`)→ 综合成一条证据化 comment(TL;DR 逐条答 issue 问题 + 对照表 + 冲突面 + 结合点分档 ⭐/◐/✗ + **行动声明收尾** + 外部链接)→ 挂 `research`(`needs-human-confirm` 只在真分叉时加)。**默认只留 comment + 链接,不下载保存数据**;仅当 issue 明确要求收集数据入库时才在 `research/<task-slug>/` 开目录(走人签名 PR)。**首轮不自动开 spin-off**;人选定方向后下一轮按选项拆自足 feature issue 或转 `/agentloop:design-review`→`/agentloop:build-phases`。**例外(#1947 反馈):issue 同时含明确终局目标(「不可动摇的目标」式表述)→ research 只是 phase 0,调研 comment 后立即按上面 feature 行转执行管道(sub-issue 图 + 能做即做),绝不以「待拍板」收尾;拍板项必须互斥,非互斥的是依赖序直接做,真分叉用「推荐 + 默认执行的异议窗口」。** **★ ratchet 收尾(铁律 10,2026-08-20):纯调研也不许挂在「待人选方向」——comment 末尾必须是「下一轮我会做 X,除非你说不」,下一轮人没否决就直接执行 ⭐ 档,禁止再调研一遍。`needs-human-confirm` 只贴真分叉(互斥且不可逆)。** |
-| **Idea 提案**(`idea` label / `idea:` 标题;actionable 信号常是 **body 本身、0 comment**) | 走 [`issue-review` ★ Idea](../issue-review/SKILL.md):**首轮不当指令,当提案——不改 repo 代码、不开 PR、不开 spin-off**。理解复述(价值主张分解)→ 对照代码找「地基已有/真实缺口/与现有矛盾」(每条 `path:line`)→ 价值分档 ⭐/◐/✗ → 澄清问题(**每条附「没人答时按哪个默认走」**)→ **以行动声明收尾**(「下一轮我会做 X,除非你说不」)→ 挂 `idea`。**★ ratchet(铁律 10,2026-08-20 老冒反馈):首轮只有一次——第二轮起人没否决也没改方向,就直接执行上一轮声明的 X(拆 spin-off + 写边 + 开工),禁止再写一篇「更完整的评估」;「仍需拍板」不是合法收尾。`needs-human-confirm` 只贴真分叉(互斥且不可逆),能给安全默认的一律不贴。****拿不准「指令还是想法」就按 idea 处理**(clarify 的代价远低于执行错方向)。**例外(#1949 反馈,镜像 Research 行):idea 作者已把需求/目标说清(只是路径/细节未定)→ 评估 comment 后立即按 feature 行转执行管道——可默认的决策直接选定(ratchet + 异议窗口)、终局验收清单写进父 issue(close 唯一条件,子 issue 全关 ≠ 完成)、全量拆自足 spin-off + 写边,能做即做;不出拍板菜单,拍板项必须互斥,详见 issue-review ★Idea 铁律 9。** |
-| PR already **merged** but issue still open | **Close** it (`completed`). `Fixes #N` usually auto-closes; close manually if it didn't. **★ 例外(完整测试闸,Robert 拍板 2026-07-20)**:多 phase / 带 sub-issue 图 / 带终局验收的大块 issue,merge 齐 ≠ 可 close——close 前必须有真实 surface 的完整端到端场景测试报告(见 [`issue-review` ★父级 rollup](../issue-review/SKILL.md) 第 3 步测试闸);缺则先补测试再 close。 |
-| **父级 rollup**（Step 0.5 `rollupCandidates`：open 父 issue 的孩子已全部关闭） | 走 [`issue-review` ★父级 rollup](../issue-review/SKILL.md)：`claim.ts` fencing 抢到才做 → 核对父 issue 验收标准/问题清单（逐条对应到子 issue/PR 证据）→ 综合 comment（带 rollup marker）→ **全覆盖则 close**（这是「自动 close」的显式例外，但 **`agent:hold` 一票否决 close**：hold 禁止一切终态动作，优先级高于本例外——照常综合 comment，但留开等人摘 label），有残留 gap 列出并留开。research/idea 类父 issue 同样综合后 close——结论已在子 issue 落地，父级只是收口。 |
-| Conditional / asks a third party to confirm / **security-sensitive** (e.g. P0 security) / needs a **genuine** A-vs-B decision / "要人类 review 不要完全用 ai" | **Comment only** — surface the finding + the decision needed; do not act. **「A-vs-B」指真互斥且不可逆的分叉**——能给安全默认的不算(Step 5.5 硬前置 + ★Idea/★Research 铁律 10:给推荐 + 异议窗口,照做);**把依赖序包装成拍板项交给人是禁止的**。这一行的 comment-only 不覆盖那种情形。 |
+| agrees to **delete** a `deprecated` doc | safe-delete PR (`git grep` live refs first; any blocker → comment only) |
+| asks to **update** a `drifted` doc | `planning/` / `intent/` → historical-archive tombstone PR; `docs/` guides → doc-update PR matched to shipped code |
+| approves a **bug fix** | implement + targeted test, one PR per bug |
+| **feature / design** | small & clear → reproduce→fix→test→PR; multi-phase → evaluate, then `/agentloop:design-review` → `/agentloop:build-phases` without waiting; stop only at a genuine human-only fork, with evaluation + recommendation — never freeze |
+| **research** / **idea** | [`issue-review`](../issue-review/SKILL.md) ★Research / ★Idea: first round no code/PR; end with "next round I will do X unless you say no" (ratchet); a stated end goal → go straight to the feature pipeline |
+| PR merged, issue open | close (`completed`); multi-phase / acceptance-list issues need a real end-to-end test report first |
+| parent rollup candidate | `issue-review` ★父级 rollup (`claim.ts` fencing; `agent:hold` vetoes the close) |
+| conditional / third-party / security / genuine A-vs-B | comment only; a dependency order is not an A-vs-B |
 
-Every finding/action carries reproducible evidence (`path:line`, grep hit, real
-test output). One verdict/PR-link comment per issue — don't stack duplicates.
+Every action carries reproducible evidence; one verdict/PR-link comment per issue.
+
+Full orchestration text (incident history, worktree incidents) and the full action table: Read [reference/orchestration.md](reference/orchestration.md).
 
 ## Step 3b — Autonomous autofix (`--autofix-green`): no human reply needed
 
@@ -419,287 +149,55 @@ fix → test → PR, one at a time. But the bar for "no human needed" is high, a
 
 ### Triage every candidate into 🟢 / 🟡 / 🔴
 
-A 🟢 issue must pass **all four** gates:
+🟢 = unambiguous **and** verifiable here **and** low-risk **and** not security → autofix now (可做即做,不排队). 🟡 = doable but needs a human glance → draft PR labelled `needs-human-review`. 🔴 = security / breaking / architecture / not verifiable here → comment only.
 
-1. **Unambiguous** — the fix is determined; no design decision, no A-vs-B, no "should we even do this".
-2. **Verifiable in THIS environment** — there is a test or repro you can *actually run* and watch go fail → pass. No runnable proof ⇒ not green. (This is the gate that disqualifies most things — see below.)
-3. **Low blast radius** — a leaf fix (one handler, one wire field, a missing test, a polyfill). Not core-architecture, not a cross-cutting contract, not a public API shape.
-4. **Not security-sensitive** — crypto, auth, token compare, access control, path-traversal guards stay human even when "obvious".
-
-🟡 = mechanical but **fails gate 2 or 3**: e.g. native Swift/Kotlin code in a sandbox with no Xcode/Android SDK (can't build/test), or a change that touches CI/build config or a broad surface. → write the fix, open a **draft PR** with evidence, label `needs-human-review`, and **say plainly it is not verified here**. Never auto-merge, never claim a green check you didn't run.
-
-🔴 = needs design direction / architecture / security → **comment only** (the existing Step 3 red row). Do not touch code.
+Triage rules (🟢 / 🟡 / 🔴): Read [reference/autofix.md](reference/autofix.md).
 
 ### The verifiability gate is environment-dependent (and that's the leverage)
 
-The same issue can be 🟡 in one environment and 🟢 in another. In a **TS-only sandbox**, `bun test`/`tsx` run, so TS-side issues with a conformance/unit test are 🟢 — but every Swift/Kotlin parity issue is 🟡 (can't compile). On a **machine that can build all platforms** (`swift test`, `./gradlew test`, YAML-runner-vs-native-server), those native parity issues move 🟡 → 🟢. So the realistic auto-fix coverage ≈ *the fraction of the backlog you can prove a fix for right here*. State which environment you're in and which gate it opens.
+Why verifiability is environment-dependent: Read [reference/autofix.md](reference/autofix.md).
 
 ### Env-capability probe (multi-machine claiming)
 
-Multiple machines run this sweep (cloud routine + one or more local checkouts), and they don't all
-have the same toolchains — one local Mac may have a full Swift+Android native build/test
-environment, a cloud sandbox is typically TS-only. Before claiming a candidate whose verifiability
-depends on a toolchain, run `<capability_probe_script>` (probes actual usability, not just
-binary presence — e.g. `native-android` checks the SDK dir + `java`, not just `$ANDROID_HOME` being
-set, because that env var is commonly unset in a fresh shell even when the SDK is installed) and
-compare against the issue's declared requirement, marked in its body as:
+A capability gap must be **proven first-hand this run** (probe it, paste the exact error) — never inherited from an earlier comment or another machine.
 
-```
-<!-- requires: native-ios,native-android -->
-```
-
-- **Capability present** → proceed normally (🟢/🟡 gates above still apply).
-- **Capability declared but missing here** → this is a *this-environment* verifiability gap, not a
-  design gap: leave the issue untouched and silent (per the "🟢 candidate, no capacity this round"
-  silence rule below) rather than downgrading it to 🟡/`needs-human-review` — a different machine's
-  next sweep run may have the capability and should still find it as a fresh candidate.
-- **No `requires:` marker** → assume TS-only (the safe default); a human or a prior agent run can
-  add the marker retroactively once a capability gap is discovered (as this issue-sweep run just did
-  for several native-parity spin-offs it dispatched with a fully-available Swift+Kotlin toolchain).
-
-#### A capability gap must be PROVEN first-hand THIS run — never inherited (hard rule)
-
-The silent-skip and 🟡 "not verifiable here" dispositions are only sound once you have **actually
-established the gap on the machine you are running on now**. A "capability-gap → leave silent" (or
-🟡/`needs-human-review`) disposition is **inadmissible without a first-hand probe result from THIS
-session** demonstrating the specific gap. The failure this prevents is real: a run declared "no live
-environment here" and silently skipped a whole cluster **without probing** — the probe later showed
-the live env was reachable over HTTP with valid creds; only the headless browser was blocked. Right
-conclusion for part of the cluster, unsound derivation, and it left evidence-comment value on the
-floor.
-
-- **Never infer the gap from second-hand sources.** Not the environment banner, not the "cloud
-  routine" framing, and — the trap — not *other machines' or prior rounds' comments on the very
-  issue you are triaging* ("no CF creds", "can't start daemon", "browser can't reach it"). Those
-  describe a **different runtime at a different time**; this fleet is heterogeneous (the whole
-  premise of this section). A capability claim copied from a comment is not a capability check.
-- **Probe the axis that actually gates the work, not a scalar prior.** Capability is
-  high-dimensional: *live-HTTP reachable* ≠ *headless browser reachable*; *some creds present* ≠
-  *the specific cred this task needs*; *`gh` binary exists* ≠ *`gh` REST works here*. A blanket
-  "cloud sandbox = no live env" is wrong in exactly the details where the decision lives. Run the
-  concrete check for the specific capability (`curl` the live endpoint, launch the headless browser
-  once, test for the exact cred) before claiming it is absent.
-- **Bias toward probing, because a false "can't" is self-concealing.** A false "I can't verify this"
-  exits down the sanctioned silent-skip path and leaves **no trace that a judgment was even made**,
-  so it is never caught or retried. A false "I can" fails loudly and self-corrects. When you do skip
-  for a capability gap, **the probe result IS the required evidence** — cite it, exactly as any other
-  disposition must carry its evidence.
-- **A gap in one capability is not a pass on all analysis.** Browser-blocked ≠ un-analyzable: many
-  "broken UI" issues root-cause cleanly from source + a live *HTTP/diagnostics* read that may be
-  reachable even when the browser is not. Prefer a grounded evidence comment over a silent skip
-  whenever *any* available first-hand signal grounds a root cause.
-
-This is Phase 1 (the probe script + the marker convention). Wiring automatic skip/claim logic into
-Step 1/2's candidate loop, and adopting the same convention in `pr-sweep`, is Phase 2 — not yet done.
+Probe commands, multi-machine claiming and the hard rule: Read [reference/autofix.md](reference/autofix.md).
 
 ### The 🟢 pipeline (one issue at a time, serial)
 
-0. **Verify the issue's PREMISE first — this is a hard gate (a real
-   false-premise trap; archetype: `test/sweep-golden/fixtures/535-false-premise-trap.json`).**
-   AI-authored spin-off issues carry their own evidence (`grep`/`path:line`)
-   and a stated framing ("this is dead code" / "pure placeholder" / "3 lines,
-   just delete"). **Re-run the issue's own grep AND broaden it** before
-   trusting the framing: search for *who else depends on the thing the issue
-   wants to change* (snapshot fixtures, importers, callers, generated refs).
-   If reality contradicts the premise, **STOP and downgrade to a comment**
-   carrying the counter-evidence + safe options, do NOT execute. A false
-   premise turns a "🟢 mechanical" task into a regression. The issue author
-   (an agent) did not run the broader grep; you must.
-1. **Reproduce first.** Write/locate a test that fails *for the reason the issue states*, run it, capture the real failing output. If you can't make it fail on demand, you can't prove a fix — downgrade to 🟡.
-2. **Fix** minimally; prefer backward-compatible (`x ?? legacy`) over a swap.
-3. **Verify**: the new test passes, the package's full suite shows **no regression**, `check-types` is clean. Paste the real before/after numbers into the PR. **Isolate pre-existing red from your red:** packages here are often already failing (e.g. afs-ui had 88 CSS-snapshot failures; runtimes/node had a pre-existing `auth/index.ts:151` type error). Before attributing a failure to "pre-existing", *prove* it — either `git stash` your change and re-run (count must be identical) or show it's logically untouchable by your diff (a one-line test-mock edit cannot break CSS snapshots). Then say so explicitly in the PR with the real numbers.
-4. **One branch + one PR per issue**, body references the issue (`Part of #N`; use `Fixes #N` only if the PR fully closes it — partial fixes leave the issue open and say which part was handled).
-5. **Never auto-merge.** 🟢 means auto-*PR*, not auto-*merge* — the `pre-merge` verification gate + a human gate the merge (there is no CI on the PR path). "No human intervention" is about the fix work, not the merge decision. This is a categorical, non-negotiable assertion — see `test/sweep-golden/fixtures/1025-forbidden-auto-merge.json` for the forbidden-action regression test.
+One 🟢 issue at a time: reproduce → failing test → fix → targeted test → `<verification_entry>` → PR (`Fixes #N`). Never auto-merge.
+
+Step-by-step: Read [reference/autofix.md](reference/autofix.md).
 
 ### White-list, not black-list
 
-Only auto-touch code for explicitly safe categories: TS/pure-function bug with a test, wire-format/field-name mismatch with a conformance spec, a missing-test addition, a doc/type/lint fix, a dependency-already-in-repo polyfill. Anything outside the list defaults to 🟡/🔴. When unsure, downgrade.
-
-**Proven 🟢 patterns and run history:** see this repo's case-law appendix
-(repo-profile Case Law References) for the white-list categories that have actually landed (dead not-found
-branch → explicit error, empty `catch{}` in test mocks, env-gate cleanup with
-a human directive) and the run-by-run track record.
+What counts as 🟢: Read [reference/autofix.md](reference/autofix.md).
 
 ### AI-agent spin-off issues (`<!-- spinoff-of: #N -->`) — the primary autofix target
 
-The bulk of this backlog is **agent-authored spin-off issues**: their body opens with a `<!-- spinoff-of: #N … -->` HTML comment and follows a fixed shape (目标 / 现状证据 with grep / 参考实现 with `path:line` / 具体任务 / 验收标准). They are almost always **0-comment** (no human ever replied) — so they are invisible to the default sweep and only get picked up under `--autofix-green`. **This class is the whole reason `--autofix-green` exists; process it aggressively but gated.**
-
-Per spin-off issue:
-
-1. **Read the `spinoff-of` parent.** The parent (the original doc-audit) often carries the human directive that makes a child green (e.g. a parent issue that had already said "可以彻底清理"). A human "go" on the parent counts as approval for the unambiguous child.
-2. **Run premise-verification (🟢 pipeline step 0).** The issue's own grep is necessary but not sufficient — broaden it.
-3. **Triage by environment, then by the four gates.** In a TS-only sandbox the realistic green set is: TS/pure-function fixes, test-file fixes, wire-format/conformance mismatches, doc/type/lint, env-gate cleanups. The rest of the standard backlog clusters stay non-green *here*:
-   - **Native parity** (`[parity]`, Swift/Kotlin) → 🟡 (can't build/test in TS sandbox; becomes 🟢 only on a full-platform host).
-   - **`security` / `P0,security`** → 🔴 always (crypto/vault/ACL/const-time/path-traversal), comment-only even when "obvious".
-   - **Multi-phase feature/arch plans** (`feature`, `enhancement` with Phase N) → 不是单 PR,但**也要尝试自动推进,不是冻结**。走 Step 3 feature 行的「评估 → 能起步就 `/agentloop:design-review` → `/agentloop:build-phases`」管道,**一 issue 一条 in-progress 接力线**:每个 hourly run 推进它能推进的 phase(round-aware 续做),撞到真正 human-only fork 才停并给具体待决项。**绝不发「🟠 不在本轮范围 / 留开放」把它冻死**——那一类正是曾经真实出现过『永不被处理』的根因。`design-review`/`build-phases` 本身就是自动流程,feature issue 该用它们跑,而不是甩回给人。
-4. **可做即做,不排队 —— `🟢 candidate-queued` 这个 class 删除(它是自锁死循环的根源)。** 一个 issue 判成 🟢(过四关 + **在本环境可验证**)就**当场认领 + 当场做**:cut 确定性分支 `claude/issue-<N>`(Step 4 的认领检查)→ reproduce→fix→test→PR。disposition = **PR 链接**(终态)。
-   - **绝不发"🟢 排队中 / 本轮未做 / 留开放 / candidate-queued"这类注释。** 它是**未完成的活穿了终态的衣服**:下一轮轮次感知看到"最后一条是 AI 评论、人没回",就判"已处理、跳过",这条活**永远不做**。用户实测:大量 issue 被这种注释冻死、只剩一堆"我会晚点做"却再不推进。**判得可做,就此刻做完;不要承诺未来。**
-   - **本轮容量不够、没轮到的 🟢:不留任何注释**,保持"未处理"——下一轮自然被重新发现、再认领去做。这是**唯一正确的"沉默"**(没有 AI 注释的 🟢 不会被冻结)。
-   - **只有真有外部 unlock 条件的才发"终态 disposition + 跳过"**:🟡 not-verifiable-here(本环境建不了/测不了 → draft PR + `needs-human-review`)、🟠 needs-design、🔴 security-human。这些跳到 unlock(换环境 / 人拍板)才合理。
-   - 每条 disposition 写清:class + 具体 blocker + unlock 条件。**"silence 是失败模式"只针对你判了『此处做不了 / 要人』却一声不吭的 issue**(那 31 个无注释的就是这类被漏掉的);对『可做但本轮没轮到』的 🟢,沉默反而是对的——**别用一条注释把它冻死**。Group 同理由的(全 native-parity、全 security)一起写,但每个仍各发一条。
+When the candidate carries `<!-- spinoff-of: #N -->` (the primary autofix target): Read [reference/autofix.md](reference/autofix.md).
 
 ### test-sweep 发现的 issue（`test-sweep-failure`/`test-sweep-report` label）— 第二类零人类输入的绿色候选源
 
-`test-sweep` skill(post-deploy 持续 QA)会直接开 issue 记录活部署上发现的问题:`test-sweep-report`
-是一轮走查的汇总父 issue,`test-sweep-failure` 是每个失败点各自的子 issue(GitHub 原生
-sub-issue,挂在父 issue 下 —— **不是** `<!-- spinoff-of: #N` body-marker 约定)。这类 issue
-和上面的 spin-off issue 同属"agent 开的、零人类输入、可能可以自动修"的候选池,但发现机制和
-premise-check 的要求都不一样,分开处理:
-
-1. **发现方式:label,不是 marker。** 扫全量 open issue,挑 `test-sweep-failure`(优先,具体到单个
-   失败点)或 `test-sweep-report`(汇总父 issue,通常只是索引,较少直接可修)、**零评论**的。
-   Step 2 的人机判定对这类 issue 有专门例外(见上「Exception — zero-comment
-   test-sweep-failure/test-sweep-report issues」)——不要把它们当人类未处理输入处理,也不要
-   因为它们不带 `spinoff-of` marker 就当作"看不见、跳过"。
-2. **Premise-check 比 spin-off issue 更重:验证目标是活部署,不是静态代码。** spin-off issue
-   的 premise-check 是"重新 grep 广一点";test-sweep 发现的 premise-check 是**重新打一次同一个
-   活网站**,确认现象还在——test-sweep 报告的是某次走查时刻的观测,可能已被后续部署修复,也
-   可能(如 #2271 自己在建议里提出的)本来就是有意设计、不是回归。**不要只信报告文本就动手改**:
-   报告里给的 URL/复现路径,能打就打(如走查报告里附的 raw.githack.com 完整报告链接、复现步骤),
-   现象消失 → 直接关闭子 issue(注明"复测已通过,可能已在后续提交修复"),不当 🟢 处理。
-3. **判断 disposition 之前先定位是哪一侧错了。** test-sweep 报告的典型形状是 doc-vs-code
-   drift(`.man`/`.aup` 声明的行为 vs 实测行为不符)或直接的功能 bug。复测确认现象仍在后:
-   - `.man`/`.aup` 文档描述过期、代码行为才是对的 → **doc-update PR**(小改,对应 Step 3 表格
-     "asks to update a drifted doc" 那一行的处理方式,只是触发源是 test-sweep 不是人类评论)。
-   - 代码相对文档声明的契约回归了 → **bug-fix PR**,走标准 🟢 pipeline(reproduce→fix→test→PR)。
-   - 分不清哪侧错、或需要产品判断("这堵登录墙到底该不该在" —— #2271 原话)→ 不是 🟢,降级
-     🟡/comment,把两种可能都列出来,不要替产品做主。
-4. **白名单同上,不放宽。** 只处理典型 doc-drift 或有清晰 repro 的小 bug;涉及权限/安全边界的
-   发现(哪怕看似"只是文档没更新")一律 🔴 comment-only,不因为触发源是自动化就降低门槛。
-5. **一 issue 一 PR,`Part of #<test-sweep-failure 号>`。** 若同一父 QA Report 下多个子 issue
-   同源同修(如同一个 gate 组件导致多个 blocklet 同时报告),可以一个 PR 修,但 PR body 里
-   逐个列出 `Part of #N` 覆盖到的每个子 issue,不要漏引用。
-
-> Run history (first two `--autofix-green` runs, both TS-only sandbox — proof
-> that the pipeline works end-to-end): see this repo's case-law appendix
-> (repo-profile Case Law References).
+When the candidate carries a `test-sweep-failure` / `test-sweep-report` label: Read [reference/autofix.md](reference/autofix.md).
 
 ## Step 4 — Discipline (non-negotiable)
 
-- **防重复:确定性分支名 + 创建前认领检查(根除多机重复 PR）。** 多台机器并行跑本
-  sweep 时,若 branch 名是模型自创的描述性 slug(旧规则 `claude/fix-331-…`),两台机器
-  对**同一个 issue** 会算出**不同**分支名 → 不碰撞 → 各开一个 PR → 重复(五条真实
-  案例见本 repo 的 case-law 附录,repo-profile Case Law References)。
-  修法两条,缺一不可:
-  1. **分支名必须确定性、只由 issue 号(+ phase)派生**,不含模型自创 slug:
-     `claude/issue-<N>`(单 PR);多 phase 用 `claude/issue-<N>-p<phase>`。两台机器算出
-     **同名**分支 → 第二个 `git push` / `gh pr create` 自然碰撞、不再双开。
-  2. **开 PR 前先认领检查**——已有开放 PR 指向 #N 就 **SKIP**(别人/别的机器在做):
-     认领检查——**把它当一条普通命令跑,然后读输出**;别塞进 shell 变量、别包 `[ … ] && { …; exit 0; }`
-     (沙箱 guard 会拒这类命令替换/复合结构,这一步会直接失败——实盘踩过;而且你本来就能读输出):
-
-     ```bash
-     gh pr list --state open --json number,headRefName,body --jq '.[] | select((.headRefName|test("(^|[-/])issue-<N>([-/]|$)|-<N>-")) or (.body|test("(Fixes|Part of) #<N>\\b"))) | .number'
-     ```
-
-     把 `<N>` 换成 issue 号再跑。**有输出 = 已有开放 PR 指向 #N → SKIP**(别人/别的机器在做);
-     **无输出 → 认领,从最新 tip 切确定性分支**:
-
-     ```bash
-     git checkout -B claude/issue-<N> origin/<default_branch>
-     ```
-     **早层 advisory 锁已就位**:`issue-review` 一开工就 acquire `agent:processing`(TTL 30min,见其
-     ★并发锁),Step 1 也据此跳过新鲜锁的候选——撞车在"读/核验/测试之前"就短路了。这里的
-     **确定性分支 + 认领检查是收尾的硬去重兜底**(锁是 advisory、有残留竞态时它顶上)。两层互补,缺一不可。
-  3. **清理由 [`pr-sweep`](../pr-sweep/SKILL.md) 兜底**:已经产生的重复对,sweep 的去重
-     关闭步骤会留一个、comment + 关其余。源头修好后这类清理会趋于零。
-- **开任何派生/spin-off issue 必须写原生边(图精确性的来源)。** body 首行
-  `<!-- spinoff-of: #N -->` 标记之外,**同时**执行
-  `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <新号>`(幂等);
-  phase 之间有硬次序的再加 `--issue <后> --blocked-by <前>`。标记是 provenance,
-  **原生边才进 Step 0.5 的确定性图计算**——不写边 = 这个 spin-off 对 close-kick /
-  rollup 永久不可见,回到"要人 bump"的旧病。
-- 一个 issue 一个 PR(确定性分支),`body references the issue（`Part of #N`;完全闭合
-  才用 `Fixes #N`,部分修复留 issue 开放并说明处理了哪部分)。不要把无关改动塞一个 PR。
-- PR body ends with `Fixes #N` so merge auto-closes the issue.
-- **PR body 顶部带标准身份 header**（延伸到 PR 的同一套身份行约定；即 `agent_comment_marker`）：整行由
-  `<agent_identity_script> --header "PR" --skill issue-sweep` 生成
-  （→ `> 🤖 AI Agent PR @ <hostname> · runner:<runner> · skills@<hash>`），
-  不能手拼/占位符。归属、环境、skills 版本从此 PR 本体可溯源，不用翻 comment。
-- Commit messages follow **Conventional Commits**. **Never reach for `git commit
-  --no-verify` as a default** — the pre-commit hook here is `simple-git-hooks`
-  (not husky; this repo has no husky dependency), wired via the root
-  `postinstall` script. A hook that fails to spawn (`biome: ENOENT` / the
-  command not found at all) almost always means **`<package_manager> install`**
-  hasn't run yet in this checkout — **run it (or, if
-  that's impractical, `node node_modules/simple-git-hooks/cli.js` to just
-  re-link the hook) and retry the real commit** before ever bypassing it. Only
-  fall back to `--no-verify` if the hook is confirmed broken *after* install
-  (rare), and even then keep changes clean by hand via the `<formatter>` per CLAUDE.md's "别随手
-  `--no-verify`" rule — it also skips the formatter, so formatting/lint issues
-  silently leak into the PR (there's no CI gate to catch them).
-- **Safety before any deletion/edit:** `git grep` confirms no external code
-  importers; `<package_manager> --filter <pkg> check-types` (or a
-  targeted test) shows no
-  *new* errors from the change (pre-existing/unbuilt-dep errors don't count —
-  call them out). Adding/removing a dep → update `pnpm-lock.yaml` with
-  `pnpm install --lockfile-only`, confirm the diff is scoped, **and `git add`
-  it alongside `package.json`** — staging the manifest without the lockfile
-  breaks `--frozen-lockfile` everywhere else. Conversely, if you didn't touch
-  deps but the lockfile still shows a diff, it's a concurrent/unrelated change
-  → don't stage it.
-- **Deletion provenance:** content is recoverable via git history; the audit
-  comment preserves it. AI **never** auto-merges; humans merge.
-- Push: `git push -u origin <branch>` for a fast-forward / new branch. After rebase/amend, `bun scripts/git-push-lease.ts` — never bare `git push --force-with-lease` (fetch updates the tracking ref and the lease silently passes; #5212). Retry on network error with backoff.
-- **★ Verification 强约束(proposing 侧,机制而非纪律):** PR 路径**不再有
-  任何 CI**(`ci.yml`/`pr-title.yml` 已删),verification 脚本是唯一 pre-submit 门控。
-  - push 前**必须**跑 `<verification_entry>`,硬门控未过
-    **不得** push / 开 PR。
-  - **开 PR 后用一条命令把「跑 + 贴」焊死**——`--comment` 让脚本自己把报告 upsert 到 PR,
-    agent 无法只跑不贴、也无法手改数字:
-    ```bash
-    <verification_entry> --comment <PR#>
-    ```
-    (报告 = 状态 + 耗时 + 可折叠完整日志,数字由脚本测出;marker sticky comment,重跑
-    只编辑同一条不刷屏。)见 CLAUDE.md「Self-Verification」+
-    [`verification` skill](../verification/SKILL.md)。
-- **★ 验收点名的集成验证不可预先开脱:** 当 issue 的验收标准 / human **点名** `/e2e-verify`
-  (该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)
-  等集成验证(blocklet render / mount / serve),proposing 侧**必须真跑**——`<cli_binary>`
-  CLI 缺失/陈旧就先跑 `<cli_setup_command>`,**不得**以「需要 daemon / 本环境无法执行」开脱,**也不得**拿 `pre-pr.ts` 的 unit
-  test 顶替点名的 e2e。缺依赖 = 多一步 setup(编译原生插件、link CLI),只有实际撞上硬工具链缺失(无
-  Xcode/Android SDK/Playwright)才算跑不动,且贴**确切报错** + 标注跳过层。见 `e2e-verify` skill。
-- **★ UI 改动的截图左移(proposing 侧生图,不留给 review 侧):** diff 命中
-  `<UI Face Paths>`(`.claude/repo-profile.md`)时,**开 PR 前必须生成
-  UI 运行截图**——renderer/widget 级用 `<ui_shot_script>`(真实 shipped
-  bundle 渲染 fixture;参数矩阵 / 前后对比 / 状态序列三型按需多幅),
-  页面级流程用 `/ui-verify`。三个硬要求:
-  1. **先自查再提**:生成后用 vision 看图过 `<ui_shot_script>` README 的 checklist(裸样式 =
-     css.ts 没配套、hover/点击前后两幅无变化 = 交互失效、Unknown 降级框 = 类型没注册、
-     布局叠压)——任何一条命中先修再提。单测全绿看不出这些,别把它们留给 reviewer 或人。
-  2. **截图内嵌进 PR body**(`<ui_upload_script>` 上传,
-     `ASSET_CONTEXT=pr{N}`;开分支阶段还没有 PR 号就先用 `issue-{N}`),开 PR 时就带图,
-     不是事后 comment。脚本自带两道硬自检:**exit 3** = 脚本与
-     `origin/<default_branch>` 不一致(陈旧 checkout——曾经破图的真实根因)→
-     `git checkout origin/<default_branch> -- <ui_upload_script>`
-     后重跑;**exit 4** = raw URL 匿名不可达 → 禁止内嵌。内嵌前的通用验收:URL 必须
-     **无凭据 curl 200**(camo 视角;脚本路径已内置,MCP 路径手动验)。
-  3. **同一组截图回贴关联 issue**(一条简短 comment:图 + 一句话说明),让人在 issue
-     里一目了然,不必点进 PR。
-- **PR 继承来源 issue 的 milestone(+ labels/assignee 的 provenance)。** 开 PR 后立刻把
-  issue 的 milestone 复制到 PR——否则 PR 不进 release/批次的里程碑视图,看板就漏了它。
-  milestone 命名/归类约定见 **Milestone Conventions**（`.claude/repo-profile.md`）。
+- **Deterministic branch + claim check** (kills multi-machine duplicate PRs): branch `claude/issue-<N>` (phases: `claude/issue-<N>-p<phase>`). Before `gh pr create`, run as a plain command and read the output:
   ```bash
-  ms=$(gh issue view <N> --json milestone --jq '.milestone.title // empty')
-  [ -n "$ms" ] && gh pr edit <PR#> --milestone "$ms"
+  gh pr list --state open --json number,headRefName,body --jq '.[] | select((.headRefName|test("(^|[-/])issue-<N>([-/]|$)|-<N>-")) or (.body|test("(Fixes|Part of) #<N>\\b"))) | .number'
   ```
-  对**每一个**由 issue 派生的 PR 都做(fix / doc-update / delete / feature-phase PR 一视同仁)。
-  issue 无 milestone 就跳过(别瞎设)。
-- **PR 的 assignee/reviewer 继承来源 issue 的人。** 开 PR 后把来源 issue 的 **author +
-  assignees**(去重)设为 PR 的 assignee——他们是这件事的知情人和责任人,PR 出现在他们的
-  待办里才不会漏。**需要 human review 的 PR**(🔴 高风险 / security / A-vs-B 待拍板 /
-  🟡 draft `needs-human-review`)**同时把这些人设为 reviewer**;判断**不需要人确认**的
-  (🟢 机械修复、低风险档,pr-sweep 闸内可自动合)可不指定 reviewer,免得制造无意义的
-  review 请求。
-  ```bash
-  people=$(gh issue view <N> --json author,assignees \
-    --jq '([.author.login] + [.assignees[].login]) | unique | join(",")')
-  [ -n "$people" ] && gh pr edit <PR#> --add-assignee "$people"
-  # 仅当 PR 需要 human review 时:
-  gh pr edit <PR#> --add-reviewer "$people"
-  ```
-  指派失败(reviewer 恰是 PR 作者本人 / bot / 非协作者)就跳过并记一句,别 block——
-  与 issue-review 的 assignee 纪律一致。
+  output → SKIP; none → `git checkout -B claude/issue-<N> origin/<default_branch>`.
+- **Every spin-off writes a native edge**: `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <new>` (+ `--issue <later> --blocked-by <earlier>` for hard phase order).
+- One issue, one PR; `Part of #N`, or `Fixes #N` only when fully closed. PR body starts with the `<agent_identity_script> --header "PR" --skill issue-sweep` line.
+- Conventional Commits; never `--no-verify` by default (a hook that fails to spawn usually means `<package_manager> install` has not run).
+- Before any deletion/edit: `git grep` for importers + targeted `check-types`/test; dep changes stage the lockfile too. AI **never** merges.
+- Push: `git push -u origin <branch>`; after rebase/amend `bun scripts/git-push-lease.ts`.
+- **Verification**: `<verification_entry>` before push (red → no push, no PR); after `gh pr create`, `<verification_entry> --comment <PR#>`. Acceptance-named e2e (`/e2e-verify`) must really run.
+- **UI diff** (`<UI Face Paths>`): screenshots before the PR (`<ui_shot_script>` / `/ui-verify`), self-checked, embedded in the PR body via `<ui_upload_script>`, and echoed on the issue.
+- The PR inherits the issue's milestone and its author + assignees (also as reviewers when human review is needed).
+
+Full text of each rule, commands and incidents: Read [reference/discipline.md](reference/discipline.md).
 
 ## Step 5 — Be quiet when there's nothing
 
@@ -736,67 +234,11 @@ outward writes (no comments, PRs, labels, closes). For previewing before a real 
 Same `--dry-run` semantics as every loop skill — see the **Dry-run contract** in the
 plugin README.
 
-## Memory MCP（可选，当已配置时）
-
-如果运行环境的 MCP 工具列表包含 AFS 命名空间（`afs_read` / `afs_write` / `afs_search`，来自已连接的 ARC instance MCP 端点），在每轮 sweep 的 Step 0（sync `<default_branch>` 之后）增加两步：
-
-**Scan 前 recall（与读取 issue 列表并行）：**
-```
-afs_search /user/memory 关键词:<本轮重点 label / 子系统 / 常见问题域>
-```
-返回的 observations / patterns / principles 补充进 sweep 的初始上下文（「已知约束/规律快速热启」）。
-
-**每条 issue 处理完毕后 store（追加）：** 跨 issue 有价值的发现（同类 bug 根因、代码隐藏约束、团队决策）写入 memory。粒度三层：
-- `observation`：具体事实 + `path:line`
-- `pattern`：跨 issue 归纳出的规律
-- `principle`：推断出的工作原则
-
-路径：`afs_write /user/memory/<memory_namespace>/<namespace>/<id>`;caller 身份隔离，loop agent 间互不干扰。
-
-**未配置 MCP = 本节跳过**，sweep 其余行为完全不变。
+Optional Memory MCP usage: Read [reference/principles.md](reference/principles.md).
 
 ## Key principles
 
-0. **Sync `<default_branch>` before anything** (Step 0). Safety greps, type checks, and
-   branch-offs are only trustworthy against the latest tree; a stale clone
-   silently invalidates them.
-1. **Scan by label + last-comment, never by an updated-at window** — that window
-   is exactly what dropped issues with early, never-re-bumped human replies or
-   priority-only labels before.
-2. **Human vs AI is by content (`🤖 AI Agent` marker present near the top, not
-   necessarily the literal first line — see Step 2), not author** — both post
-   under the same account here.
-3. **`issue-review` does the per-issue work; this skill only decides what to feed
-   it and enforces the resolve-action + discipline rules.**
-4. **Safe-delete only; comment on what can't be cleanly/safely done** — live deps,
-   pending third-party confirm, security, A/B decisions stay human.
-5. **两层并发协调:advisory 锁(早)+ 确定性分支(硬,兜底)。** (a) `agent:hold` = 人类保留 =
-   **终态冻结**(绝不 close/终态处置,只人摘;但人类新评论仍要响应);`agent:processing` = 处理中互斥锁(TTL 30min),
-   Step 1 跳过新鲜锁的候选,`issue-review` 开工 acquire、收尾 release——把撞车提前到读/核验/测试之前。
-   (b) **确定性分支 `claude/issue-<N>` + 开 PR 前认领检查 + 一 issue 一 PR + `Fixes #N` + never
-   auto-merge** 是收尾硬去重:描述性 slug 分支名是多机重复 PR 的根因,必须只由 issue 号派生、创建前
-   查重 SKIP。锁是 advisory(有残留竞态),分支claim 顶上;残留重复由 `pr-sweep` 去重关闭兜底。
-6. **Silent no-op when nothing is pending — 而且沉默是 per-issue 的,不只是 per-round。** agent
-   **自发**处理完一条 issue 却既无动作也无新信息 → 不发 comment,结果只进 run report(Step 5 +
-   [`issue-review` Step 5.7](../issue-review/SKILL.md));同一条终态 disposition 也只发一次,要更新就
-   `--edit-last` 原地改。**但人类输入触发的必须回应**——否则 Step 2 谓词永远判它「未回应」,每轮
-   全额重跑。回应的收尾走 ratchet(「下一轮我会做 X,除非你说不」),不是「复核确认,现状不变」。
-6b. **图计算决定候选与传播,LLM 只负责做。** 每轮 Step 0.5 跑
-   `graph-scan`:kicks/rollupCandidates 注入候选(无需人类 comment),blocked 确定性
-   SKIP;开 spin-off 必写原生边(`link.ts`);无分支兜底的终态动作(rollup)用
-   `claim.ts` fencing 互斥。图只增强、不替代 label 扫描。
-7. **`--autofix-green`: verifiability is the gate, never auto-merge.** Auto-fix
-   only issues that pass all four gates (unambiguous + verifiable-in-this-env +
-   low-blast-radius + non-security); reproduce-first, one PR per issue, white-list
-   categories only. Can't run a test that proves it here → 🟡 draft PR + human, not
-   green. The set of 🟢 issues grows with the environment (TS-only vs full-platform
-   build). 🟢 = auto-PR, **not** auto-merge — the `pre-merge` verification gate + a human still gate the merge (no CI on the PR path).
-8. **Autonomous = ask on the issue, never block in-session.** This sweep runs
-   unattended — no human is babysitting. Any time the per-issue work (including
-   `design-review` / `build-phases` escalations) would normally stop and wait for
-   a human answer, **post the question as a comment on that issue** (options +
-   recommendation + what's blocked) and move on; don't sit on a blocking inline
-   prompt. The human answers async on the issue and the next sweep resumes it.
+The key principles (full text): Read [reference/principles.md](reference/principles.md).
 
 ## ★ sweep-trace 埋点（L2 可观测层）
 

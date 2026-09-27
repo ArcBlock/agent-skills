@@ -1,6 +1,9 @@
 ---
 name: issue-graph
-description: Deterministic issue-relationship graph over GitHub native sub-issues + dependencies — compute the ready set / parent-rollup candidates / close-kick targets as pure calculation (scripts, no LLM judgment), write real edges when creating spin-off issues, and mutually exclude terminal actions across parallel agents via claim-comment fencing. Called by issue-sweep (candidate injection), issue-review (edge writing + rollup), and the future agent:ready producer routine.
+description: >-
+  Deterministic issue graph over GitHub sub-issues + dependencies: ready set, parent-rollup
+  candidates, close-kicks, edge writing for spin-offs, and claim-comment fencing across parallel
+  agents. Used by issue-sweep and issue-review.
 ---
 
 # Issue Graph — 确定性 issue 关系图（原生边 + 图计算 + 并发原语）

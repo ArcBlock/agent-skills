@@ -62,6 +62,7 @@ const KEYS_READ_BY_SKILLS = [
   "pre_merge_entry",
   "merge_gate_entry",
   "reviewer_engines",
+  "change_set_record_entry",
 ] as const;
 
 describe("profile scaffold 的键集（#5697 review P2）", () => {

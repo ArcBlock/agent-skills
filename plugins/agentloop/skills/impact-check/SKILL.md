@@ -1,6 +1,8 @@
 ---
 name: impact-check
-description: Analyze code changes to find related areas that may also need modification. Supports uncommitted changes, specific commits, commit ranges, and branches. Use before committing or opening a PR to catch missed updates.
+description: >-
+  Find related code that may also need changing for uncommitted changes, a commit, a range or a
+  branch. Use before committing or opening a PR to catch missed updates.
 allowed-tools: Bash(git *), Read, Grep, Glob, Agent
 ---
 

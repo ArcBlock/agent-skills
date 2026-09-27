@@ -1,13 +1,9 @@
 ---
 name: codex-review-backlog
-description: >
-  Scan recently merged (and optionally open) GitHub PRs for unhandled
-  chatgpt-codex-connector[bot] review comments, re-validate each finding against
-  current main, fix OPEN_EASY items in domain-split PRs, track OPEN_HARD, and
-  stop when nothing actionable remains. Designed for a daily cron/routine or
-  manual /agentloop:codex-review-backlog. Use when the user asks to "scan Codex
-  reviews", "codex backlog", "unhandled codex after merge", or after a merge
-  wave where Codex often arrives late.
+description: >-
+  Scan merged (optionally open) PRs for unhandled Codex / bot review comments, re-validate each
+  against main, fix the easy ones, track the hard ones. Use for "codex backlog", "scan Codex
+  reviews", late bot findings after a merge wave, or a daily routine.
 ---
 
 # Codex Review Backlog — post-merge (and open) Codex follow-ups
@@ -15,8 +11,9 @@ description: >
 > **Why this exists.** Codex is usually **fast** on open PRs (minutes: findings or a
 > single 👍 = no opinions) — that pre-merge path is owned by
 > [`epic-conductor` §6](../epic-conductor/SKILL.md) and
-> [`pr-sweep`](../pr-sweep/SKILL.md) **short-wait (≤10m), never multi-hour stall**.
-> Codex can still post **after** merge or after the short wait. This skill is the
+> [`pr-sweep`](../pr-sweep/SKILL.md): **one `bot-clean.ts` check before merge (at most one ≤10m wait when
+> the last push is fresh and the vendor is still running), never a per-push wait or a multi-hour stall**.
+> Codex can still post **after** merge or after that check. This skill is the
 > complementary **post-merge / late lag sweep**: find comments that landed too late
 > for the open-PR loop, triage them on current `main`, and open small fix PRs
 > (never one mega-PR).
@@ -131,7 +128,7 @@ Quiet if:
 Then the daily comment is a one-liner: `Codex backlog quiet — window …, 0 OPEN_EASY`.
 
 **Do not** run a multi-hour (or even 45-minute) poll loop in the open-PR path.
-Pre-merge: short-wait ≤10m then advance (👍 / findings / silence). Post-merge lag
+Pre-merge: one `bot-clean.ts` check, then advance (👍 / findings / silence). Post-merge lag
 and anything that arrives after you already advanced is **this** skill's job
 (daily cron or manual). Pair with `pr-sweep` / `epic-conductor` for **pre-merge**.
 
@@ -139,8 +136,8 @@ and anything that arrives after you already advanced is **this** skill's job
 
 | Skill | When |
 |---|---|
-| `pr-review` / `pr-sweep` | Open PRs **before** merge; Codex short-wait + handle P1s; 👍 = clean |
-| `epic-conductor` §6 | Epic PRs: same short-wait contract; never stall waves on bot lag |
+| `pr-review` / `pr-sweep` | Open PRs **before** merge; one bot-clean check + handle P1s; 👍 on head = clean |
+| `epic-conductor` §6 | Epic PRs: same check-once contract; never stall waves on bot lag |
 | **`codex-review-backlog`** | **After** merge lag + optional open late comments |
 | `verification` | Gate every fix PR you open |
 

@@ -1,6 +1,9 @@
 ---
 name: fleet-setup
-description: One-command setup/update of an agentloop FLEET on a teammate's machine or cloud — asks a few defaulted questions, then generates/reconciles the two config files (deployment.json + repos.json) and installs the schedule. LOCAL = a crontab marker-block wiring fleet/driver.ts (one row per skill; the driver fans out to every covered repo). CLOUD = one claude routine per (repo×skill) via RemoteTrigger, batch-created from the same catalog. Idempotent — re-run to upgrade. This is the SCHEDULING side that `bootstrap` (repo adoption) deliberately leaves out. Interactive — never runs unattended.
+description: >-
+  Set up or update an agentloop fleet on a machine or in the cloud: generate/reconcile
+  deployment.json + repos.json and install the schedule (local crontab block or cloud routines).
+  Idempotent, interactive; never unattended.
 ---
 
 # Fleet Setup — one command, a few questions, the fleet is live
