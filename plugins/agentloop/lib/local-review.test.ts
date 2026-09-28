@@ -1430,11 +1430,11 @@ describe("★★ coder 引擎的来源：工厂写的凭据 vs 被审者写的�
     expect(c.engine).toBeUndefined();
   });
 
-  test("★ 没有 run 记录 → 退回正文，但**标记为未经证实**", () => {
-    // 工厂只能对自己派出去的活强制。别处来的 PR 它不知道——如实说「claimed」，
-    // 不假装 attested。
+  test("★ 没有 run 也没有 trailer → 不退回正文。缺席不是 attested，也不是 pass", () => {
     const c = coderEngineClaim(undefined, body("claude"));
-    expect(c).toMatchObject({ engine: "claude", source: "pr-body", attested: false });
+    expect(c).toMatchObject({ source: "none", attested: false });
+    expect(c.engine).toBeUndefined();
+    expect(crossEngineVerdict("codex", c.engine)).toEqual({ ok: false, reason: "unknown" });
   });
 
   test("★ 两边都没有 → 无从核对", () => {
@@ -1444,8 +1444,13 @@ describe("★★ coder 引擎的来源：工厂写的凭据 vs 被审者写的�
 
   test("★ run 记录里的 engine:unknown 同样是缺席，不是一个引擎名", () => {
     expect(coderEngineClaim("unknown", body("claude"))).toMatchObject({
+      source: "none",
+      attested: false,
+    });
+    expect(coderEngineClaim("unknown", body("claude")).engine).toBeUndefined();
+    expect(coderEngineClaim("unknown", body("codex"), "claude")).toMatchObject({
       engine: "claude",
-      source: "pr-body",
+      source: "commit-trailer",
       attested: false,
     });
   });
@@ -1530,12 +1535,15 @@ describe("★★ Gate 6 coder 引擎是集合，不是每 PR 一个值（#6184�
     ).toBe("PASS");
   });
 
-  test("★ 追加而不是覆盖：grok 写完 claude 再写，claim 集合保住 grok-build", () => {
+  test("★ 追加而不是覆盖：grok 写完 claude 再写，集合保住 grok-build", () => {
     const afterGrok = body("grok-build");
     const afterClaude = appendCoderEngine(afterGrok, "claude");
-    const claim = coderEngineClaim(undefined, afterClaude);
-    expect(claim.engine).toBe("grok-build+claude");
     expect(agentAuthored(afterClaude).coderEngines).toEqual(["grok-build", "claude"]);
+    // The door does not read that body. The same set has to arrive as trailers.
+    const fromBody = coderEngineClaim(undefined, afterClaude);
+    expect(fromBody.engine).toBeUndefined();
+    const claim = coderEngineClaim(undefined, afterClaude, "grok-build+claude");
+    expect(claim.engine).toBe("grok-build+claude");
     expect(crossEngineVerdict("grok-build", claim.engine).ok).toBe(false);
     expect(crossEngineVerdict("codex", claim.engine).ok).toBe(true);
   });
@@ -1575,12 +1583,15 @@ describe("★★ Gate 6 coder 引擎是集合，不是每 PR 一个值（#6184�
     expect(crossEngineVerdict("grok-build", c.engine).ok).toBe(false);
   });
 
-  test("★ claimed 侧单值不得因为 attested 放宽而变松：只有 claimed 时仍是单元素", () => {
+  test("★ 只有正文时集合是空的：不把 claimed 单值当成 attested 放宽", () => {
     const c = coderEngineClaim(undefined, body("claude"));
     expect(c.attested).toBe(false);
-    expect(c.engine).toBe("claude");
-    expect(c.source).toBe("pr-body");
-    expect(crossEngineVerdict("codex", c.engine).ok).toBe(true);
+    expect(c.engine).toBeUndefined();
+    expect(c.source).toBe("none");
+    expect(crossEngineVerdict("codex", c.engine)).toEqual({ ok: false, reason: "unknown" });
+    const trailed = coderEngineClaim(undefined, body("claude+codex"), "claude");
+    expect(trailed.engine).toBe("claude");
+    expect(crossEngineVerdict("codex", trailed.engine).ok).toBe(true);
   });
 
   test("★ pickDefaultReviewer 对混合作者挑一个不在集合里的引擎", () => {

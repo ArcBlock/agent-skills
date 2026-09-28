@@ -522,6 +522,12 @@ export interface LocalReviewAttestation {
   /** GitHub-attested PR author (`user.login`). */
   prAuthor: string | undefined;
   coderEngine: string | undefined;
+  /**
+   * False when `coderEngine` is only the author's commit trailer. SHA-binding
+   * stops a later edit; it does not prove someone else wrote the commit.
+   * Omitted means the caller did not say, and a cross-engine heading still stands.
+   */
+  coderAttested?: boolean;
   prHead: string;
 }
 
@@ -569,6 +575,14 @@ export function attestLocalReview(i: LocalReviewAttestation): GatePass | GateFai
     return {
       ok: false,
       reason: `cross-engine review independence is ${verdict.reason} (reviewer=${reviewer}, coder=${i.coderEngine ?? "(undeclared)"})`,
+    };
+  }
+  if (i.coderAttested === false) {
+    return {
+      ok: false,
+      reason:
+        `cross-engine review independence is unattested (reviewer=${reviewer}, coder=${i.coderEngine ?? "(undeclared)"})` +
+        " — a commit trailer is the author's own claim",
     };
   }
   // 正文里的「判决 **…**」是 producer 按 heading 算的。只改 marker 的
@@ -697,7 +711,7 @@ export function requireLocalReviewSticky(
   prHead: string,
   rerunHint: string,
   runner: Runner,
-  ctx: { prAuthor: string | undefined; coderEngine: string | undefined },
+  ctx: { prAuthor: string | undefined; coderEngine: string | undefined; coderAttested?: boolean },
 ): GatePass | GateFail {
   let captured: { body?: string; user?: { login?: string } | null } | undefined;
   const wrap: Runner = (cmd) => {
@@ -733,6 +747,7 @@ export function requireLocalReviewSticky(
     author: captured?.user?.login,
     prAuthor: ctx.prAuthor,
     coderEngine: ctx.coderEngine,
+    coderAttested: ctx.coderAttested,
     prHead,
   });
 }
@@ -1559,7 +1574,13 @@ export function reviewResultForRound(i: RoundVerdictInput): {
 
 /* ===== coder 引擎的来源 ===== */
 
-export type EngineSource = "run-record" | "pr-body" | "none";
+export type EngineSource = "run-record" | "commit-trailer" | "none";
+
+/**
+ * Not an engine. `git log` of the head object failed, threw, or the id was not
+ * 40 lowercase hex. Distinct from "the commit names no engine" (`undefined`).
+ */
+export const TRAILER_UNREADABLE = "\u0000trailer-unreadable";
 
 export interface CoderEngineClaim {
   engine?: string;
@@ -1570,24 +1591,25 @@ export interface CoderEngineClaim {
   attested: boolean;
   /** 两个来源矛盾 —— 证据被动过的信号，比「哪个为准」更重要。 */
   conflict?: { attested: string; claimed: string };
+  /**
+   * The head object could not be shown. Not `source: "none"` — absence of
+   * trailers is a successful read that named no engine.
+   */
+  unreadable?: boolean;
 }
 
 /**
  * coder 引擎该信谁（#5700）。
  *
- * **任何由被审方自己写下的声明都是可伪造的。** PR 正文一条 `gh pr edit --body` 就能改，
- * 整段删掉还能让这道门直接不适用；commit trailer 也一样——agent 控制自己的 commit。
- *
- * 唯一不可伪造的是**工厂侧写的 run 记录**：`worktreeOwner.branch ↔ engine` 由 worker
- * 在派工时写下，被审的 agent 够不到它。
- *
- * 三条规矩：
- *
- * 1. **有 run 记录就以它为准**，标 `attested`。
- * 2. **两个来源矛盾 = 伪造信号**，硬拦。这不是「以哪个为准」的问题——正文被改过这件事
- *    本身就是结论，`engine` 因此不给值，判决落到 BLOCKED。
- * 3. **没有 run 记录就退回正文，但标 `attested: false`**。工厂只能对自己派出去的活强制；
- *    别处来的 PR 它不知道，**如实说 claimed，不假装 attested**。
+ * 1. **有 run 记录就以它为准**，标 `attested`。与正文不相交 = 硬拦，`engine` 不给值。
+ *    trailer 不能把这条改掉。
+ * 2. **没有 run 记录，head 的 trailer 集合就是 coder 集合**，但 `attested: false`。
+ *    改 trailer 要换被审的 SHA，所以正文改 `engine:` 或删掉身份行都不改这个集合，
+ *    也不让门不适用。写成 trailer 的人就是这颗 SHA 的作者，所以它不是「另一个引擎
+ *    写的」的证明：同引擎 review 仍然硬拦，异引擎 review 也不能因此 PASS。
+ *    正文与 trailer 不一致时不掏空集合——掏空会让一次 `gh pr edit --body` 把本来
+ *    同引擎的 review 从硬拦变成另一条路。
+ * 3. **两个都没有 → `source: "none"`**。不退回正文。缺席不是「另一个引擎审过」。
  */
 /**
  * 这道跨引擎 review 闸**适不适用**于这条 PR —— 抽成纯函数，因为它的输入强度完全
@@ -1605,25 +1627,19 @@ export interface CoderEngineClaim {
  *   在开发机上手跑（`land` / 本机 `epic-conductor`）自然看不见——**那是设计，
  *   不是配置缺失**。别照着开发机上的一次 `resolveStateDirs() == []` 就推断这道门坏了。
  *
- * ## 适用范围 = 只有工厂派出去的活（收窄自「正文 ∪ run 记录」）
+ * ## 适用范围 = 不可伪造的 coder 集合（run 记录，或被审 head 的 commit trailer）
  *
- * 跨引擎 review 买的是**没有人在看的时候的外部视角**。attended 的路径（`land` /
- * 本机 `epic-conductor`）人就在旁边，那份视角人已经提供了；而在那里强制它，
- * 代价是实测过的：merge-gate 缺 sticky → 失败提示直接给出 reviewer 命令 → 跑一轮
- * （整个 diff 交给另一个引擎）→ 报 finding → fixer 提交 → **push 让 sticky 的 sha
- * 陈旧** → 提示又是同一条命令 → 再跑。**每一次修复都作废发现它的那份证据**，
- * 循环没有自然终点。arc#6255 实测：02:32→03:32 一小时三轮，一条 finding 都没关掉，
- * 判决 BLOCKED，53 秒后照样合并 —— 成本全付，保证为零。
- *
- * 所以范围键取**不可伪造的那一侧**：工厂的 run 记录。**不取 `skill:` 字段**——
- * 那和身份行一样住在 PR 正文里，等于把闸的适用范围交给被审方决定。
+ * 正文里的身份行不再决定范围：`gh pr edit --body` 删掉它，trailer 仍在的 PR 门照样跑。
+ * 既没有 run 记录、head 上也没有引擎 trailer 的 attended 路径仍然不适用（arc#6255：
+ * 在那里强制会让每次修复作废发现它的 review）。**不取 `skill:` 字段**——那和身份行
+ * 一样住在正文里。
  *
  * ## 收窄之后必须补的洞：「不是工厂的」不能和「看不见工厂」同色
  *
  * run 记录靠 `ARC_WORKER_HOMES` / `ARC_CODE_AGENT_STATE_DIR` 才找得到。这两个 env
- * 没设时 `claim.source` 永远不是 `run-record`，于是**整道闸对所有人静默 N/A**——
- * 「这条 PR 不归它管」与「这台机器根本没在数」读起来一模一样，正是本仓库度量纪律
- * 反对的那件事。`factory-not-visible` 让它们分色；调用方据此把两种 N/A 印成不同的话。
+ * 没设、head 上也没有引擎 trailer 时，`claim.source` 不是 `run-record` 也不是
+ * `commit-trailer`。那时「这条 PR 不归它管」与「这台机器根本没在数」必须分色
+ * （`factory-not-visible`）。有 trailer 的 PR 不走这条：commit 对象在，门适用。
  *
  * 判定顺序是刻意的：人写的 PR 在**任何** runner 上都读 `not-agent-authored`，
  * 不会因为这台机器看不见工厂就被标成「工厂不可见」——那会让真正的盲区淹没在噪声里。
@@ -1634,9 +1650,17 @@ export function reviewGateApplies(
   factoryVisible: boolean,
 ): {
   required: boolean;
-  why: "run-record" | "not-agent-authored" | "not-factory" | "factory-not-visible";
+  why:
+    | "run-record"
+    | "commit-trailer"
+    | "not-agent-authored"
+    | "not-factory"
+    | "factory-not-visible";
 } {
   if (claim.source === "run-record") return { required: true, why: "run-record" };
+  // Trailer evidence is bound to the SHA. Deleting the identity line must not
+  // skip the door, and a runner that cannot see factory state still has the commit.
+  if (claim.source === "commit-trailer") return { required: true, why: "commit-trailer" };
   if (!authored.required) return { required: false, why: "not-agent-authored" };
   if (!factoryVisible) return { required: false, why: "factory-not-visible" };
   return { required: false, why: "not-factory" };
@@ -1645,11 +1669,18 @@ export function reviewGateApplies(
 export function coderEngineClaim(
   attestedEngine: string | undefined,
   prBody: string | undefined,
+  trailerEngine?: string | undefined,
 ): CoderEngineClaim {
+  // Checked before parseEngineSet: the sentinel is not an engine name, and a
+  // failed read must not fall through to source "none" (that skips the door).
+  if (trailerEngine === TRAILER_UNREADABLE) {
+    return { source: "commit-trailer", attested: false, unreadable: true };
+  }
   const attestedSet = parseEngineSet(attestedEngine);
   const claimedSet = parseEngineSet(
     prBody === undefined ? undefined : agentAuthored(prBody).coderEngine,
   );
+  const trailerSet = parseEngineSet(trailerEngine);
   if (attestedSet.length && claimedSet.length) {
     const claimedNames = new Set(claimedSet);
     const disjoint = attestedSet.every((e) => !claimedNames.has(e));
@@ -1669,11 +1700,14 @@ export function coderEngineClaim(
       attested: true,
     };
   }
-  if (claimedSet.length) {
+  // No factory run. The body is not a source: adopting it, or withholding the
+  // trailer set because the body disagrees, both let `gh pr edit --body` change
+  // the decision. The trailer set stands. See the accept path on #5700.
+  if (trailerSet.length) {
     return {
-      engine: claimedSet.join("+"),
-      engines: claimedSet,
-      source: "pr-body",
+      engine: trailerSet.join("+"),
+      engines: trailerSet,
+      source: "commit-trailer",
       attested: false,
     };
   }
