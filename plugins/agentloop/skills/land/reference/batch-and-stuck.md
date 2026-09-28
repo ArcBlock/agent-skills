@@ -10,8 +10,8 @@
 - **每件一个 subagent，各自 `isolation: "worktree"`**，互不共享上下文。
 - 编排**串行 inline**——不要用 Workflow。
 - **同一台机器上同时最多 2 个重闸**（`verification_entry` / pre-merge / daily、advisory 门、全量
-  build/test 都算）。subagent 实现和 review 可以并行，跑闸前等你放行；放行前先看机器负载
-  （`uptime`，`load1` ≥ 核数就先不放）。这是调度，不是锁——仓库的机器级闸锁保持关闭。
+  build/test 都算）。subagent 实现和 review 可以并行，跑闸前等你放行。闸位按正在跑的闸计数，
+  不看 `load1`（这台机器的 load1 会被 fseventsd 抬高，当时并没有测试在跑）。这是调度，不是锁——仓库的机器级闸锁保持关闭。
 - 逐件独立汇报，一件失败不影响其余；**最后统一报一次**：哪些合了、哪些绿着待合、
   哪些卡住了、卡在哪。
 - 开工前检查各 PR 之间的**文件重叠**（`<plugin_root>/scripts/check-pr-path-overlap.ts`）。

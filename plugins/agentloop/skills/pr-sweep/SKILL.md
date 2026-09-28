@@ -116,7 +116,7 @@ The full text (the needsReview script, the label table, the repair-round format,
 
 ## Step 3 — 扇出 pr-review(clean context,每 PR 一个)
 
-每个开放 PR 交给 [`pr-review`](../pr-review/SKILL.md) 引擎,**干净上下文、独立判断**,带上它的 peer 簇信息。返回**结构化 verdict**(5 类 + verification 结果 + 冲突结论 + 证据 + 问题件的 comment 草稿)。每个 pr-review **读** PR 上同 SHA 的 verification 事实并纳入 verdict(PR 上已无 CI),**reviewer 不跑闸**(pr-review Step 3)。缺事实的 PR 由 sweep 自己(它是这些 PR 的推进者)跑 `<verification_entry> --comment <n>`——**同一时间最多 2 个重闸**(`<verification_entry>` / e2e-gate / ui-verify / 全量 build/test 都算;无人值守是串行,天然满足;交互式扇出时由主控发闸位),放行前看机器负载(`load1` ≥ 核数就先不放)。不跑 `pre-merge`:它和 pre-pr 贴同一个 marker,一次 FAIL 会覆盖有效的 PASS,重型覆盖归仓库的 main 捕网。独立代码审查、diff 核验和 verdict 绝不因读证据而跳过。
+每个开放 PR 交给 [`pr-review`](../pr-review/SKILL.md) 引擎,**干净上下文、独立判断**,带上它的 peer 簇信息。返回**结构化 verdict**(5 类 + verification 结果 + 冲突结论 + 证据 + 问题件的 comment 草稿)。每个 pr-review **读** PR 上同 SHA 的 verification 事实并纳入 verdict(PR 上已无 CI),**reviewer 不跑闸**(pr-review Step 3)。缺事实的 PR 由 sweep 自己(它是这些 PR 的推进者)跑 `<verification_entry> --comment <n>`——**同一时间最多 2 个重闸**(`<verification_entry>` / e2e-gate / ui-verify / 全量 build/test 都算;无人值守是串行,天然满足;交互式扇出时由主控发闸位)。闸位按正在跑的闸计数,不看 `load1`。同一 SHA 已有 PASS 时用 `--deliver-cached --comment`,不要再执行。不跑 `pre-merge`:它和 pre-pr 贴同一个 marker,一次 FAIL 会覆盖有效的 PASS,重型覆盖归仓库的 main 捕网。独立代码审查、diff 核验和 verdict 绝不因读证据而跳过。
 
 > **UI 改动的 PR:** pr-review 的 Step 3.5 核对 PR body 里的作者截图(命中 profile **UI Face Paths** 时);缺图是 `COMMENT` 级关注点,**arc 上不是合并闸**(merge-gate 的 ui-verify 门自 #7025 起 advisory,L1 捕网的 `uiShotSmoke` 负责)。只有 profile 把 `ui-verify` 列进 `additional_merge_gates` 的仓库,才需要 sticky 证据和下面的 `ui-verify:pending` 补跑闭环(#1205)。
 
@@ -145,7 +145,7 @@ Every `MERGE` / mergeable-`COMMENT` verdict passes **all** of these, re-checked 
 - No `agent:hold`; a PR with a human change request merges only after explicit approval words; verdict is `MERGE` or non-blocking `COMMENT`; claims verified; `mergeable == MERGEABLE` (rebase **only** on `CONFLICTING` or a red already fixed on main — merge-load covers "behind"); no unresolved same-issue/same-file conflict.
 - UI evidence and backend data-plane gates are **advisory** in arc (L1 catch-net owns them) unless listed in `additional_merge_gates`.
 
-Any FAIL blocks: a defect of this PR is fixed; a red that is not this PR's has exactly two exits — bisect to the root cause, or run `<verification_entry> --comment <pr#> --blocked-by <open issue#>` and let the gate attribute it. **不盲目重跑、不调超时洗绿**; the only exception is `TIMEOUT` with `failed=0`: one re-run with the raise-only timeout knob, value stated. Heavy gates: 同一台机器最多 2 个 (check load first).
+Any FAIL blocks: a defect of this PR is fixed; a red that is not this PR's has exactly two exits — bisect to the root cause, or run `<verification_entry> --comment <pr#> --blocked-by <open issue#>` and let the gate attribute it. **不盲目重跑、不调超时洗绿**; the only exception is `TIMEOUT` with `failed=0`: one re-run with the raise-only timeout knob, value stated. Heavy gates: 同一台机器最多 2 个,按正在跑的闸计数,不看 `load1`。
 
 **Risk tier, recomputed before every merge attempt:** 🟢 docs / tests / comments / release PRs → auto squash-merge; 🟡 bug fixes with tests, non-breaking features, additive protocol → auto-merge when every precondition holds, any reservation → comment; 🔴 security surface, breaking change (incompatible wire / schema without migration / removed public API / destructive data op), undecided architecture, human objection, gate-semantics change → **never auto-merge**: `pr-sweep:awaiting-caution` or `awaiting-direction` with pr-review's human-confirm block, and the source issue's author + assignees set as the PR's reviewers (assignment failure is skipped, never blocks). Before choosing 🔴, ask whether a safe default action exists — if yes, do it (ratchet).
 
@@ -170,7 +170,7 @@ How: Read [reference/ops.md](reference/ops.md).
 
 ## 限速 / 编排 / 幂等(批量必守)
 
-1. Fan out ~10–14 reviews per round, API ~250–300 POST/h. 2. **并发**:重闸(`<verification_entry>` / advisory 门 / 全量 build/test)同一台机器最多 2 个,放行前看负载. 3. Idempotent: labels + upserted comments, never a duplicate post.
+1. Fan out ~10–14 reviews per round, API ~250–300 POST/h. 2. **并发**:重闸(`<verification_entry>` / advisory 门 / 全量 build/test)同一台机器最多 2 个,按正在跑的闸计数,不看 `load1`. 3. Idempotent: labels + upserted comments, never a duplicate post.
 
 Detail: Read [reference/ops.md](reference/ops.md).
 

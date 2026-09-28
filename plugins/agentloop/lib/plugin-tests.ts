@@ -19,6 +19,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { type SuiteReader, scopeTestsToDiff } from "./diff-test-scope.ts";
 import { type CheckResult, run, tail } from "./report.ts";
 
 /** Directory prefix a plugin checkout lives under, relative to the repo root. */
@@ -33,6 +34,14 @@ export interface PluginTestsOptions {
   exec?: (cmd: string, cwd: string) => { code: number; out: string };
   /** per-plugin timeout in ms (default 10 min) */
   timeoutMs?: number;
+  /**
+   * L1 (daily / catch-net) runs every test file. L0 scopes to the tests that
+   * read the diff and falls back to the whole tree when a changed file has
+   * no static reader. Default is the L0 scope.
+   */
+  full?: boolean;
+  /** Named tests that read a class of file the static scan cannot see. */
+  suiteReaders?: readonly SuiteReader[];
 }
 
 /** Per-plugin outcome, exported for tests and for callers that want the detail. */
@@ -45,6 +54,8 @@ export interface PluginTestRun {
   pass: number;
   fail: number;
   out: string;
+  /** `files` = the readers of this diff; `tree` = the whole plugin suite. */
+  scope: "files" | "tree";
 }
 
 /**
@@ -191,11 +202,40 @@ export function runPluginTests(opts: PluginTestsOptions): PluginTestRun[] {
         pass: -1,
         fail: -1,
         out: "no *.test.ts discovered under this plugin tree",
+        scope: "tree",
       });
       continue;
     }
     const files = listTestFiles(abs, exec);
-    const { packed, isolated } = partitionIsolatedTestFiles(abs, files);
+    const changed = opts.changedFiles
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(`${plugin}/`))
+      .map((line) => line.slice(plugin.length + 1));
+    let runFiles = files;
+    let scope: "files" | "tree" = "tree";
+    if (!opts.full) {
+      const tests = files.map((path) => {
+        let source = "";
+        try {
+          source = readFileSync(join(abs, path), "utf8");
+        } catch {
+          source = "";
+        }
+        return { path, source };
+      });
+      const picked = scopeTestsToDiff({
+        changed,
+        tests,
+        root: abs,
+        suiteReaders: opts.suiteReaders,
+      });
+      if (picked.mode === "scoped") {
+        runFiles = picked.files;
+        scope = "files";
+      }
+    }
+    const { packed, isolated } = partitionIsolatedTestFiles(abs, runFiles);
     // Packed files share one `bun test`. Isolated files each get their own
     // process so a spawn-heavy suite cannot 30s-timeout its neighbours
     // (arc#6090). Passing explicit files (not dirs) keeps bun from pulling
@@ -227,6 +267,7 @@ export function runPluginTests(opts: PluginTestsOptions): PluginTestRun[] {
       pass: sawCrash ? -1 : pass,
       fail: sawCrash ? -1 : fail,
       out,
+      scope,
     });
   }
   return results;
@@ -270,6 +311,12 @@ export function checkPluginTests(opts: PluginTestsOptions): CheckResult {
     if (r.pass >= 0) totalPass += r.pass;
     if (r.fail > 0) totalFail += r.fail;
     stats[name] = r.code === 0 ? `${r.pass} pass` : `${r.pass} pass / ${r.fail} fail`;
+    if (r.scope === "files" && r.code === 0 && r.pass === 0) {
+      failures.push(
+        `=== ${r.plugin} — scoped run counted 0 passes ===\n` +
+          `a file selection that executed nothing is not a pass`,
+      );
+    }
     if (r.code !== 0) {
       failures.push(
         `=== ${r.plugin} — bun test ${r.dirs.join(" ")} FAILED (exit ${r.code}) ===\n${tail(r.out, 60)}`,
@@ -278,6 +325,7 @@ export function checkPluginTests(opts: PluginTestsOptions): CheckResult {
   }
   stats.pass = totalPass;
   stats.fail = totalFail;
+  stats.scope = runs.every((r) => r.scope === "files") ? "files" : "tree";
 
   return {
     check: "plugin-tests",

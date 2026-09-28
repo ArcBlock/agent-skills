@@ -17,7 +17,7 @@ Factory cockpit rows are `pid=-1`. The watchdog must fail-closed on them: they a
 
 Up to 3 workers (at most 4) may implement and get reviewed in parallel. **At most 2 heavy gates run on this machine at once.** A heavy gate is any `<verification_entry>`, `<pre_merge_entry>`, or daily run, an advisory gate run (e2e-gate / ui-verify), or a full build/test suite.
 
-You hand out the gate slots. A worker reports "ready to gate" and waits for your go before it runs the gate. Before you release a slot, look at machine load (`uptime`). Do not release a slot while `load1` is at or above the core count, or while two gates you know of are already running.
+You hand out the gate slots. A worker reports "ready to gate" and waits for your go before it runs the gate. Do not release a slot while two gates you know of are already running. Count those processes, not `load1`.
 
 This is scheduling, not a lock. Leave the repo's machine-wide gate lock off (arc: `ARC_GATE_LANE` stays unset). The gates you did not start — other sessions, sweeps — count against the 2 when you can see them. Cloud and remote runners have their own machines and their own 2. Do not try to serialize them from here.
 

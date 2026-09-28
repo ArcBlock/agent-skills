@@ -14,8 +14,8 @@
 降到 `1`。这个值限制 **active issue workers**,不是本轮最多处理多少 issue。
 
 **重闸另算,同一台机器最多 2 个。** worker 可以有 3 个,但同时在跑的重闸(`<verification_entry>` /
-e2e-gate / ui-verify / 全量 build/test)最多 2 个:worker 准备跑闸时向主控要闸位,主控放行前看一眼机器
-负载(`load1` ≥ 核数就先不放)。这是调度,不是锁——仓库的机器级闸锁保持关闭。worker 里若有独立
+e2e-gate / ui-verify / 全量 build/test)最多 2 个:worker 准备跑闸时向主控要闸位,主控按正在跑的闸计数,
+不看 `load1`。这是调度,不是锁——仓库的机器级闸锁保持关闭。worker 里若有独立
 reviewer,**review 在跑闸之前**,意见一次修完再跑一次闸;feature 管道里的 `design-review` 在人已记录设计
 决定时跳过,否则 `--max-rounds 2`。
 

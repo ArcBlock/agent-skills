@@ -103,7 +103,7 @@ human's latest comment — this is `issue-review`'s resolve phase:
 
 **Concurrency:** `--concurrency <N>` → env `AGENTLOOP_SKILL_CONCURRENCY` (the fleet driver injects `skillConcurrency["issue-sweep"]` from `repos.json`) → default `3`; integer `1..16` else config error; shrink to the runtime's free agent slots; 没有非交互 agent 能力时降到 `1`. It caps **active issue workers**, not issues per run.
 
-**重闸另算,同一台机器最多 2 个。** Workers may be 3, but at most 2 heavy gates (`<verification_entry>` / e2e-gate / ui-verify / full build/test) run at once: a worker asks the controller for a gate slot; the controller checks machine load first (`load1` ≥ cores → wait). Scheduling, not a lock. Inside a worker, **review before the gate**, fix the findings in one batch, then gate once; `design-review` is skipped when the human already recorded the decisions, else `--max-rounds 2`.
+**重闸另算,同一台机器最多 2 个。** Workers may be 3, but at most 2 heavy gates (`<verification_entry>` / e2e-gate / ui-verify / full build/test) run at once: a worker asks the controller for a gate slot; the controller counts running gates, not `load1`. Scheduling, not a lock. Inside a worker, **review before the gate**, fix the findings in one batch, then gate once; `design-review` is skipped when the human already recorded the decisions, else `--max-rounds 2`.
 
 1. **主控分配,worker 即时 claim。** The controller keeps the deduped queue and free slots and does **不预加** `agent:processing`; the worker's first act is `issue-review` Step 0 (re-verify + acquire); lost race → `SKIP_LOCKED`.
 2. **One worker owns one issue** and writes only that issue's comment/label/PR/branch.

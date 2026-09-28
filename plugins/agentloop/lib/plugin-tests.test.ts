@@ -124,9 +124,62 @@ describe("checkPluginTests (real bun runs)", () => {
       expect(r.pass).toBe(true);
       expect(r.blocking).toBe(true);
       expect(r.skipped).toBeUndefined();
-      expect(r.stats.pass).toBe(2);
-      expect(r.stats.fail).toBe(0);
-      expect(r.stats.demo).toBe("2 pass");
+      expect(r.stats?.pass).toBe(1);
+      expect(r.stats?.fail).toBe(0);
+      expect(r.stats?.scope).toBe("files");
+      expect(r.stats?.demo).toBe("1 pass");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("full: true still runs the whole suite (L1)", () => {
+    const root = fixtureRepo("demo", { "lib/a.test.ts": GREEN, "fleet/b.test.ts": GREEN });
+    try {
+      const r = checkPluginTests({
+        changedFiles: ".claude/plugins/demo/lib/a.test.ts",
+        repoRoot: root,
+        full: true,
+      });
+      expect(r.pass).toBe(true);
+      expect(r.stats?.pass).toBe(2);
+      expect(r.stats?.scope).toBe("tree");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a source file imported by one test does not run the neighbour", () => {
+    const root = fixtureRepo("demo", {
+      "lib/src.ts": "export const n = 1;\n",
+      "lib/src.test.ts": `${GREEN}\nimport { n } from "./src.ts";\n`,
+      "lib/other.test.ts": GREEN,
+    });
+    try {
+      const runs = runPluginTests({
+        changedFiles: ".claude/plugins/demo/lib/src.ts",
+        repoRoot: root,
+      });
+      expect(runs[0]?.scope).toBe("files");
+      expect(runs[0]?.pass).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a source file nobody reads falls back to the whole suite", () => {
+    const root = fixtureRepo("demo", {
+      "lib/unread.ts": "export const n = 1;\n",
+      "lib/a.test.ts": GREEN,
+      "lib/b.test.ts": GREEN,
+    });
+    try {
+      const runs = runPluginTests({
+        changedFiles: ".claude/plugins/demo/lib/unread.ts",
+        repoRoot: root,
+      });
+      expect(runs[0]?.scope).toBe("tree");
+      expect(runs[0]?.pass).toBe(2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -141,7 +194,7 @@ describe("checkPluginTests (real bun runs)", () => {
       });
       expect(r.pass).toBe(false);
       expect(r.blocking).toBe(true);
-      expect(r.stats.fail).toBe(1);
+      expect(r.stats?.fail).toBe(1);
       expect(r.rawTail).toContain("FAILED");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -158,8 +211,8 @@ describe("checkPluginTests (real bun runs)", () => {
       // 正控 3: empty suite must not share a colour with PASS.
       expect(r.pass).toBe(false);
       expect(r.blocking).toBe(true);
-      expect(r.stats.demo).toBe("no tests");
-      expect(r.stats.pass).toBe(0);
+      expect(r.stats?.demo).toBe("no tests");
+      expect(r.stats?.pass).toBe(0);
       expect(r.rawTail).toMatch(/no test suite discovered|empty suite is not a pass/);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -175,6 +228,7 @@ describe("checkPluginTests (real bun runs)", () => {
       const runs = runPluginTests({
         changedFiles: ".claude/plugins/demo/skills/s/test/a.test.ts",
         repoRoot: root,
+        full: true,
       });
       expect(runs[0].dirs).toEqual(["skills/s/test"]);
       expect(runs[0].pass).toBe(2); // 2, not 3 — the nested file runs exactly once
@@ -197,6 +251,7 @@ ${GREEN}`;
       runPluginTests({
         changedFiles: ".claude/plugins/demo/lib/a.test.ts",
         repoRoot: root,
+        full: true,
         exec: (cmd, cwd) => {
           cmds.push(cmd);
           const p = Bun.spawnSync(["bash", "-c", cmd], {

@@ -45,7 +45,7 @@ The full argument: Read [reference/background.md](reference/background.md).
 
 - **Resident, serial-inline.** React to completions. Do not nest a Workflow. No plan mode; decisions live in issue/PR comments.
 - **No `end_turn` with live hired children.** `status=running` and pid alive → stay (script above). A ghost dead pid is not live.
-- **Workers ~3; at most 2 heavy gates** on this machine. Heavy = `<verification_entry>`, `<pre_merge_entry>`, a daily run, an advisory gate, or a full suite. No slot while `load1` ≥ cores or two known gates run. `ARC_GATE_LANE` stays unset. Gates you did not start count when visible.
+- **Workers ~3; at most 2 heavy gates** on this machine. Heavy = `<verification_entry>`, `<pre_merge_entry>`, a daily run, an advisory gate, or a full suite. No slot while two known gates are already running. Count running gate processes, not `load1`. `ARC_GATE_LANE` stays unset. Gates you did not start count when visible.
 - **Model.** Runtime / gates / security / data-model → opus. Docs / mechanical / small blocklet → sonnet.
 - **Worktree** (`isolation: "worktree"`). **Workers do not merge.**
 

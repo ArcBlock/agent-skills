@@ -190,7 +190,7 @@ When posting the ledger, collapsing a kind, or stopping after three rounds, read
 
 ## 批量模式
 
-`land 5649 5651 5652`:每件一个 subagent(`isolation: "worktree"`),编排串行 inline。**同一台机器上同时最多 2 个重闸**(`verification_entry` / advisory 门 / 全量 build/test),放行前看负载(`uptime`,`load1` ≥ 核数就先不放)——调度,不是锁。开工前用 `<plugin_root>/scripts/check-pr-path-overlap.ts` 查文件重叠,重叠 PR 互相引用并写明合并序,未声明的不得合并。最后统一报一次。
+`land 5649 5651 5652`:每件一个 subagent(`isolation: "worktree"`),编排串行 inline。**同一台机器上同时最多 2 个重闸**(`verification_entry` / advisory 门 / 全量 build/test)。闸位按正在跑的闸计数,不看 `load1`。调度,不是锁。开工前用 `<plugin_root>/scripts/check-pr-path-overlap.ts` 查文件重叠,重叠 PR 互相引用并写明合并序,未声明的不得合并。最后统一报一次。
 
 When running more than one target, read [reference/batch-and-stuck.md](reference/batch-and-stuck.md).
 
