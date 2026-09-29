@@ -84,17 +84,41 @@ else
   if ! parsed="$(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print("%s\t%s" % (d.get("pr", ""), "yes" if d.get("ok") is True else "no"))
+tip = d.get("mainTip")
+tip_s = tip if isinstance(tip, str) else ""
+print("%s\t%s\t%s" % (d.get("pr", ""), "yes" if d.get("ok") is True else "no", tip_s))
 ' "$record" 2>&1)"; then
     echo "refusing: verdict record for PR #$pr at ${sha:0:9} is unreadable/unparseable" >&2
     echo "  $record" >&2
     echo "  $parsed" >&2
     exit 1
   fi
-  IFS=$'\t' read -r rec_pr rec_ok <<<"$parsed"
+  IFS=$'\t' read -r rec_pr rec_ok rec_main <<<"$parsed"
   [ "$rec_pr" = "$pr" ] || { echo "refusing: verdict record at ${sha:0:9} is for PR #$rec_pr, not #$pr" >&2; exit 1; }
   [ "$rec_ok" = "yes" ] || { echo "refusing: verdict record for PR #$pr is not ok=true" >&2; exit 1; }
-  echo "✓ merge-gate verdict found for PR #$pr @ ${sha:0:9}"
+  # The configured remote HEAD, not a hardcoded `main` (#7106, Codex P1 on
+  # #7285). A consumer whose default branch is not named main must still be
+  # checked. A missing origin/HEAD falls back to origin/main, the historical
+  # arc default.
+  base_ref="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  case "$base_ref" in
+    origin/*) ;;
+    *) base_ref="origin/main" ;;
+  esac
+  base_branch="${base_ref#origin/}"
+  # The local remote-tracking ref is not the live tip. Fetch immediately
+  # before the compare, or a stale origin/<base> matches a verdict that was
+  # also recorded against that stale ref.
+  if ! git fetch --no-tags origin "$base_branch" >/dev/null 2>&1; then
+    echo "refusing: could not fetch ${base_ref} before merge, so the recorded tip was not checked against the live remote. Re-run merge-gate." >&2
+    exit 1
+  fi
+  current_main="$(git rev-parse "$base_ref" 2>/dev/null || true)"
+  if [ -z "$rec_main" ] || [ "$current_main" != "$rec_main" ]; then
+    echo "refusing: ${base_ref} (${current_main:-unknown}) has moved past the main tip recorded in the merge-gate verdict (${rec_main:-<none>}). Re-run merge-gate." >&2
+    exit 1
+  fi
+  echo "✓ merge-gate verdict found for PR #$pr @ ${sha:0:9} (${base_ref} ${rec_main:0:9})"
 fi
 
 endpoint="repos/${repo:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}/pulls/$pr/merge"

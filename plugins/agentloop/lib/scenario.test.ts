@@ -4437,14 +4437,19 @@ describe("#6197 — attributed PASS must not render Overall FAIL", () => {
     expect(md).toMatch(/\| Tests \(root: scripts\) \| ❌ FAIL \|/);
   });
 
-  test("误拦: TIMEOUT .result stays TIMEOUT; Overall stays ❌ FAIL (not a new colour)", () => {
+  test("误拦: TIMEOUT .result stays TIMEOUT; Overall is ⏱️ BUDGET, not PASS (#7106)", () => {
+    // #6197: a timeout must not be washed into PASS, and .result stays TIMEOUT.
+    // #7106: that same run is not a code failure, so Overall is ⏱️ BUDGET
+    // rather than ❌ FAIL. A regression either way fails this test.
     const dir = repo();
     const { sha, code } = runScenarioIn(dir, false, "", { timedOut: "true" });
     expect(code).toBe(1);
     expect(liveResult(dir, sha)).toBe("TIMEOUT");
     const md = liveMd(dir, sha);
-    expect(md).toContain("**Overall: ❌ FAIL**");
+    expect(md).toContain("**Overall: ⏱️ BUDGET**");
+    expect(md).toContain("| Only | ⏱️ BUDGET |");
     expect(md).not.toContain("**Overall: ✅ PASS**");
+    expect(md).not.toContain("**Overall: ❌ FAIL**");
     expect(md).not.toMatch(/\*\*Overall:[^*]*TIMEOUT/);
   });
 

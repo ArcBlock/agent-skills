@@ -21,12 +21,39 @@ fi
 printf '%s\n' "$*" >> "$TEST_LOG"
 EOF
 chmod +x "$tmp/gh"
-export PATH="$tmp:$PATH" TEST_LOG="$tmp/log"
+# The merge script resolves origin/HEAD, fetches that branch, then rev-parses
+# it. Those three are stubbed. Everything else is the real git, so the
+# non-repo fallback below still asks `rev-parse --show-toplevel`.
+cat > "$tmp/git" << 'EOF'
+#!/usr/bin/env bash
+if [ "$1" = symbolic-ref ] && [ "$2" = --short ] && [ "$3" = refs/remotes/origin/HEAD ]; then
+  printf '%s\n' "${TEST_BASE_REF:-origin/main}"
+  exit 0
+fi
+if [ "$1" = fetch ]; then
+  printf '%s\n' "$*" >> "${TEST_FETCH_LOG:?}"
+  if [ "${TEST_FETCH_FAIL:-}" = 1 ]; then
+    exit 1
+  fi
+  exit 0
+fi
+if [ "$1" = rev-parse ] && [[ "${2:-}" == origin/* ]]; then
+  printf '%s\n' "${TEST_MAIN_TIP:?}"
+  exit 0
+fi
+exec /usr/bin/git "$@"
+EOF
+chmod +x "$tmp/git"
+export PATH="$tmp:$PATH" TEST_LOG="$tmp/log" TEST_FETCH_LOG="$tmp/fetch"
+export TEST_MAIN_TIP=1111111111111111111111111111111111111111
 
 verdicts="$tmp/verdicts"; mkdir -p "$verdicts"
 export ARC_MERGE_VERDICT_DIR="$verdicts"
 record="$verdicts/merge-gate.head.json"
-write_record() { printf '{"ok": %s, "pr": "%s", "sha": "head"}\n' "$1" "$2" > "$record"; }
+write_record() {
+  local tip="${3:-$TEST_MAIN_TIP}"
+  printf '{"ok": %s, "pr": "%s", "sha": "head", "mainTip": "%s"}\n' "$1" "$2" "$tip" > "$record"
+}
 
 fails() { # fails <label> -- runs the script, requires non-zero AND no merge call
   local label="$1"; shift
@@ -39,8 +66,24 @@ fails() { # fails <label> -- runs the script, requires non-zero AND no merge cal
 # Without this arm the whole suite is satisfied by a script that refuses
 # everything — the accept-path 铁律 applied to this gate itself.
 write_record true 42
+rm -f "$TEST_FETCH_LOG"
 "$root/merge-verified-pr.sh" 42 --repo owner/repo --method squash
 grep -F 'api --method PUT repos/owner/repo/pulls/42/merge -f sha=head -f merge_method=squash' "$TEST_LOG"
+grep -F 'fetch --no-tags origin main' "$TEST_FETCH_LOG"
+
+# A non-main default branch is fetched and compared under its own name.
+export TEST_BASE_REF=origin/develop
+rm -f "$TEST_LOG" "$TEST_FETCH_LOG"
+"$root/merge-verified-pr.sh" 42 --repo owner/repo --method squash
+grep -F 'fetch --no-tags origin develop' "$TEST_FETCH_LOG"
+grep -F 'api --method PUT repos/owner/repo/pulls/42/merge -f sha=head -f merge_method=squash' "$TEST_LOG"
+unset TEST_BASE_REF
+
+# A failed fetch is not "the local ref is still current".
+export TEST_FETCH_FAIL=1
+rm -f "$TEST_LOG" "$TEST_FETCH_LOG"
+fails "fetch failed" "$root/merge-verified-pr.sh" 42 --repo owner/repo
+unset TEST_FETCH_FAIL
 
 # ── REJECT: the four ways the record can fail to prove this merge ───────────
 rm -f "$record"
@@ -49,6 +92,12 @@ write_record true 99
 fails "record is for another PR" "$root/merge-verified-pr.sh" 42 --repo owner/repo
 write_record false 42
 fails "record says ok=false" "$root/merge-verified-pr.sh" 42 --repo owner/repo
+write_record true 42 2222222222222222222222222222222222222222
+fails "newer main tip" "$root/merge-verified-pr.sh" 42 --repo owner/repo
+set +e; moved="$("$root/merge-verified-pr.sh" 42 --repo owner/repo 2>&1)"; set -e
+grep -qF 'Re-run merge-gate' <<<"$moved"
+grep -qF 'has moved past' <<<"$moved"
+write_record true 42
 printf 'not json at all' > "$record"
 fails "record is unparseable" "$root/merge-verified-pr.sh" 42 --repo owner/repo
 
@@ -71,7 +120,7 @@ fails "escape hatch without a reason" "$root/merge-verified-pr.sh" 42 --repo own
 # 而 TS 侧落到 cwd —— 两侧回退不一致，就是「闸刚过却拒绝合并」。
 unset ARC_MERGE_VERDICT_DIR
 outside="$tmp/notarepo"; mkdir -p "$outside/.verify"
-printf '{"ok": true, "pr": "42", "sha": "head"}\n' > "$outside/.verify/merge-gate.head.json"
+printf '{"ok": true, "pr": "42", "sha": "head", "mainTip": "%s"}\n' "$TEST_MAIN_TIP" > "$outside/.verify/merge-gate.head.json"
 rm -f "$TEST_LOG"
 ( cd "$outside" && GIT_CEILING_DIRECTORIES="$tmp" "$root/merge-verified-pr.sh" 42 --repo owner/repo >/dev/null )
 grep -F 'api --method PUT repos/owner/repo/pulls/42/merge' "$TEST_LOG"

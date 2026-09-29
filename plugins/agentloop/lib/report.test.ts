@@ -69,6 +69,57 @@ describe("renderReport", () => {
     expect(md).toContain("TS2345: bad");
   });
 
+  test("over budget and a test failure are different colours (#7106)", () => {
+    const md = renderReport(
+      [
+        {
+          check: "rootTests",
+          title: "Tests (root)",
+          pass: false,
+          blocking: true,
+          durationMs: 600_000,
+          stats: { timedOut: "true", failed: 0 },
+          failure: { class: "BUDGET", reason: "budget-exhausted" },
+          rawTail: "Timed out after 600000ms (budget 600000ms).",
+        },
+        {
+          check: "tests",
+          title: "Tests (affected)",
+          pass: false,
+          blocking: true,
+          durationMs: 10,
+          stats: { failed: 2 },
+          failure: { class: "CODE", reason: "observed-test-failures" },
+          rawTail: "(fail) boom",
+        },
+      ],
+      { scenario: "main-catchnet" },
+    );
+    expect(md).toContain("| Tests (root) | ⏱️ BUDGET |");
+    expect(md).toContain("| Tests (affected) | ❌ FAIL |");
+    expect(md).toContain("**Overall: ❌ FAIL**");
+  });
+
+  test("a run that only exceeded its budget is not painted as tests failed", () => {
+    const md = renderReport(
+      [
+        {
+          check: "rootTests",
+          title: "Tests (root)",
+          pass: false,
+          blocking: true,
+          durationMs: 1,
+          stats: { timedOut: "true" },
+          failure: { class: "BUDGET", reason: "budget-exhausted" },
+        },
+      ],
+      { scenario: "main-catchnet", derived: "TIMEOUT" },
+    );
+    expect(md).toContain("| Tests (root) | ⏱️ BUDGET |");
+    expect(md).toContain("**Overall: ⏱️ BUDGET**");
+    expect(md).not.toContain("❌ FAIL");
+  });
+
   test("a warn-only (non-blocking) failure keeps Overall PASS", () => {
     const warn: CheckResult[] = [
       {
@@ -847,7 +898,7 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
     expect(omitted).toBe(supplied);
   });
 
-  test("误拦: TIMEOUT derived does not change the Overall colour (still ❌ FAIL)", () => {
+  test("TIMEOUT derived and an omitted derived agree, and that colour is not a test failure (#7106)", () => {
     const timeoutRow: CheckResult = {
       check: "tests",
       title: "Tests (affected)",
@@ -860,8 +911,9 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
     const supplied = renderReport([timeoutRow], { scenario: "pre-pr", derived: "TIMEOUT" });
     const omitted = renderReport([timeoutRow], { scenario: "pre-pr" });
     expect(supplied).toBe(omitted);
-    expect(overall(supplied)).toBe("❌ FAIL");
-    expect(supplied).not.toMatch(/\*\*Overall:[^*]*TIMEOUT/);
+    expect(overall(supplied)).toBe("⏱️ BUDGET");
+    expect(supplied).toContain("| Tests (affected) | ⏱️ BUDGET |");
+    expect(supplied).not.toContain("❌ FAIL");
   });
 
   test("误拦: green rows + derived PASS (PARTIAL's underlying derived) stay Overall PASS", () => {

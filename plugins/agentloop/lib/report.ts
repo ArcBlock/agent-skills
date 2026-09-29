@@ -491,6 +491,19 @@ function isFailFastSkipReason(r: CheckResult): boolean {
   return typeof r.skipped === "string" && r.skipped.includes("fail-fast");
 }
 
+/**
+ * Over budget with nothing observed red (#7106). A different colour from a
+ * test failure: both are `pass: false`, and painting them both ❌ FAIL is how
+ * a watchdog kill got treated as a code red.
+ */
+export function isOverBudget(r: CheckResult): boolean {
+  if (r.pass || isSkipped(r)) return false;
+  if (r.failure?.class === "BUDGET") return true;
+  const failed = r.stats?.failed;
+  const failedCount = failed === undefined ? 0 : Number(failed);
+  return String(r.stats?.timedOut) === "true" && failedCount === 0;
+}
+
 function icon(r: CheckResult, history: SkipHistory): string {
   if (isSkipped(r)) {
     if (isFailFastSkipReason(r)) {
@@ -501,6 +514,7 @@ function icon(r: CheckResult, history: SkipHistory): string {
     return "⊘ SKIP";
   }
   if (r.pass) return "✅ PASS";
+  if (isOverBudget(r)) return "⏱️ BUDGET";
   return r.blocking ? "❌ FAIL" : "⚠️ WARN";
 }
 
@@ -562,10 +576,9 @@ const dur = (ms: number | undefined): string =>
  *
  * `opts.derived` is the already-adjudicated aggregate (#6197). The table rows
  * stay the raw checks (a foreign-flaky red stays red); Overall is the verdict
- * written to `.result`, not a re-sum of those rows. TIMEOUT still renders as
- * ❌ FAIL and a green partial still renders as ✅ PASS — those colours are
- * unchanged; the finer token lives on the sticky marker / `.result`. Omit
- * only in unit tests that are not about attribution.
+ * written to `.result`, not a re-sum of those rows. A pure over-budget run
+ * renders ⏱️ BUDGET, not ❌ FAIL (#7106). A green partial still renders as
+ * ✅ PASS. Omit `derived` only in unit tests that are not about attribution.
  */
 export function renderReport(
   results: CheckResult[],
@@ -630,6 +643,10 @@ export function renderReport(
         .join("\n")}`
     : "";
 
+  const budgetOnly =
+    opts.derived === "TIMEOUT" ||
+    (opts.derived === undefined && !ok && deriveResult(results) === "TIMEOUT");
+  const overall = ok ? "✅ PASS" : budgetOnly ? "⏱️ BUDGET" : "❌ FAIL";
   const shaStr = opts.sha ? ` sha \`${opts.sha.slice(0, 9)}\`` : "";
   // Identity header passed in by the scenario layer (not computed here) so the
   // engine stays repo-agnostic; still injected deterministically so an agent
@@ -645,7 +662,7 @@ ${origin ? `\n${origin}\n` : ""}${notice ? `\n${notice}\n` : ""}
 |-------|--------|-------|----------|
 ${rows}
 
-**Overall: ${ok ? "✅ PASS" : "❌ FAIL"}** (${dur(total)} total${
+**Overall: ${overall}** (${dur(total)} total${
     Number.isFinite(opts.wallMs) ? ` · ${dur(opts.wallMs)} wall` : ""
   })${failBlock}${notesBlock}${logsBlock}
 
