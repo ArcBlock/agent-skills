@@ -10,6 +10,7 @@ import {
   assertReviewerEngine,
   attestLocalReview,
   type Convergence,
+  canonicalizeEngine,
   coderEngineClaim,
   collectReviewOutput,
   contractRetryPrompt,
@@ -42,6 +43,7 @@ import {
   resolveSubjectEngine,
   reviewExcerpt,
   reviewerArgv,
+  reviewerAttemptCountsRound,
   reviewerEngines,
   reviewResult,
   reviewResultForRound,
@@ -169,6 +171,99 @@ describe("★ crossEngineVerdict —— reviewer.engine ≠ coder.engine 是硬�
       ok: true,
       reason: "cross-engine",
     });
+  });
+});
+
+describe("★ arc#6264 —— 中文小节头与 engine:grok 别名", () => {
+  const tableWithout = (id: string) =>
+    Object.fromEntries(Object.entries(FIXTURE).filter(([k]) => k !== id));
+
+  test("★ ACCEPT：完整审查意见（全角/半角冒号）+ (none) 与英文小节同色，零条", () => {
+    for (const heading of ["完整审查意见：", "完整审查意见:"]) {
+      const r = parseCodexReview(`总结。\n\n${heading}\n\n(none)`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.findings).toEqual([]);
+    }
+    const en = parseCodexReview("总结。\n\nFull review comments:\n\n(none)");
+    expect(en.ok).toBe(true);
+    if (en.ok) expect(en.findings).toEqual([]);
+  });
+
+  test("★ ACCEPT：中文小节下的 finding 仍算同一节（否则只放行 (none)）", () => {
+    const r = parseCodexReview(
+      ["总结。", "", "完整审查意见:", "", "- [P2] 标题 — a.ts:12", "  会怎样错"].join("\n"),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.findings).toEqual([
+      expect.objectContaining({ severity: "P2", title: "标题", file: "a.ts", line: "12" }),
+    ]);
+  });
+
+  test("★ REJECT：两种小节头都没有 → unparseable，不是 ok 且 findings=[]", () => {
+    const r = parseCodexReview("看起来没问题。\n\n(none)\n");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("unparseable");
+    expect(r.kind).toBe("missing-section");
+    expect({ ok: r.ok, n: r.findings.length }).not.toEqual({ ok: true, n: 0 });
+  });
+
+  test("★ 中文小节头同样截断 Prior findings", () => {
+    const d = parsePriorDispositions(
+      [
+        "Prior findings:",
+        "- [fixed] a1 done",
+        "",
+        "完整审查意见：",
+        "- [open] a2 must-not-count",
+        "",
+        "(none)",
+      ].join("\n"),
+    );
+    expect(d.get("a1")).toBe("fixed");
+    expect(d.has("a2")).toBe(false);
+  });
+
+  test("★ ACCEPT：grok 收到表里的 grok-build；grok-build 审 grok 是同引擎", () => {
+    // FIXTURE 含 grok-build。别名必须盖过字面 id `grok`，否则两者被读成跨引擎 PASS。
+    expect(canonicalizeEngine("grok")).toBe("grok-build");
+    expect(crossEngineVerdict("claude", "grok")).toMatchObject({
+      ok: true,
+      reason: "cross-engine",
+    });
+    expect(crossEngineVerdict("grok-build", "grok")).toMatchObject({
+      ok: false,
+      reason: "same-engine",
+    });
+    // 生产表没有叫 grok 的键（注册 id 是 grok-build，bin 才是 grok）。
+    // 不设别名时这里是 "" / unknown，和「没审过」同色。
+    setReviewerEngines(tableWithout("grok"));
+    expect(canonicalizeEngine("grok")).toBe("grok-build");
+    expect(crossEngineVerdict("claude", "grok")).toMatchObject({
+      ok: true,
+      reason: "cross-engine",
+    });
+    expect(crossEngineVerdict("grok-build", "grok")).toMatchObject({
+      ok: false,
+      reason: "same-engine",
+    });
+  });
+
+  test("★ REJECT：grokk / codxe 仍是 unknown，别名不得变成跨引擎 PASS", () => {
+    expect(canonicalizeEngine("grokk")).toBe("");
+    expect(crossEngineVerdict("claude", "grokk")).toMatchObject({ ok: false, reason: "unknown" });
+    expect(crossEngineVerdict("claude", "codxe")).toMatchObject({ ok: false, reason: "unknown" });
+    setReviewerEngines(tableWithout("grok"));
+    expect(canonicalizeEngine("grokk")).toBe("");
+    expect(crossEngineVerdict("claude", "grokk")).toMatchObject({ ok: false, reason: "unknown" });
+  });
+
+  test("★ 表里没有 grok-build 时不发明这个 id", () => {
+    setReviewerEngines(tableWithout("grok-build"));
+    expect(canonicalizeEngine("grok")).toBe("grok");
+    expect(canonicalizeEngine("grok-build")).toBe("");
   });
 });
 
@@ -1155,6 +1250,83 @@ describe("★ 轮次与收敛 —— 不限轮次的 reviewer 会漂移，不会
     const d = parsePriorDispositions(report);
     expect(d.get("a1")).toBe("fixed");
     expect(d.get("a2")).toBe("open");
+  });
+
+  test("★ arc#7399 ACCEPT: JSON summary 里的判定行按解码后的换行解析", () => {
+    const summary = [
+      "Prior findings:",
+      "- [fixed] f9md1ln 已修",
+      "- [open] f9md2ln 仍开",
+      "Full review comments:",
+      "(none)",
+    ].join("\n");
+    const report = JSON.stringify({ summary, findings: [], nonce: "arc-review-nonce-abc" });
+    // One physical line. Scanning the raw object misses every escaped row.
+    expect(report.split("\n")).toHaveLength(1);
+    const d = parsePriorDispositions(report);
+    expect(d.get("f9md1ln")).toBe("fixed");
+    expect(d.get("f9md2ln")).toBe("open");
+    const diag = dispositionParseDiag(["f9md1ln", "f9md2ln"], d);
+    expect(diag.unmatched).toEqual([]);
+  });
+
+  test("★ arc#7399 REJECT: summary 没有判定行时不回退去扫 JSON 原文", () => {
+    const summary = ["Prior findings:", "(none)", "Full review comments:", "(none)"].join("\n");
+    const report = JSON.stringify(
+      {
+        summary,
+        notes: "- [fixed] f9md1ln 不在 summary 里",
+        findings: [],
+        nonce: "n",
+      },
+      null,
+      2,
+    );
+    expect(report).toContain("- [fixed] f9md1ln");
+    expect(parsePriorDispositions(report).size).toBe(0);
+  });
+
+  test("★ arc#7399 进程失败：没有本轮 nonce 不计入轮次；有 nonce 或进程正常结束则计入", () => {
+    const nonce = "arc-review-nonce-7399";
+    expect(
+      reviewerAttemptCountsRound({ failed: false, stdout: "prose without nonce", nonce }),
+    ).toBe(true);
+    expect(
+      reviewerAttemptCountsRound({
+        failed: true,
+        stdout: "ERROR: model requires a newer Codex",
+        nonce,
+      }),
+    ).toBe(false);
+    expect(reviewerAttemptCountsRound({ failed: true, stdout: "", nonce })).toBe(false);
+    expect(
+      reviewerAttemptCountsRound({
+        failed: true,
+        stdout: `本轮的结束标记是 ${nonce},开始审查。\nstill going`,
+        nonce,
+      }),
+    ).toBe(false);
+    expect(
+      reviewerAttemptCountsRound({
+        failed: true,
+        stdout: JSON.stringify({ summary: "x", findings: [], nonce: "other-nonce" }),
+        nonce,
+      }),
+    ).toBe(false);
+    expect(
+      reviewerAttemptCountsRound({
+        failed: true,
+        stdout: JSON.stringify({ summary: "x", findings: [], nonce }),
+        nonce,
+      }),
+    ).toBe(true);
+    expect(
+      reviewerAttemptCountsRound({
+        failed: true,
+        stdout: `Full review comments:\n(none)\n${nonce}\n`,
+        nonce,
+      }),
+    ).toBe(true);
   });
 
   test("★ 判定 id 锚定字符集，不吞 CJK / 冒号（#6064）", () => {
@@ -2401,6 +2573,13 @@ describe("★★ arc#6165 + #6172 —— 解析失败不得绞死 finding / 原�
     expect(src).not.toMatch(/outputMode === "stdout" \? "pipe" : "inherit"/);
     // persist 必须在 parse 之前。把两行调换会让「解析崩了原文没落」再出现。
     expect(src.indexOf("persistReviewRaw(")).toBeLessThan(src.indexOf("parseCodexReview("));
+    // arc#7399: a dead process with no nonce must exit before the round body
+    // is printed and before --post can upsert over the previous comment.
+    const gate = src.indexOf("reviewerAttemptCountsRound(");
+    expect(gate).toBeGreaterThan(0);
+    expect(gate).toBeLessThan(src.indexOf("console.log(body)"));
+    expect(gate).toBeLessThan(src.indexOf("if (post)"));
+    expect(src).toContain("不计入 round，不覆盖已有 review comment。");
   });
 });
 

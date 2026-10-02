@@ -38,7 +38,7 @@ export interface ReviewFinding {
  * （arc#6165 / #6172）。
  *
  * - `empty`            模型原文一个字都没有
- * - `missing-section`  没有 `Full review comments:` 小节（codex 干净时常这样）
+ * - `missing-section`  没有 `Full review comments:` / `完整审查意见` 小节（codex 干净时常这样）
  * - `unrecognised`     有小节，但 finding 行认不出
  * - `incomplete`       结束标记（nonce）缺失 —— 输出可能被截断，但中间也许有真 finding
  */
@@ -186,7 +186,7 @@ export function parseKindLabel(kind: UnparseableKind): string {
     case "empty":
       return "原文为空";
     case "missing-section":
-      return "没有 `Full review comments:` 小节";
+      return "没有 `Full review comments:` / `完整审查意见` 小节";
     case "unrecognised":
       return "有小节但 finding 认不出";
     case "incomplete":
@@ -448,6 +448,9 @@ export function canonicalizeEngine(v: string | undefined, table: ReviewerTable =
   if (!t) return "";
   const ids = registeredIds(table);
   if (ids.size === 0) return "";
+  // 身份行写 `engine:grok`（那是 bin）。注册 id 是 `grok-build`。
+  // 只有这张表里真有 `grok-build` 才收成它；拼错、或表里没有，仍是 unknown。
+  if (t === "grok" && ids.has("grok-build")) return "grok-build";
   return ids.has(t) ? t : "";
 }
 
@@ -776,7 +779,18 @@ export function requireLocalReviewSticky(
  * 所以路径两侧各允许一个可选反引号,而不是只允许包住整体的那一对。
  */
 const FINDING_RE = /^-\s*\[(P\d)\]\s*(.+?)\s+—\s+`?([^\s`]+?)`?:(\d+(?:-\d+)?)`?(\s.*)?$/;
-const SECTION = "Full review comments:";
+/** 契约英文小节，以及 reviewer 实际写出的两个中文小节（#6264，全角/半角冒号都算）。 */
+const SECTION_HEADINGS = ["Full review comments:", "完整审查意见：", "完整审查意见:"] as const;
+
+function findSection(text: string, from = 0): { index: number; length: number } | undefined {
+  let best: { index: number; length: number } | undefined;
+  for (const heading of SECTION_HEADINGS) {
+    const index = text.indexOf(heading, from);
+    if (index < 0) continue;
+    if (!best || index < best.index) best = { index, length: heading.length };
+  }
+  return best;
+}
 
 /** 单条 finding 正文的上限。超出要**说出来**，不能悄悄截。 */
 const BODY_CAP = 1200;
@@ -838,8 +852,8 @@ function parseReviewBody(
   complete: boolean | undefined,
 ): BodyResult {
   if (!text.trim()) return { ok: false, kind: "empty", findings: [] };
-  const idx = text.indexOf(SECTION);
-  if (idx < 0) {
+  const section = findSection(text);
+  if (!section) {
     // 没有小节头。**不许因为「找不到 finding」就判干净**。
     const body = text.split("\n");
     const orphan = body.filter((l) => /\[P\d\]/.test(l));
@@ -880,7 +894,7 @@ function parseReviewBody(
     };
   }
   const findings: ReviewFinding[] = [];
-  const lines = text.slice(idx + SECTION.length).split("\n");
+  const lines = text.slice(section.index + section.length).split("\n");
   let current: ReviewFinding | undefined;
   let unclaimed = 0;
   let sawCleanSentinel = false;
@@ -1027,6 +1041,33 @@ function repoRelative(p: string, repoRoot?: string): string {
 export interface ReviewAttempt {
   stdout: string;
   failed: boolean;
+}
+
+/**
+ * Whether this attempt consumes a review round.
+ *
+ * A zero exit always counts, including unparseable prose (that is still a
+ * finished run). A failed process counts only when this round's nonce is
+ * present: JSON `nonce` equal to `nonce`, or the last non-empty line equal
+ * to `nonce`. Dying before the nonce means the reviewer did not run —
+ * counting it as BLOCKED burns the 3-round cap and an upsert would replace
+ * the previous comment (arc#7399).
+ */
+export function reviewerAttemptCountsRound(input: {
+  failed: boolean;
+  stdout: string;
+  nonce: string;
+}): boolean {
+  if (!input.failed) return true;
+  return outputCarriesRoundNonce(input.stdout, input.nonce);
+}
+
+function outputCarriesRoundNonce(stdout: string, nonce: string): boolean {
+  if (!nonce) return false;
+  const obj = parseWholeJsonObject(stdout);
+  if (obj && obj.nonce === nonce) return true;
+  const nonEmpty = stdout.split("\n").filter((line) => line.trim() !== "");
+  return nonEmpty.length > 0 && nonEmpty[nonEmpty.length - 1]?.trim() === nonce;
 }
 
 /**
@@ -1402,13 +1443,26 @@ export function roundPrompt(round: number, prior: readonly StateFinding[]): stri
 // Id class is [A-Za-z0-9]+ (findingId = f + base36). `_`/`-` in the class ate wrapping `_id_`.
 const DISPOSITION_RE = /^[-*]\s*\[(fixed|open|regressed)\]\s+[`*_]*([A-Za-z0-9]+)/;
 
+/**
+ * Codex writes the contract inside JSON `summary`, with real newlines only
+ * after parse. Scanning the raw object leaves those lines escaped, so every
+ * id is missed (arc#7399). A string `summary` is the whole scan — no
+ * fallback into the escaped JSON when that summary has no disposition rows.
+ */
+function dispositionSource(report: string): string {
+  const obj = parseWholeJsonObject(report);
+  if (obj && typeof obj.summary === "string") return obj.summary;
+  return report;
+}
+
 /** 判定表从报告里解析——格式是契约的一部分，不是随便写写。 */
 export function parsePriorDispositions(report: string): Map<string, Disposition> {
   const out = new Map<string, Disposition>();
-  const start = report.indexOf("Prior findings:");
+  const source = dispositionSource(report);
+  const start = source.indexOf("Prior findings:");
   if (start < 0) return out;
-  const endIdx = report.indexOf(SECTION, start);
-  const body = report.slice(start, endIdx < 0 ? undefined : endIdx);
+  const end = findSection(source, start);
+  const body = source.slice(start, end ? end.index : undefined);
   for (const line of body.split("\n")) {
     const m = DISPOSITION_RE.exec(line.trim());
     if (m) out.set(m[2], m[1] as Disposition);

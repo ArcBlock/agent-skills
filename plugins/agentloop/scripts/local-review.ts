@@ -46,6 +46,7 @@ import {
   reportContractWithNonce,
   resolveSubjectEngine,
   reviewerArgv,
+  reviewerAttemptCountsRound,
   reviewResultForRound,
   roundPrompt,
   type StateFinding,
@@ -342,7 +343,7 @@ function spawnOnce(
   const failed = Boolean(proc.error) || proc.signal !== null || (proc.status ?? 1) !== 0;
   if (failed) {
     console.error(
-      `⚠ reviewer 进程未正常结束（status=${proc.status} signal=${proc.signal} ${proc.error?.message ?? ""}）—— 判决降为 BLOCKED`,
+      `⚠ reviewer 进程未正常结束（status=${proc.status} signal=${proc.signal} ${proc.error?.message ?? ""}）`,
     );
   }
   return { stdout: collected.text, failed, collected };
@@ -403,6 +404,15 @@ const fulfilled = fulfillReviewContract({
 });
 const stdout = fulfilled.stdout;
 const procFailed = fulfilled.failed;
+// arc#7399: a dead process with no nonce did not run. Do not print a
+// round-advancing body and do not upsert — that would burn a round and
+// replace the previous review comment.
+if (!reviewerAttemptCountsRound({ failed: procFailed, stdout, nonce })) {
+  console.error(
+    "reviewer 未运行（进程非正常结束，且输出没有本轮 nonce）—— 不计入 round，不覆盖已有 review comment。",
+  );
+  process.exit(2);
+}
 const parsed = parseCodexReview(stdout, repoRoot ? { repoRoot, nonce } : { nonce });
 const findings = parsed.findings;
 const unparseable = !parsed.ok || procFailed;
