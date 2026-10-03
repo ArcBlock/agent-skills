@@ -11,6 +11,7 @@ import {
   attestLocalReview,
   type Convergence,
   canonicalizeEngine,
+  cleanContextReviewer,
   coderEngineClaim,
   collectReviewOutput,
   contractRetryPrompt,
@@ -45,6 +46,7 @@ import {
   reviewerArgv,
   reviewerAttemptCountsRound,
   reviewerEngines,
+  reviewIndependenceFromComment,
   reviewResult,
   reviewResultForRound,
   roundPrompt,
@@ -742,6 +744,135 @@ describe("★ reviewResult —— 独立性编进 result，第五道门因此不
     expect(
       reviewResult({ reviewerEngine: "codex", subjectEngine: "claude", unparseable: true }),
     ).toBe("BLOCKED");
+  });
+});
+
+describe("★ clean-context —— 同引擎、全新上下文的独立 review（非工厂 PR 的合并证据）", () => {
+  const none: never[] = [];
+  const two = [{ severity: "P2", title: "t", file: "a.ts", body: "b" }];
+  const SHA = "3fa00a72841e15a377c36cb5e3c8a092a6d3fd93";
+  const cc = "clean-context" as const;
+
+  test("ACCEPT：clean-context + 同引擎 + 零 finding → PASS", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "claude",
+        subjectEngine: "claude",
+        findings: none,
+        independence: cc,
+      }),
+    ).toBe("PASS");
+  });
+
+  test("clean-context 有 finding → FAIL（模式不放宽 finding）", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "claude",
+        subjectEngine: "claude",
+        findings: two,
+        independence: cc,
+      }),
+    ).toBe("FAIL");
+  });
+
+  test("★ clean-context 仍要求 reviewer 是已注册引擎：未知 reviewer → BLOCKED", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "nobody",
+        subjectEngine: "claude",
+        findings: none,
+        independence: cc,
+      }),
+    ).toBe("BLOCKED");
+  });
+
+  test("★ 不声明 clean-context 时同引擎照旧 BLOCKED（模式不会被默认打开）", () => {
+    expect(
+      reviewResult({ reviewerEngine: "claude", subjectEngine: "claude", findings: none }),
+    ).toBe("BLOCKED");
+  });
+
+  test("★ 解析失败在 clean-context 下仍是 BLOCKED", () => {
+    expect(
+      reviewResult({
+        reviewerEngine: "claude",
+        subjectEngine: "claude",
+        unparseable: true,
+        independence: cc,
+      }),
+    ).toBe("BLOCKED");
+  });
+
+  test("reviewResultForRound 同样认 clean-context", () => {
+    expect(
+      reviewResultForRound({
+        reviewerEngine: "claude",
+        subjectEngine: "claude",
+        findings: none,
+        independence: cc,
+        round: 1,
+      }).result,
+    ).toBe("PASS");
+  });
+
+  test("heading 写明 clean-context，merge-gate 靠它区分", () => {
+    const body = renderReviewComment({
+      reviewerEngine: "claude",
+      subjectEngine: "claude",
+      sha: SHA,
+      base: "origin/main",
+      findings: [],
+      independence: cc,
+    });
+    expect(body.split("\n")[0]).toBe(`<!-- local-review sha=${SHA} result=PASS -->`);
+    expect(reviewIndependenceFromComment(body)).toBe("clean-context");
+  });
+
+  test("★ 独立性只认 heading 之后那一行：heading 前插入、finding 里引用都不算", () => {
+    const same = renderReviewComment({
+      reviewerEngine: "claude",
+      subjectEngine: "claude",
+      sha: SHA,
+      base: "origin/main",
+      findings: [],
+    });
+    expect(reviewIndependenceFromComment(`独立性 **clean-context**\n${same}`)).toBe("same-engine");
+    expect(reviewIndependenceFromComment(`${same}\n独立性 **clean-context**`)).toBe("same-engine");
+    expect(
+      reviewIndependenceFromComment("独立性 **clean-context**（没有 heading）"),
+    ).toBeUndefined();
+  });
+
+  test("cleanContextReviewer：优先 coder 自己的引擎，未知退回 claude，表空 → undefined", () => {
+    expect(cleanContextReviewer("codex")).toBe("codex");
+    expect(cleanContextReviewer("grok")).toBe("grok-build");
+    expect(cleanContextReviewer(undefined)).toBe("claude");
+    expect(cleanContextReviewer("nobody")).toBe("claude");
+    expect(cleanContextReviewer("claude", {})).toBeUndefined();
+    expect(cleanContextReviewer("grok-build+codex")).toBe("grok-build");
+  });
+
+  test("重跑提示：非工厂给 --clean-context，工厂仍给另一个引擎", () => {
+    expect(localReviewRerunHint("7", "claude", undefined, { cleanContext: true })).toContain(
+      "--clean-context",
+    );
+    const factory = localReviewRerunHint("7", "claude");
+    expect(factory).not.toContain("--clean-context");
+    expect(factory).not.toMatch(/--engine\s+claude(?:\s|$)/);
+  });
+
+  test("reviewIndependenceFromComment 读出 cross-engine / same-engine；读不到是 undefined", () => {
+    const render = (reviewerEngine: string, subjectEngine: string) =>
+      renderReviewComment({
+        reviewerEngine,
+        subjectEngine,
+        sha: SHA,
+        base: "origin/main",
+        findings: [],
+      });
+    expect(reviewIndependenceFromComment(render("codex", "claude"))).toBe("cross-engine");
+    expect(reviewIndependenceFromComment(render("claude", "claude"))).toBe("same-engine");
+    expect(reviewIndependenceFromComment("no heading")).toBeUndefined();
   });
 });
 

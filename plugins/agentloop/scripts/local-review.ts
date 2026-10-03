@@ -26,6 +26,7 @@ import { postOnce } from "../lib/comment.ts";
 import {
   assertCwdIsPrHead,
   assertReviewerEngine,
+  cleanContextReviewer,
   collectReviewOutput,
   contractRetryPrompt,
   convergence,
@@ -265,7 +266,9 @@ let subjectEngine: string | undefined;
     flag("--subject-engine"),
   );
   if (resolved.ok) subjectEngine = resolved.engine;
-  else console.error(`⚠ coder 引擎未确定：${resolved.reason} —— 判决将是 BLOCKED`);
+  else if (!argv.includes("--clean-context"))
+    console.error(`⚠ coder 引擎未确定：${resolved.reason} —— 判决将是 BLOCKED`);
+  else console.error(`ℹ coder 引擎未确定：${resolved.reason}（--clean-context 不需要它）`);
 }
 
 /**
@@ -274,7 +277,13 @@ let subjectEngine: string | undefined;
  * 写死 codex 会让每一个 `engine:codex` 的 PR 在 merge-gate 印出的重跑命令下
  * 永远 same-engine BLOCKED。默认必须挑一个**与 coder 不同**的已注册引擎。
  */
-const engineRaw = engineFlag ?? pickDefaultReviewer(subjectEngine);
+// `--clean-context`：同引擎、全新进程、只给 diff 的独立 review。只对非工厂 PR 是合并证据
+// （merge-gate 按 run 记录判工厂）。没有第二个引擎的环境（cloud routine）靠它自动合并。
+const cleanContext = argv.includes("--clean-context");
+const independence = cleanContext ? ("clean-context" as const) : undefined;
+const engineRaw =
+  engineFlag ??
+  (cleanContext ? cleanContextReviewer(subjectEngine) : pickDefaultReviewer(subjectEngine));
 if (!engineRaw) {
   console.error(
     "✗ 没有可用的跨引擎 reviewer —— 停。\n" +
@@ -429,6 +438,7 @@ if (dirty) console.error(`⚠ 工作树不干净（${dirty.split("\n").length} �
 const body = renderReviewComment({
   reviewerEngine: engine,
   subjectEngine,
+  ...(independence ? { independence } : {}),
   sha,
   base,
   findings,
@@ -443,6 +453,7 @@ const body = renderReviewComment({
 const { result: verdict, escalate } = reviewResultForRound({
   reviewerEngine: engine,
   subjectEngine,
+  ...(independence ? { independence } : {}),
   round,
   findings,
   convergence: conv,

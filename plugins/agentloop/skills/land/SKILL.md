@@ -14,12 +14,12 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 ```
 /agentloop:land <work DID | w_<32hex>>
 /agentloop:land <40-char sha>
-/agentloop:land <issue#>            # 先 /work，miss 才是投影 alias
-/agentloop:land <PR#>               # 跳过实现
-/agentloop:land <url>               # sourceUrl 反查 /work
-/agentloop:land <n1> <n2> <n3>      # 每件一个隔离 subagent
-/agentloop:land                     # 无引用：先过一致性闸
-/agentloop:land <一句话描述>         # 同上
+/agentloop:land <issue#>  # 先 /work，miss 才是投影 alias
+/agentloop:land <PR#>  # 跳过实现
+/agentloop:land <url>  # sourceUrl 反查 /work
+/agentloop:land <n1> <n2> <n3>  # 每件一个隔离 subagent
+/agentloop:land  # 无引用：先过一致性闸
+/agentloop:land <一句话描述>  # 同上
 ```
 
 **可选参数**
@@ -33,10 +33,14 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 ## Repo profile
 
 先读 `.claude/repo-profile.md`。本 skill 用到的键：`repo_slug`、`default_branch`、`plugin_root`、`verification_entry`、`merge_gate_entry`、`agent_identity_script`、`comment_language`、`gate_mode`、`change_set_record_entry`。
-（`pre_merge_entry` 不在本 skill 的流程里：合并闸认同一 SHA 上 `verification_entry` 的 PASS，合并时刻的风险由合并闸的 merge-load 门判定。）
+（`pre_merge_entry` 不在本 skill 的流程里：合并闸认同 SHA 的 PASS，合并时刻的风险归 merge-load。）
 **不要硬编码任何仓库字面量**——没有 profile 就先跑 `/agentloop:repo-setup`。
 
 **是**路由器 + 单件驱动器，不是 review / gate / epic 分解的实现。在这里重写 sub-skill 是缺陷。邻居：epic → `/agentloop:epic-conductor`；扫存量 → `/agentloop:issue-sweep` / `/agentloop:pr-sweep`；多阶段 → `/agentloop:build-phases`；这一件要 merged → 本 skill。
+
+## Headless（`ARC_CODE_AGENT_RUN_ID` 已设）
+
+没有下一回合：回合结束即退出，后台一并回收。**不得结束回合去等仍要结果的事**：闸在前台跑完；超出单次超时就在同一回合反复阻塞等它退出；子 run 阻塞轮询 `/dev/code-agents/<child>` 直到离开 `running`/`paused`。详见 [headless-factory-run.md](../../reference/headless-factory-run.md)。
 
 ## Step 0 — 解析目标
 
@@ -166,13 +170,7 @@ When a third-round fix is not a one-line mechanical change, or the round counter
 
 ### 合并权限
 
-| 模式 | 行为 |
-|---|---|
-| **单件（默认 auto）** | 闸绿 + review 干净 ⇒ 直接合 |
-| **批量（默认 confirm）** | 每件到「已绿待合」，列给用户再合 |
-| `--merge=auto` | 批量也自动合 |
-| `--merge=confirm` | 单件也停下来问 |
-| `--merge=never` | 只到绿，不合 |
+默认见 Usage 参数表：单件 auto，批量 confirm。
 
 无人值守（`AskUserQuestion` 被 hook 硬 deny，显式多引用跳过了 Step 1）：**跑到「已绿待合」就停**，清单落成 comment 并挂 `needs-human-confirm`，**不要自己合**。直合必须用户显式 `--merge=auto`。
 

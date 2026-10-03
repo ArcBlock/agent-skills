@@ -372,7 +372,14 @@ export function reviewerArgv(
   return [resolveReviewerBin(e, which), ...e.args(opts)];
 }
 
-export type CrossEngineReason = "cross-engine" | "same-engine" | "unknown";
+export type CrossEngineReason = "cross-engine" | "same-engine" | "unknown" | "clean-context";
+
+/**
+ * `clean-context`：同引擎也可，独立性来自**全新进程、只给 diff**（不是作者的上下文）。
+ * 只对**非工厂** PR 构成合并证据——AGENTS §9：不同引擎只对工厂 run 强制；merge-gate
+ * 按 run 记录判工厂，工厂 run 上的 clean-context 照旧 same-engine。
+ */
+export type IndependenceMode = "clean-context";
 
 /**
  * `unknown` 是**缺席的名字**，不是一个引擎。
@@ -476,6 +483,54 @@ export function crossEngineVerdict(
 }
 
 /**
+ * 生成端用的独立性：默认就是 {@link crossEngineVerdict}；`clean-context` 只要求 reviewer
+ * 是已注册引擎（未知 reviewer 仍是 unknown，不放行）。
+ */
+export function independenceVerdict(
+  reviewerEngine: string | undefined,
+  subjectEngine: string | readonly string[] | undefined,
+  mode?: IndependenceMode,
+): { ok: boolean; reason: CrossEngineReason } {
+  if (mode === "clean-context") {
+    return canonicalizeEngine(reviewerEngine)
+      ? { ok: true, reason: "clean-context" }
+      : { ok: false, reason: "unknown" };
+  }
+  return crossEngineVerdict(reviewerEngine, subjectEngine);
+}
+
+const INDEPENDENCE_LINE_RE = /^独立性 \*\*(cross-engine|same-engine|unknown|clean-context)\*\*/m;
+
+/**
+ * sticky 上写的独立性：只认 `## 本地 review` heading **之后**第一条以「独立性」开头的行
+ * （renderReviewComment 写的位置）。heading 之前插进来的一行、或 finding 正文里的引用都不算。
+ * 读不到 = undefined（不是 cross-engine）。
+ */
+export function reviewIndependenceFromComment(body: string): CrossEngineReason | undefined {
+  const heading = REVIEW_HEADING_RE.exec(body);
+  if (!heading) return undefined;
+  const tail = body.slice(heading.index + heading[0].length);
+  return INDEPENDENCE_LINE_RE.exec(tail)?.[1] as CrossEngineReason | undefined;
+}
+
+/**
+ * `--clean-context` 省略 `--engine` 时的 reviewer：优先用 coder 自己的引擎（同引擎就是这个
+ * 模式的意义），coder 未知或未注册时退回已注册的 `claude`，再退回表里第一个；表空 → undefined。
+ */
+export function cleanContextReviewer(
+  subjectEngine: string | undefined,
+  table: ReviewerTable = TABLE,
+): string | undefined {
+  // 身份行可以是集合（`grok-build+codex`）：取第一个已注册的。
+  for (const e of parseEngineSet(subjectEngine)) {
+    const own = canonicalizeEngine(e, table);
+    if (own) return own;
+  }
+  const ids = [...registeredIds(table)];
+  return ids.includes("claude") ? "claude" : ids[0];
+}
+
+/**
  * 省略 `--engine` 时挑一个**已注册且与 coder 不同**的 reviewer（#5697 f1gtawqv）。
  *
  * 写死 `codex` 会让每一个 `engine:codex` 的 PR 在默认命令下 same-engine BLOCKED。
@@ -502,7 +557,11 @@ export function localReviewRerunHint(
   pr: string,
   coderEngine: string | readonly string[] | undefined,
   table: ReviewerTable = TABLE,
+  opts: { cleanContext?: boolean } = {},
 ): string {
+  // 非工厂 PR：同引擎的 clean-context review 就够，不需要第二个引擎（cloud 上没有）。
+  if (opts.cleanContext)
+    return `bun .claude/plugins/agentloop/scripts/local-review.ts --pr ${pr} --clean-context --post`;
   const picked = pickDefaultReviewer(coderEngine, table);
   const engineArg = picked ? ` --engine ${picked}` : " --engine <other-registered-engine>";
   return `bun .claude/plugins/agentloop/scripts/local-review.ts --pr ${pr}${engineArg} --post`;
@@ -531,6 +590,12 @@ export interface LocalReviewAttestation {
    * Omitted means the caller did not say, and a cross-engine heading still stands.
    */
   coderAttested?: boolean;
+  /**
+   * 工厂 run（coder 来自 run 记录）→ true：reviewer.engine ∉ coderEngines 且 coder 被证明。
+   * 非工厂（trailer / attended / routine）→ false：同 SHA 的独立 review 即可——跨引擎，或
+   * heading 是 clean-context。省略 = 按工厂的严格规则判（安全默认）。
+   */
+  factoryRun?: boolean;
   prHead: string;
 }
 
@@ -574,13 +639,21 @@ export function attestLocalReview(i: LocalReviewAttestation): GatePass | GateFai
     };
   }
   const verdict = crossEngineVerdict(reviewer, i.coderEngine);
-  if (!verdict.ok) {
+  if (i.factoryRun === false) {
+    // 非工厂：独立性来自独立的 review 本身，不来自引擎差异被证明（AGENTS §9）。
+    if (!verdict.ok && reviewIndependenceFromComment(i.body) !== "clean-context") {
+      return {
+        ok: false,
+        reason: `review independence is ${verdict.reason} and the review was not run --clean-context (reviewer=${reviewer}, coder=${i.coderEngine ?? "(undeclared)"})`,
+      };
+    }
+  } else if (!verdict.ok) {
     return {
       ok: false,
       reason: `cross-engine review independence is ${verdict.reason} (reviewer=${reviewer}, coder=${i.coderEngine ?? "(undeclared)"})`,
     };
   }
-  if (i.coderAttested === false) {
+  if (i.factoryRun !== false && i.coderAttested === false) {
     return {
       ok: false,
       reason:
@@ -714,7 +787,12 @@ export function requireLocalReviewSticky(
   prHead: string,
   rerunHint: string,
   runner: Runner,
-  ctx: { prAuthor: string | undefined; coderEngine: string | undefined; coderAttested?: boolean },
+  ctx: {
+    prAuthor: string | undefined;
+    coderEngine: string | undefined;
+    coderAttested?: boolean;
+    factoryRun?: boolean;
+  },
 ): GatePass | GateFail {
   let captured: { body?: string; user?: { login?: string } | null } | undefined;
   const wrap: Runner = (cmd) => {
@@ -741,18 +819,34 @@ export function requireLocalReviewSticky(
     wrap,
     { accept: ["PASS"] },
   );
+  const attest = (body: string, sha: string) =>
+    attestLocalReview({
+      body,
+      author: captured?.user?.login,
+      prAuthor: ctx.prAuthor,
+      coderEngine: ctx.coderEngine,
+      coderAttested: ctx.coderAttested,
+      ...(ctx.factoryRun === undefined ? {} : { factoryRun: ctx.factoryRun }),
+      prHead: sha,
+    });
   if (!gate.ok) {
+    // A stale sticky is a carry-forward candidate (identical tree). It must pass the
+    // same independence judgement THIS PR would apply, against its own sha — otherwise
+    // a factory run carries a same-engine clean-context PASS across an amend.
+    if (gate.stale && captured?.body) {
+      const a = attest(captured.body, gate.stale.commentSha);
+      if (!a.ok) {
+        const { stale: _notCarryable, ...rest } = gate;
+        return {
+          ...rest,
+          detail: `${gate.detail ?? ""}\n   stale review is not carryable: ${a.reason}`.trim(),
+        };
+      }
+    }
     const discipline = rerunDiscipline(captured?.body);
     return discipline ? { ...gate, detail: `${gate.detail ?? ""}\n${discipline}`.trim() } : gate;
   }
-  return attestLocalReview({
-    body: captured?.body ?? "",
-    author: captured?.user?.login,
-    prAuthor: ctx.prAuthor,
-    coderEngine: ctx.coderEngine,
-    coderAttested: ctx.coderAttested,
-    prHead,
-  });
+  return attest(captured?.body ?? "", prHead);
 }
 
 /* ===== codex 产物解析 ===== */
@@ -1130,6 +1224,7 @@ export interface ReviewResultInput {
   subjectEngine: string | undefined;
   findings?: readonly ReviewFinding[];
   unparseable?: boolean;
+  independence?: IndependenceMode;
 }
 
 /**
@@ -1140,7 +1235,7 @@ export interface ReviewResultInput {
  */
 export function reviewResult(i: ReviewResultInput): "PASS" | "FAIL" | "BLOCKED" {
   if (i.unparseable) return "BLOCKED";
-  if (!crossEngineVerdict(i.reviewerEngine, i.subjectEngine).ok) return "BLOCKED";
+  if (!independenceVerdict(i.reviewerEngine, i.subjectEngine, i.independence).ok) return "BLOCKED";
   return (i.findings?.length ?? 0) > 0 ? "FAIL" : "PASS";
 }
 
@@ -1150,6 +1245,8 @@ export interface ReviewCommentInput {
   convergence?: Convergence;
   reviewerEngine: string;
   subjectEngine: string | undefined;
+  /** `clean-context`：同引擎独立 review（只对非工厂 PR 是合并证据）。缺省 = 跨引擎。 */
+  independence?: IndependenceMode;
   sha: string;
   base: string;
   findings: ReviewFinding[];
@@ -1167,7 +1264,7 @@ export interface ReviewCommentInput {
 }
 
 export function renderReviewComment(i: ReviewCommentInput): string {
-  const v = crossEngineVerdict(i.reviewerEngine, i.subjectEngine);
+  const v = independenceVerdict(i.reviewerEngine, i.subjectEngine, i.independence);
   // **marker 的 result 就是收敛判决**。曾经这里另算一份（只看跨引擎 + 零 finding），
   // 于是第 2 轮未收敛被写成 PASS —— 而第五道门只读 marker，直接放行。
   // 两个真相源里，闸读的那个必须是对的那个。
@@ -1598,7 +1695,7 @@ export function reviewResultForRound(i: RoundVerdictInput): {
   // BLOCKED 的两个来源（无法解析 / 独立性不成立）在任何轮次都压过一切：
   // 证据没能成立，不是「断言失败」。
   if (i.unparseable) return { result: "BLOCKED", escalate: false };
-  if (!crossEngineVerdict(i.reviewerEngine, i.subjectEngine).ok) {
+  if (!independenceVerdict(i.reviewerEngine, i.subjectEngine, i.independence).ok) {
     return { result: "BLOCKED", escalate: false };
   }
   // 第 1 轮（或拿不到收敛结论）：有 finding 就是 FAIL —— 没有上一轮可判定。

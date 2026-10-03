@@ -28,6 +28,8 @@ const PLUGIN = join(import.meta.dir, "..");
 const SKILLS = join(PLUGIN, "skills");
 /** The one shared home of the bot / inline review receipt protocol (was epic-conductor §6). */
 const SHARED_PROTOCOL = "reference/review-receipt-protocol.md";
+/** The one shared home of the headless Factory-run rule (arc#7617). */
+const SHARED_HEADLESS = "reference/headless-factory-run.md";
 const skill = (name: string) => readFileSync(join(SKILLS, name, "SKILL.md"), "utf8");
 
 interface Rule {
@@ -73,6 +75,11 @@ export const RIGOR: Record<string, Rule[]> = {
       id: "catch-net-independence",
       all: [/never write, edit or "?confirm"? a catch-net verdict/i],
     },
+    {
+      // arc#7617 — a headless Factory run has no next turn
+      id: "headless-no-background",
+      all: [/ARC_CODE_AGENT_RUN_ID/, /in the foreground/i, /\/dev\/code-agents\/<child>/],
+    },
   ],
   land: [
     { id: "review-before-gate", all: [/review 在第一次跑闸之前做/] },
@@ -96,6 +103,11 @@ export const RIGOR: Record<string, Rule[]> = {
       all: [/record-change-set\.sh --entry/, /不许 `\|\| true`/],
     },
     { id: "epic-managed-is-not-an-epic-signal", all: [/`epic-managed` 不是 epic 判据/] },
+    {
+      // arc#7617 — a headless Factory run has no next turn
+      id: "headless-no-background",
+      all: [/ARC_CODE_AGENT_RUN_ID/, /闸在前台跑完/, /\/dev\/code-agents\/<child>/],
+    },
   ],
   "issue-review": [
     { id: "lock-acquire-release", all: [/`agent:processing`/, /acquire/, /release/] },
@@ -139,6 +151,10 @@ export const RIGOR: Record<string, Rule[]> = {
     { id: "epic-managed-and-hold", all: [/`epic-managed`/, /`agent:hold`/] },
   ],
   "build-phases": [{ id: "repo-gate-once-at-end", all: [/the repo gate once at the end/i] }],
+  verification: [
+    // arc#7617 — the gate a headless Factory run needs is run to its result in this turn
+    { id: "headless-gate-in-foreground", all: [/ARC_CODE_AGENT_RUN_ID/, /in the foreground/i] },
+  ],
 };
 
 /** Returns the ids of rules whose patterns do not all match `text`. */
@@ -184,6 +200,30 @@ describe("rigor golden: executable rules stay in SKILL.md (#7105)", () => {
     expect(shared).toMatch(/pulls\/<n>\/comments\/<comment_id>\/replies/);
     for (const name of ["epic-conductor", "pr-review", "pr-sweep", "land"]) {
       expect({ name, links: skill(name).includes(`../../${SHARED_PROTOCOL}`) }).toEqual({
+        name,
+        links: true,
+      });
+    }
+  });
+
+  test("shared headless rule (#7617): ONE reference file, and every consumer points at it", () => {
+    const shared = readFileSync(join(PLUGIN, SHARED_HEADLESS), "utf8");
+    expect(shared).toMatch(/ARC_CODE_AGENT_RUN_ID/);
+    expect(shared).toMatch(/run_in_background/);
+    expect(shared).toMatch(/\/dev\/code-agents\/<child>/);
+    expect(shared).toMatch(/needs resume/);
+    // the poll whitelists terminal statuses: a failed read / null / unknown status is an
+    // error, never "settled"; it reads the real `arc --json afs read` envelope
+    expect(shared).toMatch(/exited \| failed \| stopped \| safety-invalidated\)/);
+    expect(shared).toMatch(/jq -er '\.data\.content\.status'/);
+    expect(shared).toMatch(/\*\) echo "ERROR/);
+    expect(shared).not.toMatch(/\[0\]'/); // the old first-match selector that read null as settled
+    // each call stays under the default 120 s tool timeout; a total deadline spans calls
+    expect(shared).toMatch(/for _ in 1 2 3 4 5; do/);
+    expect(shared).toMatch(/DEADLINE/);
+    expect(shared).toMatch(/paused counts as live/);
+    for (const name of ["epic-conductor", "land", "verification"]) {
+      expect({ name, links: skill(name).includes(`../../${SHARED_HEADLESS}`) }).toEqual({
         name,
         links: true,
       });

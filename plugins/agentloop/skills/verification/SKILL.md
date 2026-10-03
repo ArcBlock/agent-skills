@@ -57,6 +57,12 @@ guardrail: a check's exit code decides pass/fail, not a narrative.
 
 ## How to run
 
+**Headless Factory run** (`ARC_CODE_AGENT_RUN_ID` set): run `<verification_entry>`
+in the foreground and read its result in the same turn. Never background it and end the turn: the engine
+exits and the gate is reaped with it, so nothing is posted. If it can outlive one tool call, keep
+blocking on it in the same turn until it exits
+([headless-factory-run.md](../../reference/headless-factory-run.md)).
+
 The repo exposes a scenario entry (`<verification_entry>`). Common flags:
 
 ```
