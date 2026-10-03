@@ -19,6 +19,25 @@
 # `--no-gate-record <why>` is the documented, LOUD escape hatch: it merges and
 # says on stdout that it did so without a record, plus the reason. An escape
 # hatch that leaves no trace is how the original hole stayed open.
+#
+# Factory runs (arc#7662): inside a code-agents run (`ARC_CODE_AGENT_RUN_ID`
+# set) merge authority is HUMAN. land / epic-conductor stop at ready-to-merge,
+# and this script refuses (exit 3, before any GitHub call), so the skills'
+# entry does not rest on the model reading the rule. `--no-gate-record` does
+# not lift it. Operator override: `ARC_FACTORY_ALLOW_SELF_MERGE=1` (exactly
+# `1`, default off) in the run's environment.
+#
+# Scope, stated honestly: this is a guardrail, not an access control. A run
+# holds a credential that can merge, so it can call `gh` directly or set the
+# override itself; a consumer repo can narrow that with a PreToolUse hook, and
+# the real control is a run credential that cannot merge. What this script
+# guarantees is that a merge it performs for a run is never unattributed:
+# under the override it first stamps the PR body, bound to the head sha,
+#   <!-- arc-factory-merge run=<run id> sha=<40-hex head> -->
+# and refuses to merge if the stamp cannot be written. A ledger that reads the
+# stamp (arc: the GitHub sync, aos `factoryMergeRunOf`) records the merge as
+# the run's, not as the person whose account the run uses. A failed merge
+# takes the stamp off only when GitHub says the PR is not merged.
 set -euo pipefail
 
 usage() {
@@ -26,6 +45,8 @@ usage() {
   exit 64
 }
 pr="${1:-}"; [ -n "$pr" ] || usage; shift
+# It lands in API paths and the PR-body stamp: a positive integer, nothing else.
+[[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "refusing: '$pr' is not a PR number" >&2; exit 64; }
 repo=""; method="squash"; skip_reason=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,6 +60,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$method" in squash|merge|rebase) ;; *) usage ;; esac
+
+run_id="${ARC_CODE_AGENT_RUN_ID:-}"
+if [ -n "$run_id" ]; then
+  if [ "${ARC_FACTORY_ALLOW_SELF_MERGE:-}" != 1 ]; then
+    cat >&2 <<EOF
+refusing: factory run $run_id: merge authority is human (arc#7662).
+  Stop at ready-to-merge: leave the PR with its gate evidence posted and report
+  "ready to merge, human decision". A person runs the merge gate and merges.
+  Operator override (set in the run's environment by the operator, never by the
+  run itself): ARC_FACTORY_ALLOW_SELF_MERGE=1 — the merge is then stamped with
+  the run id and counted as an agent merge.
+EOF
+    exit 3
+  fi
+  if ! [[ "$run_id" =~ ^[A-Za-z0-9._:-]{1,128}$ ]]; then
+    echo "refusing: ARC_CODE_AGENT_RUN_ID '$run_id' is not a run id that can be stamped onto the PR (expected [A-Za-z0-9._:-]{1,128})" >&2
+    exit 3
+  fi
+fi
 args=(pr view "$pr" --json headRefOid,state,mergeable --jq '.headRefOid + "\t" + .state + "\t" + .mergeable')
 [ -n "$repo" ] && args+=(--repo "$repo")
 IFS=$'\t' read -r sha state mergeable <<<"$(gh "${args[@]}")"
@@ -121,5 +161,55 @@ print("%s\t%s\t%s" % (d.get("pr", ""), "yes" if d.get("ok") is True else "no", t
   echo "✓ merge-gate verdict found for PR #$pr @ ${sha:0:9} (${base_ref} ${rec_main:0:9})"
 fi
 
-endpoint="repos/${repo:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}/pulls/$pr/merge"
-gh api --method PUT "$endpoint" -f sha="$sha" -f merge_method="$method"
+slug="${repo:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+# Print BODY with every factory-merge stamp line removed (prose kept), plus
+# MARKER on its own paragraph when given. Grammar shared with the A2 reader
+# (aos `factoryMergeRunOf`): a stamp is a whole line, CRLF tolerated; this
+# removes every line that starts with the stamp prefix and ends with `-->`, a
+# superset of what the reader accepts. Anchored per line, so a 64 KiB run of
+# blanks costs one pass, not a backtracking search.
+strip_stamps() {
+  BODY="$1" MARKER="${2:-}" python3 -c '
+import os, re
+body = re.sub(r"(?m)^[ \t]*<!-- arc-factory-merge [^\n]*-->[ \t]*\r?(?:\n|$)", "", os.environ["BODY"]).rstrip()
+mark = os.environ["MARKER"]
+print((body + "\n\n" + mark if body else mark) if mark else body, end="")
+'
+}
+if [ -n "$run_id" ]; then
+  # Operator override (#7662): stamp first, merge second, so the GitHub sync
+  # can never observe this merge without the run that executed it.
+  if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "refusing: could not stamp factory run $run_id onto PR #$pr: head '$sha' is not a 40-char sha" >&2
+    exit 1
+  fi
+  if ! old_body="$(gh api "repos/$slug/pulls/$pr" --jq '.body // ""')"; then
+    echo "refusing: could not stamp factory run $run_id onto PR #$pr (reading the PR body failed)" >&2
+    exit 1
+  fi
+  # Earlier stamps (a refused attempt) go; the prose stays.
+  new_body="$(strip_stamps "$old_body" "<!-- arc-factory-merge run=$run_id sha=$sha -->")"
+  if ! gh api --method PATCH "repos/$slug/pulls/$pr" -f body="$new_body" >/dev/null; then
+    echo "refusing: could not stamp factory run $run_id onto PR #$pr; not making an agent merge nobody can attribute" >&2
+    exit 1
+  fi
+  echo "⚠ factory run $run_id is merging PR #$pr under ARC_FACTORY_ALLOW_SELF_MERGE=1 — stamped as an agent merge"
+fi
+if ! gh api --method PUT "repos/$slug/pulls/$pr/merge" -f sha="$sha" -f merge_method="$method"; then
+  if [ -n "$run_id" ]; then
+    # A failed PUT is not proof the merge did not land (a timeout or a 5xx
+    # after the commit). Only GitHub saying `merged: false` takes the stamp
+    # off; merged or unknown keeps it, because removing it would record an
+    # agent merge as a human one. A stamp left on an unmerged PR would mark a
+    # later human merge of this head, so the restore strips every stamp from
+    # the CURRENT body (a fresh read: a concurrent human edit survives).
+    merged="$(gh api "repos/$slug/pulls/$pr" --jq '.merged' 2>/dev/null || true)"
+    if [ "$merged" = false ] && cur_body="$(gh api "repos/$slug/pulls/$pr" --jq '.body // ""')" &&
+      gh api --method PATCH "repos/$slug/pulls/$pr" -f body="$(strip_stamps "$cur_body")" >/dev/null; then
+      echo "merge failed; PR #$pr is not merged, factory-merge stamp removed" >&2
+    else
+      echo "WARNING: the merge call failed, but PR #$pr merged=${merged:-unknown}; factory-merge stamp kept. If the PR is really unmerged, delete the arc-factory-merge line by hand." >&2
+    fi
+  fi
+  exit 1
+fi

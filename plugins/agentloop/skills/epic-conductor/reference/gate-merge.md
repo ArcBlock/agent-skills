@@ -5,6 +5,8 @@
 
 Merge a PR only when all of the following hold, in this order. Do not skip to squash.
 
+**In a Factory run (`ARC_CODE_AGENT_RUN_ID` set) you do not merge** (arc#7662): take the PR to items 1, 3 and 4, leave the gate evidence on it, and report "ready to merge, human decision". Steps 2 and 5 belong to the person who merges; `merge-verified-pr.sh` refuses with exit 3 inside a run. Do not wait for that merge: dispatch only members whose dependencies are merged on the default branch, and when every remaining wave needs an unmerged member, report the ready-to-merge PRs and end the run. Override, stamp and why: [headless-factory-run.md](../../../reference/headless-factory-run.md#merge-authority-is-human-arc7662).
+
 1. The independent review verdict is MERGE, or COMMENT with **only** non-blocking notes, **and every actionable inline review thread has its same-thread resolution**. `MERGE (held)` is the expected form while `agent:hold` is on.
 2. The repo merge gate exits 0 on the Change Set `head` you are about to merge. Invoke it with `--cs-head <40-char-sha> <PR#>` (`--cs-head` is the 40-char PR/CS head and must be current HEAD; the PR number is the projection handle). Do not drop `--cs-head` and run `merge-gate.ts <PR#>` as GitHub identity.
 3. Every actionable inline review thread is addressed (fixed with SHA / change / verification, or REJECTed with reasoning; only P2/Medium/Low may defer, and only with a tracking issue, an owner, and a re-entry condition). Any P1/High that is not fixed or REJECTed is a hard blocker. Lower severity is not a risk blocker, but it is still never mergeable without its in-thread conclusion.

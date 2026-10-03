@@ -26,7 +26,7 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 
 | 参数 | 默认 | 作用 |
 |---|---|---|
-| `--merge=auto` | 单件 | 闸绿 + review 干净就合 |
+| `--merge=auto` | 单件（factory run 除外） | 闸绿 + review 干净就合 |
 | `--merge=confirm` | 批量 | 停在「已绿待合」等确认 |
 | `--merge=never` | — | 只到绿，不合 |
 
@@ -36,11 +36,13 @@ allowed-tools: Agent, Bash, Read, Grep, Glob, Skill, AskUserQuestion
 （`pre_merge_entry` 不在本 skill 的流程里：合并闸认同 SHA 的 PASS，合并时刻的风险归 merge-load。）
 **不要硬编码任何仓库字面量**——没有 profile 就先跑 `/agentloop:repo-setup`。
 
-**是**路由器 + 单件驱动器，不是 review / gate / epic 分解的实现。在这里重写 sub-skill 是缺陷。邻居：epic → `/agentloop:epic-conductor`；扫存量 → `/agentloop:issue-sweep` / `/agentloop:pr-sweep`；多阶段 → `/agentloop:build-phases`；这一件要 merged → 本 skill。
+**是**路由器 + 单件驱动器；在这里重写 sub-skill 是缺陷。邻居：epic → `/agentloop:epic-conductor`；扫存量 → `/agentloop:issue-sweep` / `/agentloop:pr-sweep`；多阶段 → `/agentloop:build-phases`；这一件要 merged → 本 skill。
 
 ## Headless（`ARC_CODE_AGENT_RUN_ID` 已设）
 
 没有下一回合：回合结束即退出，后台一并回收。**不得结束回合去等仍要结果的事**：闸在前台跑完；超出单次超时就在同一回合反复阻塞等它退出；子 run 阻塞轮询 `/dev/code-agents/<child>` 直到离开 `running`/`paused`。详见 [headless-factory-run.md](../../reference/headless-factory-run.md)。
+
+**合并权归人**（merge authority is human）：不跑 merge-gate / `merge-verified-pr.sh`（exit 3），停在「已绿待合」报「ready to merge, human decision」。`ARC_FACTORY_ALLOW_SELF_MERGE=1` 只由操作者设。
 
 ## Step 0 — 解析目标
 
@@ -80,7 +82,7 @@ When classifying an epic, read [reference/coherence.md](reference/coherence.md).
 
 ### 2c. 是普通 issue？
 
-进 Step 3。可选先跑 `/agentloop:issue-review`（陈旧或含糊时值得；刚由你写的可跳过）。
+进 Step 3。可选先跑 `/agentloop:issue-review`（陈旧或含糊时）。
 
 ### 2d. 还没有 issue？
 
@@ -145,7 +147,7 @@ bun <plugin_root>/scripts/pr-review-round.ts --pr <PR#>
 
 When a third-round fix is not a one-line mechanical change, or the round counter's edges matter, read [reference/rounds.md](reference/rounds.md).
 
-## Step 5 — Gate 与 merge（按仓库规矩）
+## Step 5 — Gate 与 merge（factory run 跳过 1、4、5）
 
 0. 合并前先跑**一次** bot 检查（回执协议 Part A 第 5 条，`bot-clean.ts`）；P1/High 未修且未 REJECT 则挡。不要每次提交后等 bot。
 1. 跑 merge-gate，**带 CS `head`**。读同一 SHA 上 `--comment` 贴的 PASS，不重跑 `pre-merge`（落后 main 由 merge-load 对**当前** tip 判）：
@@ -165,16 +167,14 @@ When a third-round fix is not a one-line mechanical change, or the round counter
 
 2. 红了不要判 flake、不要盲目重跑、不要调超时洗绿。二分找到根因，或走第 3 条。
 3. 外来红：`<verification_entry> --comment <PR#> --blocked-by <open issue#>`。不是豁免。禁止 `--no-verify` / `force`。
-4. `<plugin_root>/scripts/merge-verified-pr.sh <PR#>`。核对 `merge-gate.<sha>.json`（`$ARC_MERGE_VERDICT_DIR`，否则 `<repo 根>/.verify/`；exit 0 时写）。对不上就拒绝，闸与合并必须同一台机器、同一个 head。缺记录不要手敲 `gh pr merge`。不可抗力：`--no-gate-record "<理由>"`。**不要用裸 `gh pr merge`**。
+4. `<plugin_root>/scripts/merge-verified-pr.sh <PR#>`。它核对 `merge-gate.<sha>.json`（`$ARC_MERGE_VERDICT_DIR`，否则 `<repo 根>/.verify/`），对不上就拒绝：闸与合并同一台机器、同一个 head。不可抗力：`--no-gate-record "<理由>"`。**不要用裸 `gh pr merge`**。
 5. 复核 `merged: true`，确认关联 issue 已关。
 
 ### 合并权限
 
-默认见 Usage 参数表：单件 auto，批量 confirm。
+无人值守（`AskUserQuestion` 被 hook 硬 deny）：**跑到「已绿待合」就停**，清单落成 comment 并挂 `needs-human-confirm`，**不要自己合**，除非用户显式 `--merge=auto`（factory run 例外）。
 
-无人值守（`AskUserQuestion` 被 hook 硬 deny，显式多引用跳过了 Step 1）：**跑到「已绿待合」就停**，清单落成 comment 并挂 `needs-human-confirm`，**不要自己合**。直合必须用户显式 `--merge=auto`。
-
-When a batch would merge without a person, read [reference/merge-authority.md](reference/merge-authority.md).
+When anything would merge without a person, read [reference/merge-authority.md](reference/merge-authority.md).
 
 ## Step 6 — 收敛闸（开单预算 · 同类塌缩 · 三轮停止）
 
@@ -188,13 +188,13 @@ When posting the ledger, collapsing a kind, or stopping after three rounds, read
 
 ## 批量模式
 
-`land 5649 5651 5652`:每件一个 subagent(`isolation: "worktree"`),编排串行 inline。**同一台机器上同时最多 2 个重闸**(`verification_entry` / advisory 门 / 全量 build/test)。闸位按正在跑的闸计数,不看 `load1`。调度,不是锁。开工前用 `<plugin_root>/scripts/check-pr-path-overlap.ts` 查文件重叠,重叠 PR 互相引用并写明合并序,未声明的不得合并。最后统一报一次。
+`land 5649 5651 5652`:每件一个 subagent(`isolation: "worktree"`),编排串行 inline。**同一台机器上同时最多 2 个重闸**(`verification_entry` / advisory 门 / 全量 build/test)。闸位按正在跑的闸计数,不看 `load1`。开工前用 `<plugin_root>/scripts/check-pr-path-overlap.ts` 查文件重叠,重叠 PR 互相引用并写明合并序,未声明的不得合并。最后统一报一次。
 
 When running more than one target, read [reference/batch-and-stuck.md](reference/batch-and-stuck.md).
 
 ## 卡住时怎么办
 
-不静默降级,不反复重试同一个失败动作。闸持续红 → 不盲目重跑:二分找根因,或带 witness issue 走 `--blocked-by` 让闸自己判;都不成立就停,报失败检查和 rawTail。P1 修不动 → 停在「已开 PR、未合」。目标其实是 epic → 转 `/agentloop:epic-conductor`。报告说实话。
+不静默降级,不反复重试同一个失败动作。闸持续红 → 不盲目重跑:二分找根因,或带 witness issue 走 `--blocked-by` 让闸自己判;都不成立就停,报失败检查和 rawTail。P1 修不动 → 停在「已开 PR、未合」。目标其实是 epic → 转 `/agentloop:epic-conductor`。
 
 When the run is stuck, read [reference/batch-and-stuck.md](reference/batch-and-stuck.md).
 

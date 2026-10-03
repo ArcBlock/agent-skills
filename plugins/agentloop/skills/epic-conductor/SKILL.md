@@ -21,31 +21,29 @@ bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/
 ```
 Exit 0 only when none of those ids are live. Ghost `status=running` with a dead pid does not block. Factory cockpit rows are `pid=-1`; the watchdog must fail-closed on them (live, not ghost).
 
-Live workers are that watchdog. A PR of yours still blocked on someone else's red is §9.
+A PR of yours still blocked on someone else's red is §9.
 
 ## When this skill applies
 
 USE IT when a reachable human hands you an epic (or decomposable multi-issue work) to build end-to-end. They stay reachable for high-level calls ("safe default + object-if-wrong"), not per-step approval.
 
-Do NOT use it for: one issue or one PR (plain worker or `build-phases`); an unattended batch (`issue-sweep` / `pr-sweep`); no human reachable (sweeps' `needs-human-confirm`). Each sub-issue gets its own worker, reviewer, fix loop, and merge.
+Do NOT use it for: one issue or one PR (plain worker or `build-phases`); an unattended batch (`issue-sweep` / `pr-sweep`); no human reachable (sweeps' `needs-human-confirm`).
 
 ## Neighboring skills
 
 Altitude: **design-review** (a plan; `--max-rounds 2`, skip when the human recorded the decisions) → **epic-conductor** → { plain worker | **build-phases** } → **pr-review** (the §3.5 / §4 engine). No reachable human → do not run conductor.
 
-Why each neighbour stays: Read [reference/background.md](reference/background.md).
-
 ## Load-bearing idea
 
 Independent clean-context review is the point. Enforce **the accept-path iron law**: any check that rejects bad input also has a test that admits good input.
 
-The full argument: Read [reference/background.md](reference/background.md).
+The full argument, and why each neighbour stays: Read [reference/background.md](reference/background.md).
 
 ## Orchestration invariants
 
 - **Resident, serial-inline.** React to completions. Do not nest a Workflow. No plan mode; decisions live in issue/PR comments.
 - **No `end_turn` with live hired children.** `status=running` and pid alive → stay (script above).
-- **Headless** (`ARC_CODE_AGENT_RUN_ID` set): no next turn. Gate in the foreground; block-poll `/dev/code-agents/<child>` until it settles. Never end the turn waiting ([why](../../reference/headless-factory-run.md)).
+- **Headless** (`ARC_CODE_AGENT_RUN_ID` set): no next turn. Gate in the foreground; block-poll `/dev/code-agents/<child>` until it settles. Never end the turn waiting ([why](../../reference/headless-factory-run.md)). **Merge authority is human**: stop at ready to merge (no merge-gate / `merge-verified-pr.sh`, exit 3 in a run), report "ready to merge, human decision", end the run; never wait for the merge ([rule](../../reference/headless-factory-run.md)). `ARC_FACTORY_ALLOW_SELF_MERGE=1` is the operator's only.
 - **Workers ~3; at most 2 heavy gates** on this machine. Heavy = `<verification_entry>`, `<pre_merge_entry>`, a daily run, an advisory gate, or a full suite. No slot while two known gates are already running. Count running gate processes, not `load1`. `ARC_GATE_LANE` stays unset. Gates you did not start count when visible.
 - **Model.** Runtime / gates / security / data-model → opus. Docs / mechanical / small blocklet → sonnet.
 - **Worktree** (`isolation: "worktree"`). **Workers do not merge.**
@@ -131,7 +129,7 @@ Review first, gate once. A gate before review is wasted: a real finding changes 
 | 5 | worker | Push, `gh pr create` (labels, §3), `<verification_entry> --comment <PR#>`, then `record-change-set.sh` for the pushed head. |
 | 6 | conductor | Post round 1 (`post-verdict.ts`, `sha` = reviewed pre-fix sha, not the PR head). Stay `COMMENT` until the verification fact you **read** and the `bot-clean.ts` line (`botFindings=` / `vendorsSeen=`) are on it. Never `MERGE` before that. |
 
-Zero findings → step 4 now. Report the reviewer and the fix, or "pre-PR review: zero findings". Re-review the delta only if substantive or security-relevant (always for §4B); it counts toward the cap. A mechanical batch must read `stale` from `compact-findings.ts`. No daemon or poll.
+Zero findings → step 4 now. Report the reviewer and the fix, or "pre-PR review: zero findings". Re-review the delta only if substantive or security-relevant (always for §4B); it counts toward the cap. A mechanical batch must read `stale` from `compact-findings.ts`.
 
 When posting round 1 or re-reviewing a delta, read [reference/review.md](reference/review.md).
 
@@ -190,10 +188,10 @@ Vendors, fallbacks, the `bot-clean.ts` table: [`reference/review-receipt-protoco
 All of these, in order:
 
 1. MERGE, or COMMENT with only non-blocking notes, and every actionable inline thread resolved. `MERGE (held)` while `agent:hold` is on.
-2. Merge gate exits 0: `bun .claude/verify/merge-gate.ts --cs-head <40-char-sha> <PR#>`. Doors: same-SHA verification (the PR's `<verification_entry> --comment` satisfies it; `<pre_merge_entry>` is not part of the PR loop), merge-load on current main, `additional_merge_gates`, cross-engine review only for a Factory run. Advisory gates do not block. If you pushed (a rebase or a merge of main to clear `CONFLICTING`), record that head first (`record-change-set.sh --work <member work DID>`, §3; non-zero stops). Do not drop `--cs-head`. `sha=` must equal the CS head. Stale fact → owner re-posts `<verification_entry> --comment`, never `<pre_merge_entry>`. Carry-forward is the gate's call, not yours.
+2. Merge gate exits 0: `bun .claude/verify/merge-gate.ts --cs-head <40-char-sha> <PR#>`. Doors: same-SHA verification (the PR's `<verification_entry> --comment` satisfies it; `<pre_merge_entry>` is not part of the PR loop), merge-load on current main, `additional_merge_gates`, cross-engine review only for a Factory run. If you pushed (a rebase or a merge of main to clear `CONFLICTING`), record that head first (`record-change-set.sh --work <member work DID>`, §3; non-zero stops). Do not drop `--cs-head`. `sha=` must equal the CS head. Stale fact → owner re-posts `<verification_entry> --comment`, never `<pre_merge_entry>`.
 3. Every actionable thread is addressed (§6). Unfixed, unrejected P1/High blocks.
 4. The single pre-merge `bot-clean.ts` check has run on the last head. No green human GitHub review is required.
-5. `scripts/merge-verified-pr.sh` immediately after step 2. Only the merger runs this gate, immediately before merge-verified-pr.sh. The exit-0 `merge-gate.<sha>.json` for this PR and head is the authorization (same machine, same head).
+5. `scripts/merge-verified-pr.sh` immediately after step 2 (never in a Factory run). The exit-0 `merge-gate.<sha>.json` for this PR and head is the authorization (same machine, same head).
 
 Security-face: a short risk-summary (opens / why safe / residual / revert), then drop `agent:hold`, squash-merge, delete the branch, clear the lock entry, dispatch the next wave.
 

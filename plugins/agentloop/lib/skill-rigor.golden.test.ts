@@ -80,6 +80,16 @@ export const RIGOR: Record<string, Rule[]> = {
       id: "headless-no-background",
       all: [/ARC_CODE_AGENT_RUN_ID/, /in the foreground/i, /\/dev\/code-agents\/<child>/],
     },
+    {
+      // arc#7662 — in a Factory run the merge decision is a person's
+      id: "factory-run-merge-authority-human",
+      all: [
+        /merge authority is human/i,
+        /ready to merge, human decision/,
+        /ARC_FACTORY_ALLOW_SELF_MERGE/,
+        /end the run; never wait for the merge/,
+      ],
+    },
   ],
   land: [
     { id: "review-before-gate", all: [/review 在第一次跑闸之前做/] },
@@ -107,6 +117,18 @@ export const RIGOR: Record<string, Rule[]> = {
       // arc#7617 — a headless Factory run has no next turn
       id: "headless-no-background",
       all: [/ARC_CODE_AGENT_RUN_ID/, /闸在前台跑完/, /\/dev\/code-agents\/<child>/],
+    },
+    {
+      // arc#7662 — in a Factory run the merge decision is a person's
+      id: "factory-run-merge-authority-human",
+      // A run still does Step 5's bot-clean (0) and --blocked-by (3); it skips only the
+      // merge-gate (1), the merge (4) and the merged check (5) — #7662 round 2.
+      all: [
+        /合并权归人/,
+        /ready to merge, human decision/,
+        /ARC_FACTORY_ALLOW_SELF_MERGE/,
+        /Step 5[^\n]*factory run 跳过 1、4、5/,
+      ],
     },
   ],
   "issue-review": [
@@ -222,6 +244,12 @@ describe("rigor golden: executable rules stay in SKILL.md (#7105)", () => {
     expect(shared).toMatch(/for _ in 1 2 3 4 5; do/);
     expect(shared).toMatch(/DEADLINE/);
     expect(shared).toMatch(/paused counts as live/);
+    // #7662 — merge authority in a Factory run: the rule, the hard refusal, the override, the stamp
+    expect(shared).toMatch(/## Merge authority/);
+    expect(shared).toMatch(/exit 3/);
+    expect(shared).toMatch(/ARC_FACTORY_ALLOW_SELF_MERGE=1/);
+    expect(shared).toMatch(/arc-factory-merge/);
+    expect(shared).toMatch(/--work-instance/); // the merger's gate binds to the run's ledger
     for (const name of ["epic-conductor", "land", "verification"]) {
       expect({ name, links: skill(name).includes(`../../${SHARED_HEADLESS}`) }).toEqual({
         name,

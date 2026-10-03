@@ -84,3 +84,43 @@ the host. Either way the turn was wasted.
 
 Outside a Factory run (an attended session with a person who will send the next turn), backgrounding
 is a scheduling choice, not this defect, and this file does not apply.
+
+## Merge authority is human (arc#7662)
+
+A Factory run takes the work up to **ready to merge** and stops. The merge is a person's decision,
+whatever `--merge` mode or single/batch default the skill would otherwise use.
+
+1. Do everything up to the merge: review, one batched fix, one gate with `--comment <PR#>` (the
+   verification sticky on the PR is the gate evidence), the Change Set record, the review verdict,
+   the one `bot-clean.ts` check.
+2. **Do not run** `<merge_gate_entry>` or `merge-verified-pr.sh`, and never `gh pr merge`. The
+   merge gate belongs to the merger: it writes the verdict record on the machine that merges, right
+   before the merge, so the person who merges runs it.
+3. Tell the person on GitHub: one PR comment (identity line) with the ready-to-merge checklist (head
+   sha, verification verdict, review verdict, bot-clean result), and the `needs-human-confirm` label.
+   The checklist tells the merger to run `<merge_gate_entry>` **on the factory host** (or, elsewhere,
+   with `--work-instance <the factory instance>`), so the gates that read the run's work ledger and
+   run records (cross-engine review, allowed paths) bind to this run, then `merge-verified-pr.sh`.
+4. Report the PR as **"ready to merge, human decision"**. The run's exit is a success; this is the
+   intended end state. **Never wait for the human merge** (it is not a child run; waiting for it
+   only burns the run).
+5. **An epic conductor in a run** dispatches only members whose dependencies are already merged on
+   the default branch. When every remaining wave needs a member that is still unmerged, report all
+   ready-to-merge PRs and end the run; the next run picks up after the person merges.
+
+Why: a single target defaults to `--merge=auto`, so one land run merged its own PR while another
+stopped only by accident (an `agent:hold` label). The incident and the decision are arc#7662.
+
+**The guardrail.** `merge-verified-pr.sh` refuses with exit 3 when `ARC_CODE_AGENT_RUN_ID` is set,
+before any GitHub call, and `--no-gate-record` does not lift it. Exit 3 means "stop at ready to
+merge", not "retry another way". It is not an access control: a run whose credential can merge can
+still call `gh` itself. A consumer repo can narrow that with a PreToolUse hook (arc ships one, not yet registered); the real control is a
+run credential that cannot merge.
+
+**Operator override.** `ARC_FACTORY_ALLOW_SELF_MERGE=1` in the run's environment, set by the
+operator. A run never sets it itself. Note the scope: the code-agents host copies its own
+environment into every run, so setting it on the host enables it for **every** run on that host.
+Under the override the script first stamps the PR body with
+`<!-- arc-factory-merge run=<run id> sha=<head> -->` and refuses to merge if it cannot. A ledger that
+reads the stamp records the merge as `actor: agent` with the run id, so an acceptance that counts
+human merges never counts it as one.
