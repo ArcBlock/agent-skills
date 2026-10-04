@@ -254,7 +254,7 @@ describe("ensureCheckout — network retry (transient proxy/SSH blips)", () => {
   });
 });
 
-describe("marker lives OUTSIDE the working tree (measured: an in-tree marker disarms the host repo's gates)", () => {
+describe("marker lives OUTSIDE the working tree (measured: an in-tree marker disarms the host repo's checks)", () => {
   it("puts the marker beside the checkout, never inside it", () => {
     expect(markerFor("/co/ArcBlock__arc")).toBe("/co/.agentloop-fleet-markers/ArcBlock__arc");
     expect(markerFor("/co/ArcBlock__arc/")).toBe("/co/.agentloop-fleet-markers/ArcBlock__arc");

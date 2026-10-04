@@ -148,7 +148,7 @@ describe("isRollupAlreadyReviewed", () => {
 
 **结论：不是全覆盖 rollup，是 umbrella backlog 的部分完成。** 保持 open，按 \`agent:ready\` 继续逐项按需 promote 剩余 4 项。
 
-<!-- sweep-trace: {"ver":1,"issue":378,"gate":"disposition","val":"comment","run":"2026-07-16T17:18:03Z","runner":"robert","skills":"19dfc2bc"} -->
+<!-- sweep-trace: {"ver":1,"issue":378,"step":"disposition","val":"comment","run":"2026-07-16T17:18:03Z","runner":"robert","skills":"19dfc2bc"} -->
 
 
 ---

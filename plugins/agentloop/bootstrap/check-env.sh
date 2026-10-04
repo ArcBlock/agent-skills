@@ -50,7 +50,7 @@ fi
 PROFILE=".claude/repo-profile.md"
 if [ -f "$PROFILE" ]; then
   ok "$PROFILE present"
-  for k in repo_slug default_branch gate_mode verification_entry plugin_root package_manager; do
+  for k in repo_slug default_branch plugin_root package_manager; do
     grep -q "\`$k\`" "$PROFILE" && ok "profile key: $k" \
       || bad "profile MISSING key: $k (add it, or run init-profile.sh for a template)"
   done

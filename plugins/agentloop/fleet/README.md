@@ -191,7 +191,7 @@ The driver spawns one CLI per run. It was claude-only; codex is now a first-clas
 selected per-deployment (`DeploymentConfig.engine`) or per-repo (`RepoEntry.engine`), default
 claude — an existing config with no `engine` behaves exactly as before. This was validated by
 a live write-back probe: a real `issue-sweep` on `codex exec` created three translation files,
-committed, pushed a branch, opened a draft PR (`Fixes #`), ran the verification gate and
+committed, pushed a branch, opened a draft PR (`Fixes #`), ran the verification run and
 attributed its one failure honestly — using the SAME shipped prompt, unchanged.
 
 The CLIs differ in only a few flags (`buildArgv` is the single source of truth for both the
@@ -252,7 +252,7 @@ directory, in order:
    under it does not reclaim that file's disk space until the zombie's fd closes, so cleanup
    would silently free nothing if done in the other order.
 2. **`reapStaleWorktrees(wtBase)`** — remove anything older than 15 minutes with no live
-   process under it. Because the directory is exclusive to agentloop, this does NOT gate on
+   process under it. Because the directory is exclusive to agentloop, this does NOT check on
    "is this actually a linked git worktree" — a full clone, or any other shape a worker
    improvised, is still fair game; shape only decides *how* to remove it (`git worktree
    remove` first when it looks like one, `rm -rf` otherwise).

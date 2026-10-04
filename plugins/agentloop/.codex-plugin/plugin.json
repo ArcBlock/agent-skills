@@ -1,11 +1,11 @@
 {
   "name": "agentloop",
-  "version": "0.43.0",
-  "description": "Repo-agnostic engineering loop engine: config-driven verification gate, sticky PR-comment delivery, and the review/sweep skill contracts. Repo specifics live in each repo's .claude/verify/config.ts, not here.",
+  "version": "0.44.0",
+  "description": "Repo-agnostic engineering loop: land / epic / sweep / review skill contracts (package tests, one clean-context review, merge), the fleet driver, and shared GitHub tooling. Repo specifics live in each repo's .claude/repo-profile.md, not here.",
   "author": {
     "name": "ArcBlock Team",
     "email": "engineering@arcblock.io"
   },
   "license": "MIT",
-  "keywords": ["verification", "workflow", "engineering", "gate", "loop"]
+  "keywords": ["review", "workflow", "engineering", "loop"]
 }

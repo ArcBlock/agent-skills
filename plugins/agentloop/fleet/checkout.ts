@@ -12,7 +12,7 @@
  * `reset --hard`/`clean` any tree that lacks it — a mis-pointed path can never nuke your
  * dev checkout. The marker lives BESIDE the checkout, not inside it (see markerFor): an
  * in-tree marker dirties `git status` forever and thereby disarms the host repo's own
- * push/verify gates. (In worktree mode the dev checkout is the *base*, never the fleet
+ * push/verify checks. (In worktree mode the dev checkout is the *base*, never the fleet
  * tree, and git worktrees are isolated by design, so it is doubly safe.)
  */
 /** Shell runner. `env`, when given, REPLACES the child's environment (callers pass a fully
@@ -62,9 +62,8 @@ export const FLEET_MARKER = ".agentloop-fleet";
  * inside it — `<checkoutBase>/.agentloop-fleet-markers/<leaf>`.
  *
  * An in-tree marker is untracked and not gitignored, so it makes `git status` dirty
- * FOREVER, which silently disarms the host repo's own gates. Measured on arc during the
- * first live pre-flight: `tools/pre-push.sh` refuses to push a dirty tree, and
- * `pre-pr.ts` only writes its `.verify/<sha>.md` cache when the tree is clean — so a
+ * FOREVER, which silently disarms the host repo's own checks. Measured on arc during the
+ * first live pre-flight: the host's push hook refused to push a dirty tree — so a
  * sweep could triage, fix, verify, and then be unable to land the PR it just produced.
  * The marker also could not survive its own housekeeping: `git clean -fdq` (which
  * resetExisting runs) deletes an untracked in-tree marker, after which the very next

@@ -110,7 +110,7 @@ describe("revalidationReasons —— 分类什么时候需要重做", () => {
     issue: "100",
     fingerprint: "fp-old",
     classifiedAt: "2026-08-29T12:00:00Z",
-    layer: "gate-credibility",
+    layer: "check-credibility",
     type: "bug",
   };
   const quiet: Neighborhood = { closedNeighbors: [], unblockedBy: [], newHumanInput: false };
@@ -186,13 +186,13 @@ describe("classificationFromWork — delta 必须读 work record，不能只读�
     const rec = classificationFromWork(
       {
         id: "w_abc",
-        layer: "gate-credibility",
+        layer: "check-credibility",
         fingerprint: "fp-work",
         classifiedAt: "2026-09-05T00:00:00.000Z",
       },
       undefined,
     );
-    expect(rec.layer).toBe("gate-credibility");
+    expect(rec.layer).toBe("check-credibility");
     expect(rec.fingerprint).toBe("fp-work");
     expect(shouldProcess("revalidate", Boolean(rec.layer), [])).toBe(false);
     expect(
@@ -261,9 +261,9 @@ describe("classificationWriteback — production stamp must be a real layer, not
   });
 
   test("ACCEPT: assigned layer + fingerprint → --mode new skips, --mode revalidate can select", () => {
-    const stamp = classificationWriteback({ ...base, layer: "gate-credibility" });
+    const stamp = classificationWriteback({ ...base, layer: "check-credibility" });
     expect(stamp).toBeDefined();
-    expect(stamp?.layer).toBe("gate-credibility");
+    expect(stamp?.layer).toBe("check-credibility");
     expect(stamp?.fingerprint).toBe("fp-1");
     const rec = classificationFromWork({
       id: "w_abc",
@@ -283,14 +283,14 @@ describe("classificationWriteback — production stamp must be a real layer, not
   });
 
   test("ACCEPT: existing layer on the work record is enough — agent override not required to re-stamp", () => {
-    const stamp = classificationWriteback({ ...base, existingLayer: "gate-credibility" });
-    expect(stamp?.layer).toBe("gate-credibility");
+    const stamp = classificationWriteback({ ...base, existingLayer: "check-credibility" });
+    expect(stamp?.layer).toBe("check-credibility");
     expect(shouldProcess("new", Boolean(stamp?.layer), [])).toBe(false);
   });
 
   test("P1: carrying existingLayer must not refresh fingerprint/classifiedAt — revalidate still selects", () => {
     const previous = {
-      layer: "gate-credibility",
+      layer: "check-credibility",
       fingerprint: "fp-old",
       classifiedAt: "2026-09-01T00:00:00.000Z",
     };
@@ -300,7 +300,7 @@ describe("classificationWriteback — production stamp must be a real layer, not
       fingerprint: "fp-new",
       classifiedAt: "2026-09-05T12:00:00.000Z",
     });
-    expect(stamp?.layer).toBe("gate-credibility");
+    expect(stamp?.layer).toBe("check-credibility");
     expect(stamp?.fingerprint).toBeUndefined();
     expect(stamp?.classifiedAt).toBeUndefined();
     const rec = classificationFromWork({
@@ -321,7 +321,7 @@ describe("classificationWriteback — production stamp must be a real layer, not
     const stamp = classificationWriteback({
       ...base,
       layer: "path-surface",
-      existingLayer: "gate-credibility",
+      existingLayer: "check-credibility",
     });
     expect(stamp?.layer).toBe("path-surface");
   });

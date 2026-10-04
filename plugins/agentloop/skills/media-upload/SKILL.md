@@ -34,7 +34,7 @@ PLUGIN="${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skil
 ```
 
 - **单个文件**：`bash "$PLUGIN/scripts/gh-upload-media.sh" <media> [name]`
-  → 自动选写通道（gh contents API / git push）→ content-type=`image/*`|`video/*` 闸 → stdout 打印 raw.githubusercontent/main URL。
+  → 自动选写通道（gh contents API / git push）→ content-type=`image/*`|`video/*` 检查 → stdout 打印 raw.githubusercontent/main URL。
 - **整目录**：`SCREENSHOT_DIR=<dir> CONTEXT=<ctx> bash "$PLUGIN/scripts/gh-upload-dir.sh"`
   → 遍历目录（png/jpg/jpeg/gif/webm/mp4/mov）逐个调上面那个 → stdout 每行 `filename\turl`；任一失败追加一行
   `UPLOAD_FAILED\t<原因>`（**始终 exit 0**，失败看这行不看退出码）。
@@ -55,7 +55,7 @@ SCREENSHOT_DIR="$SHOT_DIR" CONTEXT="pr${PR}" bash "$PLUGIN/scripts/gh-upload-dir
 ## 上传器两通道都不可用时：浏览器原生附件上传（第三层兜底，issue #3010）
 
 `SendUserFile` 只把文件发给当前对话的人，**不会**让证据落地到 GitHub——PR/issue 上依旧没有可核验的
-截图。这类 review 证据（`ui-verify` 的 UI 截图最典型；是否是合并闸由仓库 profile 的 `additional_merge_gates` 决定，arc 上是 advisory）需要**持久发布在 GitHub 上**，`gh` 与图床
+截图。这类 review 证据（`ui-verify` 的 UI 截图最典型）需要**持久发布在 GitHub 上**，`gh` 与图床
 仓 clone 又都不可用时，唯一确定性可重复的兜底是**驱动一个已登录 GitHub 的浏览器**走原生附件上传
 （本轮真实产出过 arc#2991 / arcblock-site#165 / Site PR #166 的截图证据）：
 
@@ -66,13 +66,12 @@ SCREENSHOT_DIR="$SHOT_DIR" CONTEXT="pr${PR}" bash "$PLUGIN/scripts/gh-upload-dir
 4. **同时贴到 PR 和它关联的 issue**（`Fixes #<n>` / `Part of #<n>`），不要只贴一处。
 
 这条 URL 家族（`github.com/user-attachments/assets/…`、`user-images.githubusercontent.com/…`）与
-`raw.githubusercontent.com/<repo>/main/…` 一样被下游门控（如 `.claude/skills/ui-verify/scripts/gate-comment.ts`
-的 `isPublishedUrl()`）当作**已发布**证据；本地文件路径、`SendUserFile` 附件、或任何未验证可匿名读的
+`raw.githubusercontent.com/<repo>/main/…` 一样被下游检查当作**已发布**证据；本地文件路径、`SendUserFile` 附件、或任何未验证可匿名读的
 URL 都不算——**上传/发布失败绝不能被下游报告描述成"已完成验证"**，该标注 `BLOCKED`/"证据缺失"就
 标注，不用中性措辞掩盖（术语与 `ui-verify`/`pr-review`/`pr-sweep`/`issue-review` 保持一致）。
 
 此兜底需要**已认证的 GitHub 浏览器会话**，与 `gh-upload-media.sh` 的两条自动化通道不同层级——不总是
-每个环境都可行；不可行时按上一节降级 `SendUserFile`，消费方门控按"证据缺失"处理，不得放行。
+每个环境都可行；不可行时按上一节降级 `SendUserFile`，消费方检查按"证据缺失"处理，不得放行。
 
 ## 为什么必须是 raw.githubusercontent.com/main（脚本已强制，别自己换）
 

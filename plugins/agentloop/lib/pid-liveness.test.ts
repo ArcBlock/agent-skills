@@ -7,7 +7,7 @@
  * Two distinct defects lived in those lines, failing in OPPOSITE directions:
  *
  *  1. a RECYCLED pid makes a dead owner look alive. Fail-closed for the lease
- *     (it is never reclaimed), but `check-gate-hygiene` NAMES the pid for a
+ *     (it is never reclaimed), but the former hygiene check NAMES the pid for a
  *     human to act on, so it names an innocent process.
  *  2. `process.kill(pid, 0)` throws EPERM when the process EXISTS but may not
  *     be signalled. The bare `catch` folded EPERM into ESRCH, so a LIVE owner
@@ -22,7 +22,7 @@
  *  | re-merge EPERM into "dead"                  | EPERM (denied)           |
  *
  * The ACCEPT arm is the one that matters most: judged the other way, every
- * gate steals every lease, which is far worse than today's wedge.
+ * check steals every lease, which is far worse than today's wedge.
  */
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -55,7 +55,7 @@ const GONE_PID = 4194304;
 /**
  * A REAL signal-refusing process on this host, found rather than assumed.
  *
- * pid 1 would do on most hosts, but it is also the container gate's own pid and
+ * pid 1 would do on most hosts, but it is also the container check's own pid and
  * therefore a legitimate owner here, so leaning on it would conflate two arms.
  * This sweeps the live process table for a root-owned daemon with an ordinary
  * pid instead, which works on macOS and Linux alike; running as root there is
@@ -169,8 +169,8 @@ describe("readProcessStartTimeMs — positive control: the instrument can SEE", 
 
   /**
    * `process.kill(pid, 0)` structurally could not hang. A subprocess can, and
-   * this one now sits on the gate's critical path, so a wedged `ps` must be
-   * bounded rather than able to stop the gate (review round 2).
+   * this one now sits on the check's critical path, so a wedged `ps` must be
+   * bounded rather than able to stop the check (review round 2).
    *
    * Platform-independent by construction: the assertion is that the call
    * RETURNS in bounded time. What it returns differs — no `/proc` means it
@@ -293,7 +293,7 @@ describe("evaluateOwnerLiveness", () => {
     const verdict = evaluateOwnerLiveness(owner);
     expect(verdict.alive).toBe(false);
     // The REASON must name pid recycling, not a generic "not alive": the human
-    // reading `check-gate-hygiene` decides whether to act on this pid.
+    // reading the former hygiene check decides whether to act on this pid.
     expect(verdict.reason).toBe("pid-recycled");
     expect(verdict.detail ?? "").toContain("recycled");
     expect(verdict.detail ?? "").toContain(String(process.pid));
@@ -422,11 +422,11 @@ describe("evaluateOwnerLiveness", () => {
    * verdict was simply meaningless.
    */
   /**
-   * The gate genuinely runs as pid 1 inside a container, and this module ships
+   * The check genuinely runs as pid 1 inside a container, and this module ships
    * to many hosts. Rejecting pid 1 would return `alive: false` there — the
    * unsafe direction — on every containerised run.
    */
-  test("ACCEPT: pid 1 is a legitimate owner (the gate IS pid 1 in a container)", () => {
+  test("ACCEPT: pid 1 is a legitimate owner (the check IS pid 1 in a container)", () => {
     const verdict = evaluateOwnerLiveness({ pid: 1 });
     expect(verdict.alive).toBe(true);
     expect(verdict.reason).not.toBe("no-owner-pid");
@@ -479,14 +479,14 @@ describe("evaluateOwnerLiveness", () => {
  * that an 8-hour over-read there produces a FALSE `pid-recycled` — the unsafe
  * direction, on legacy records, with none of route 1's protection.
  *
- * `scripts/lib/gate-ownership.ts:95-104` avoids the whole class by never
+ * the repo's former ownership ledger avoids the whole class by never
  * converting `lstart` at all. Two review rounds each gave a different reason
  * why this module cannot follow suit, and BOTH were false — see the warning at
  * the top of `pid-liveness.ts`. Measured: `Date.now() - parseEtime(...)` and
  * `parseLstart(...)` are the same instant to etime's 1 s truncation, so an
  * etime rewrite is viable and no step-immunity advantage exists either way.
  * `lstart` is a preference (human-recheckable with one command; the same field
- * `gate-ownership.ts` already stores), and parsing it is what obliges this
+ * the former ownership ledger already stores), and parsing it is what obliges this
  * module to MEASURE the premise that module got to avoid.
  */
 describe("clockInstrumentsAgree — the premise route 2 rests on, measured", () => {
@@ -529,7 +529,7 @@ describe("clockInstrumentsAgree — the premise route 2 rests on, measured", () 
     expect(guarded.reason).toBe("clock-instruments-disagree");
   });
 
-  test("route 1 is NOT gated by the calibration — same instrument at both ends", () => {
+  test("route 1 is NOT conditioned by the calibration — same instrument at both ends", () => {
     // A recorded process start time is comparable to a fresh reading whatever
     // the clocks are doing, so disabling route 1 here would throw away the
     // accurate check in order to protect the approximate one.
@@ -611,7 +611,7 @@ describe("real pid-recycling shape, end to end", () => {
  * the cross-instrument case `crossInstrument` exists to refuse.
  *
  * Mutation pair:
- *  BREAK — write `ps`, check `/proc`, skip the gate → must NOT be `running`.
+ *  BREAK — write `ps`, check `/proc`, skip the check → must NOT be `running`.
  *  RESTORE — same instrument, start times agree, pid live → `running`.
  */
 describe("startTimeSource — same-instrument is a recorded fact, not an assumption", () => {
@@ -714,7 +714,7 @@ describe("startTimeSource — same-instrument is a recorded fact, not an assumpt
 
   test("old record without startTimeSource still catches recycle via the lease-creation route", () => {
     // Compatibility is fail-closed on the identity claim, not blind to recycling:
-    // startedAt is still a valid upper bound, gated by clockInstrumentsAgree.
+    // startedAt is still a valid upper bound, conditioned by clockInstrumentsAgree.
     const owner: OwnerRecord = {
       pid: process.pid,
       processStartedAt: Date.now() - 30 * 24 * 60 * 60 * 1000,

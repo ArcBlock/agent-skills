@@ -1,9 +1,9 @@
-# land — Step 1 coherence gate and Step 2 routing detail
+# land — Step 1 coherence check and Step 2 routing detail
 
 > On-demand reference for [`land`](../SKILL.md) (moved out of SKILL.md in #7105).
 > SKILL.md holds the executable steps; this file holds the detail, rationale and incident history.
 
-## Step 1 — 一致性闸（只在**没有**显式引用时执行）
+## Step 1 — 一致性检查（只在**没有**显式引用时执行）
 
 > **这是本 skill 最重要的一步，也是唯一会让它拒绝干活的一步。**
 
@@ -13,7 +13,7 @@
 都能让你写出一个自信的计划。** 一个直接开干的 skill 分辨不了这两者——它在两种情况下
 都会产出一份读起来很合理的方案，然后在第二种情况下开出一个混装 PR、或者悄悄只做了三件里的一件。
 
-所以这道闸的机制不是「判断是否清楚」（那等于凭感觉），而是——
+所以这道检查的机制不是「判断是否清楚」（那等于凭感觉），而是——
 
 ### 先枚举，再判定
 
@@ -80,8 +80,6 @@ gh issue list -R <repo_slug> --label "epic:<N>" --limit 1 --json number
 durable 记录，不只活在某个 session 的上下文里。issue 正文写清楚发现（现象、根因、
 证据、以及**你已知的陷阱**），语言按 `comment_language`，顶部身份行由
 `agent_identity_script` 生成——**不要手拼**。
-开单本身要过仓库的 **issue 成本闸**（`land` 已登记在 `ISSUE_OPENING_ROUTINES` 里，
-disposition `gated`）——先回答四问模板再开，不要绕过。
 
 ```bash
 bash <agent_identity_script> --header "" --skill land > /tmp/body.md   # 身份行，脚本生成
@@ -89,8 +87,7 @@ bash <agent_identity_script> --header "" --skill land > /tmp/body.md   # 身份�
 gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --body-file /tmp/body.md
 ```
 
-**开单前先过 Step 6 的开单预算与同类塌缩**——成本闸是**逐条**的，它看不见「你这一轮已经开了五条、
-其中四条是同一个形状」。那是组合层，只有 Step 6 管。
+**开单前先查同类**：这一轮已经开过同一个形状（同文件、同症状）的单，就扩大那条，不再开新的。
 
 **开完必须复核正文长度非空**——`gh issue create` 在 body 为空时照样返回 URL 和 exit 0，
 「开成功了」和「开出了一个空壳」在终端上同色。

@@ -68,7 +68,7 @@ function bed(): Bed {
           // The default 10s lock wait is right in production and wrong here: the
           // contended case would spend 10s proving a held lock is refused, and
           // blow the suite's own 5s per-test budget. Measured — that is exactly
-          // how this file first went red in the gate.
+          // how this file first went red in a test run.
           AGENTLOOP_RETRY_LOCK_WAIT_MS: "300",
         },
       });
@@ -612,7 +612,7 @@ describe("agent-retry CLI — a lock it cannot take", () => {
       // A live holder (this test process) that is nowhere near the stale ceiling.
       writeFileSync(
         `${b.ledger}.lock`,
-        `${JSON.stringify({ pid: process.pid, at: Date.now(), purpose: "another gate", cwd: "/x" })}\n`,
+        `${JSON.stringify({ pid: process.pid, at: Date.now(), purpose: "another lock holder", cwd: "/x" })}\n`,
       );
       const r = b.run("due", "--now", String(T_RIPE));
       expect(r.code).toBe(3);

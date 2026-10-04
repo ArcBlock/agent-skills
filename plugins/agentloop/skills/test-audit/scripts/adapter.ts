@@ -25,7 +25,7 @@
  * one framework's vocabulary is a rule that silently misfires in every other repo.
  */
 
-/** What the gate does with a finding. `off` disables the rule entirely. */
+/** What the audit does with a finding. `off` disables the rule entirely. */
 export type Severity = "block" | "warn" | "off";
 
 export interface Dialect {

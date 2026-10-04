@@ -695,17 +695,24 @@ describe("PR-opening skills record the Change Set at every push (positive contro
   test("REJECT: a later push site without the step is seen, not only the first occurrence", () => {
     for (const rel of PR_OPENING_SKILLS) {
       const text = readFileSync(join(PLUGIN, rel), "utf8");
-      const added = `${text}\n\n- After rebasing on main, force-push the PR branch and re-run the gate.\n`;
+      const added = `${text}\n\n- After rebasing on main, force-push the PR branch and re-run the tests.\n`;
       expect(changeSetStepProblem(added)).toMatch(/^push site\(s\) without the step: .*force-push/);
     }
   });
 
   test("REJECT: removing the step from one later push site is seen", () => {
     const text = readFileSync(join(PLUGIN, "skills/epic-conductor/SKILL.md"), "utf8");
-    const fixerLine = text.split("\n").find((l) => l.startsWith("- The fixer:"))!;
+    const fixerLine = text
+      .split("\n")
+      .find((l) => l.includes("one push, then `record-change-set"))!;
     expect(fixerLine).toContain("record-change-set");
-    const cut = text.replace(fixerLine, fixerLine.replace(/record-change-set[^;]*;/, ""));
-    expect(changeSetStepProblem(cut)).toMatch(/^push site\(s\) without the step: .*The fixer/);
+    const cut = text.replace(
+      fixerLine,
+      fixerLine.replace(/, then `record-change-set\.sh[^`]*` for the/, ", for the"),
+    );
+    expect(changeSetStepProblem(cut)).toMatch(
+      /^push site\(s\) without the step: .*once the PR exists, one push/,
+    );
   });
 
   test("REJECT: a step that swallows its failure is not the step", () => {

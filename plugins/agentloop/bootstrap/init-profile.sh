@@ -46,24 +46,13 @@ reference implementation to copy patterns from.
 | \`symptom_ttl_days\` | \`7\` — <FILL: 一条未诊断观察（symptom）开着多久仍无判决就告警。**按你自己的仓库重标**：看已判决关闭的那批实际用了多久，取分布之外的那个数。7 是 arc 的标定，不是通用常量> |
 | \`plugin_root\` | \`.claude/plugins/agentloop\` — where the plugin is vendored (recommended: a submodule / vendored clone kept fresh with \`publish-agentloop.sh\`). Resolved at runtime as \`\$AGENTLOOP_ROOT\` (central / fleet clone) → this vendored path — **no machine-specific absolute path is committed**. Skills reference runtime scripts as \`<plugin_root>/skills/…/scripts/*.ts\`. |
 
-## Gate & Verification
+## Change Sets & PR sweep
 
 | Field | Value |
 |---|---|
-| \`gate_mode\` | \`both\` — \`scripts\` (local only) / \`ci\` (gh pr checks only) / \`both\` (both green). See contract below. |
-| \`verification_entry\` | \`bun .claude/verify/pre-pr.ts\` (scaffold with scaffold-verify.sh) |
-| \`pre_merge_entry\` | \`bun .claude/verify/pre-merge.ts\` |
-| \`reviewer_engines\` | \`<FILL>\` — 指向本仓导出 \`REVIEWER_ENGINES\` 的模块（如 \`.claude/verify/reviewer-engines.ts\`）。跨引擎 review 用；没有它 local-review 直接 exit 2，不退回任何默认。 |
-| \`merge_gate_entry\` | \`bun .claude/verify/merge-gate.ts\` (optional; only if you use the SHA-match merge gate) |
 | \`change_set_record_entry\` | \`none\` — <FILL: the command that records a PR head on your work ledger as a Change Set (arc: \`arc work changeset record --skip-outside-run\`); \`none\` if the repo has no work ledger. land / epic-conductor run it via record-change-set.sh after every PR push> |
-| \`additional_merge_gates\` | \`[]\` — extra gates on backend diffs; empty for most repos |
-| \`docs_na_flag\` | \`--na "docs-only change"\` |
-| \`pr_sweep_freeze_ttl_days\` | \`14\` — an \`awaiting-*\` PR untouched this long stops costing a round anything (pr-sweep 冻结集); \`updatedAt\` moving unfreezes it |
+| \`pr_sweep_freeze_ttl_days\` | \`14\` — an \`awaiting-*\` PR untouched this long stops costing a round anything (pr-sweep freeze set); \`updatedAt\` moving unfreezes it |
 | \`pr_sweep_stale_escalation_days\` | \`30\` — past this the frozen PR is named in the run report summary, never re-nagged on the PR |
-
-**\`gate_mode\` contract:** \`scripts\` = local verification scripts are the only gate (\`gh pr checks\`
-ignored). \`ci\` = CI is the gate. \`both\` = require \`gh pr checks\` green AND local scripts green.
-Invariant: local scripts are always authoritative; ci/both only *add* a CI requirement.
 
 ## Toolchain
 
@@ -71,7 +60,7 @@ Invariant: local scripts are always authoritative; ci/both only *add* a CI requi
 |---|---|
 | \`package_manager\` | \`${PM}\` |
 | \`build_system\` | <FILL: e.g. turbo, or your build command> |
-| \`test_runner\` | <FILL: e.g. \`<package_manager> test\`> |
+| \`test_runner\` | <FILL: how to run one package's / one file's tests, e.g. \`bun test\`; skills run the changed package's tests with it> |
 | \`type_checker\` | <FILL: e.g. \`<package_manager> check-types\`, or remove if not typed> |
 | \`formatter\` | <FILL: e.g. \`biome check --write\` / \`prettier -w\`> |
 
@@ -97,7 +86,7 @@ Diff paths that trigger UI verification (renderer/page changes). <FILL or leave 
 
 ## Backend Face Paths
 
-Diff paths that trigger the backend/data-plane gate. <FILL or leave empty>:
+Diff paths of the backend / data plane (review focus). <FILL or leave empty>:
 
 \`\`\`
 <FILL: e.g. src/server/, packages/api/>
@@ -117,7 +106,7 @@ Add your repo's own work-type / priority / status labels here so the sweeps know
 | Field | Value |
 |---|---|
 | \`agent_identity_script\` | <FILL: a provenance-header script, or remove> |
-| \`capability_probe_script\` | <FILL: env-capability probe for \`<!-- requires: -->\` gating; the plugin ships one at \`<plugin_root>/scripts/agent-capabilities.sh\`, or remove> |
+| \`capability_probe_script\` | <FILL: env-capability probe for \`<!-- requires: -->\` matching; the plugin ships one at \`<plugin_root>/scripts/agent-capabilities.sh\`, or remove> |
 | \`presence_heartbeat_script\` | <FILL: mandatory end-of-round heartbeat script, or remove if no presence board> |
 | \`ui_shot_script\` | <FILL: renderer-level UI screenshot generator, or remove if no UI> |
 | \`ui_upload_script\` | \`<plugin_root>/scripts/gh-upload-media.sh\` — UNIVERSAL (ships with the plugin, auto-detects your repo from git remote); no copy needed. Override only for a different asset host. |
@@ -126,7 +115,7 @@ Add your repo's own work-type / priority / status labels here so the sweeps know
 ## Companion Skills
 
 Bundled in the plugin (no action): issue-graph, design-review, build-phases.
-Repo-specific companions you must supply (or drop the steps that use them): e2e-gate, e2e-verify,
+Repo-specific companions you must supply (or drop the steps that use them): e2e-verify,
 ui-verify — arc's drive its product surface and can't be reused verbatim. \`companion_skills_path\` = \`.claude/skills/\`.
 
 ## Custom Impact Checks
@@ -140,5 +129,5 @@ case narratives under \`.claude/case-law/\` if you grow an appendix.
 EOF
 
 echo "✓ wrote $OUT (repo_slug=${SLUG}, default_branch=${DEFB}, package_manager=${PM}, plugin_root=.claude/plugins/agentloop; \$AGENTLOOP_ROOT overrides at runtime)."
-echo "  Auto-detected the above. The remaining <FILL: …> (toolchain commands, face paths, gate_mode,"
+echo "  Auto-detected the above. The remaining <FILL: …> (toolchain commands, face paths,"
 echo "  conventions) need judgement — the bootstrap skill fills them by reading the repo, or fill by hand."

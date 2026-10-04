@@ -52,12 +52,12 @@ bun <plugin_root>/skills/issue-graph/scripts/graph-scan.ts [--window-hours 2] [-
 
 ```bash
 bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <M>      # 父子边
-bun <plugin_root>/skills/issue-graph/scripts/link.ts --issue <Y> --blocked-by <X>  # 依赖边
+bun <plugin_root>/skills/issue-graph/scripts/link.ts --issue <Y> --depends-on <X>  # 依赖边
 ```
 
 **写边纪律（图精确性的来源）**：agent 每开一个 spin-off / 派生 issue，除了 body
 里的 `<!-- spinoff-of: #N -->` 标记（留作 provenance），**必须**同时调 `link.ts`
-挂原生父子边；phase 之间有硬次序的加 `--blocked-by`。边已存在 = 幂等 OK；child
+挂原生父子边；phase 之间有硬次序的加 `--depends-on`。边已存在 = 幂等 OK；child
 已有**不同** parent = 报错停下（换 parent 是人类决定）。人手开的 issue 不带边也
 没关系——孤立点走现有 label/catch-all 通道，图只增强、不替代。
 

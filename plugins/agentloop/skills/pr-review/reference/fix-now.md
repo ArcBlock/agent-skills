@@ -11,7 +11,7 @@ review 中发现的**确定性缺陷**(尤其截图一眼可见的 UI 缺陷:重
 | 缺陷在哪 | 四门判据(全过才修) | 当场动作 |
 |---|---|---|
 | **本 PR diff 引入** | 证据坐实(截图/测试/`path:line`)· 修法无歧义 · 非安全 · 无需方向拍板 | `--post` 模式:直接在 **PR 分支**上修(fix commit + push + comment 说明改了什么);read-only 模式:comment 给出可直接套用的修法。`BLOCK` 只留给修不动/要方向的 |
-| **main 上既有**(review 顺带撞到,如截图里暴露的布局 bug) | 同上四门 + 有界(单点 CSS/renderer 级,非架构) | **开 tracking issue(带截图)+ 从 origin/`<default_branch>` 切分支修 + before/after 截图 + verification + 开独立 fix PR** 双向回链;verdict comment 里一句话指向。一轮闭环,不写「建议复核」「留给其他 agent」 |
+| **main 上既有**(review 顺带撞到,如截图里暴露的布局 bug) | 同上四门 + 有界(单点 CSS/renderer 级,非架构) | **开 tracking issue(带截图)+ 从 origin/`<default_branch>` 切分支修 + before/after 截图 + 改动包的测试 + 开独立 fix PR** 双向回链;verdict comment 里一句话指向。一轮闭环,不写「建议复核」「留给其他 agent」 |
 | **任一门不过**(security / 方向 A-B 未定 / 大改动 / 语义争议) | — | comment + `needs-human-confirm`,把「要人判什么 + 怎么验 + 推荐」写全(Step 5.5) |
 
 **反模式:** 截图发现一个确定性、CSS 级、非安全的缺陷 → 只写「与本 PR 无关的观察,建议复核(不影响合并)」→ 没人跟进,bug 继续躺着。正确动作:当场按上表第二行处置(修 + issue + fix PR),人看到的是

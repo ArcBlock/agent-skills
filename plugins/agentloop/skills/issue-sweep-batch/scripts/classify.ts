@@ -149,7 +149,7 @@ export const SYMPTOM_VERDICTS = {
   "test-defect": "走查机具 / fixture 自己错了 —— 关闭，修在测试侧",
   env: "环境或部署态，不是产品缺陷 —— 关闭",
   stale: "已被别的改动修掉，复现不了 —— 关闭",
-  normal: "是正常态（对应 cost-gate 的 normal-state 一问）—— 关闭",
+  normal: "是正常态（对应成本四问的 normal-state 一问）—— 关闭",
 } as const;
 
 export type SymptomVerdict = keyof typeof SYMPTOM_VERDICTS;

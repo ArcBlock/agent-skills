@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression test for arc#2802: gh-upload-media.sh's channel selection was gated on
+# Regression test for arc#2802: gh-upload-media.sh's channel selection was keyed on
 # `gh auth status`, which only checks token *shape* — it exits 0 even in a gh-403 session
 # where every real `gh api` call against the org returns 403 (org disabled the GitHub App
 # for that session type). That made the script always pick channel A (gh contents API) and

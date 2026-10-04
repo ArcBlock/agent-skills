@@ -8,12 +8,12 @@
 **本 skill 发往 issue 的每一条 comment**（review verdict / ★Research 证据化 comment / ★Idea 评估 comment / ★父级 rollup 综合——**任何一条,不止 verdict**）末尾**必须**附一行 sweep-trace HTML 注释（人不可见、grep 可查）：
 
 ```html
-<!-- sweep-trace: {"ver":1,"issue":N,"gate":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
+<!-- sweep-trace: {"ver":1,"issue":N,"step":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
 
-> **与 Step 5.7 沉默闸的关系(先读这条,别自相矛盾):** 「每一条 comment 必须带 trace」约束的是
+> **与 Step 5.7 沉默规则的关系(先读这条,别自相矛盾):** 「每一条 comment 必须带 trace」约束的是
 > **发出去的** comment,不是「每轮必须发一条」。沉默轮不发 comment,自然也没有 trace——**这正是
-> 沉默闸只适用于 agent 自发路径的原因**:没有 trace,下一轮 sweep 就认定「未回应」。对**人类输入**
+> 沉默规则只适用于 agent 自发路径的原因**:没有 trace,下一轮 sweep 就认定「未回应」。对**人类输入**
 > 保持沉默会让那条人类评论永远处于「未回应」状态,每轮重新全额处理一遍。所以:人类触发 ⇒ 必发
 > ⇒ 必带 trace;agent 自发且无产出 ⇒ 不发 ⇒ 无 trace,而这条 issue 本来也不是靠 trace 被跳过的
 > (它压根没有未回应的人类输入)。

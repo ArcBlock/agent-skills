@@ -1488,7 +1488,7 @@ describe("Phase 4 — default source WorkObjectSource (#6000)", () => {
   test("Security: path traversal ids rejected by WORK_ID_RE at writeClassification", async () => {
     const src = new WorkObjectSource(readyOps());
     const patch = {
-      layer: "gate-credibility",
+      layer: "check-credibility",
       pathSurface: [] as string[],
       surfaceState: "measured",
     };
@@ -1518,7 +1518,7 @@ describe("Phase 4 — default source WorkObjectSource (#6000)", () => {
     };
     const src = new WorkObjectSource(ops);
     await src.writeClassification("keep", {
-      layer: "gate-credibility",
+      layer: "check-credibility",
       pathSurface: ["scripts/a.ts"],
       surfaceState: "measured",
       fingerprint: "fp-1",
@@ -1526,7 +1526,7 @@ describe("Phase 4 — default source WorkObjectSource (#6000)", () => {
     expect(lastIfMatch).toBe("tok-1");
     expect(stored.extra).toBe("stay");
     expect(stored.objectId).toBe("did:example:keep");
-    expect(stored.layer).toBe("gate-credibility");
+    expect(stored.layer).toBe("check-credibility");
     expect(stored.fingerprint).toBe("fp-1");
   });
 

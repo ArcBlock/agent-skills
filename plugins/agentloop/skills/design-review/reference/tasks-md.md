@@ -14,7 +14,7 @@ A document should have `tasks.md` if it contains future implementation work that
 
 **If should have `tasks.md` but it doesn't exist:**
 
-**Unattended / fleet mode (issue-native, no human present — the repo hook hard-denies `AskUserQuestion`): do NOT ask. Default to option 1 — generate `tasks.md` from the design (test-coverage hard gate ON), then review — and continue. Only fall back to the interactive prompt below when a human is demonstrably present in the session.**
+**Unattended / fleet mode (issue-native, no human present — the repo hook hard-denies `AskUserQuestion`): do NOT ask. Default to option 1 — generate `tasks.md` from the design (test-coverage hard requirement ON), then review — and continue. Only fall back to the interactive prompt below when a human is demonstrably present in the session.**
 
 Ask the user using AskUserQuestion (interactive only):
 
@@ -28,7 +28,7 @@ Ask the user using AskUserQuestion (interactive only):
 
 选项：
 1. 是，生成 tasks.md 后再做 review
-2. 不需要，按当前文档直接 review（不启用 test coverage hard gate）
+2. 不需要，按当前文档直接 review（不启用 test coverage hard requirement）
 3. 跳过 review，只生成 tasks.md
 ```
 
@@ -41,11 +41,11 @@ Ask the user using AskUserQuestion (interactive only):
   - Reference the design document for context, don't duplicate design rationale
   - Mark tasks that need user design decisions with `⚠️ NEEDS DECISION`
 - After generation, proceed to review loop with both design doc + tasks.md
-- Review uses Implementation Plan strategy (test coverage hard gate ON)
+- Review uses Implementation Plan strategy (test coverage hard requirement ON)
 
 **If user chooses option 2 (review without tasks):**
 - Proceed with Design/Architecture or Post-mortem review strategy
-- Test coverage is recommendation only, not hard gate
+- Test coverage is recommendation only, not hard requirement
 
 **If user chooses option 3 (generate only):**
 - Generate `tasks.md`, output summary of what was generated, stop

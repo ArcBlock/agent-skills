@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * comment — deliver a verification report to a PR as ONE atomic step with the
- * gate run. Upsert-by-marker sticky comment so re-running on each push edits one
+ * verification run. Upsert-by-marker sticky comment so re-running on each push edits one
  * comment instead of spamming new ones.
  *
  * Repo-agnostic: the only repo-shaped input is the git remote, resolved via
@@ -49,8 +49,8 @@ export function resolveGhRepoEnv(runner = run): Record<string, string> {
  * bodies verbatim, but a session blocked from `gh` (e.g. a 403'd proxy) falls
  * back to MCP, and every literal `<!-- marker` prefix then arrives as
  * `&lt;!-- marker`. Any code that matches a marker literally against the raw
- * body must decode through this first, or an MCP-posted gate/verdict comment
- * becomes invisible to it (#4283 — merge-gate read "no verification comment
+ * body must decode through this first, or an MCP-posted check/verdict comment
+ * becomes invisible to it (#4283 — merge check read "no verification comment
  * found on PR" against a PR that actually had one, MCP-escaped).
  * `&amp;` decodes last so a (hypothetical) double-escaped `&amp;lt;` isn't
  * mangled by the earlier `&lt;` pass.
@@ -88,13 +88,12 @@ export const HTML_DECODE_JQ = (
  * (`'...'`). Required for any `--jq` filter built from `HTML_DECODE_JQ` — its
  * `&#39;` → `'` mapping embeds a literal single quote in the filter text, which
  * breaks a naively single-quoted shell argument (`--jq '...'''...'`) with an
- * "unexpected EOF" parse error, silently degrading every caller: `gate.ts`'s
- * `requireStickyGate` read it as "could not fetch comments" (failing the merge
- * gate closed, at least safely), while `postOnce`'s upsert lookup below read the
+ * "unexpected EOF" parse error, silently degrading every caller: the sticky reader read it as "could not fetch comments" (failing the merge
+ * check closed, at least safely), while `postOnce`'s upsert lookup below read the
  * error text as a non-numeric id and fell through to POST — duplicating the
  * sticky comment on every run instead of patching it in place. Neither failure
  * mode surfaced in the hermetic unit tests because they inject a mock `runner`
- * that never touches a real shell (see `gate.test.ts`'s `withComment`).
+ * that never touches a real shell (see the sticky-reader tests' `withComment`).
  */
 /**
  * Stable prefix used to find existing verification-report comments (upsert key).
@@ -112,7 +111,7 @@ export const MARKER_PREFIX = "<!-- verification-report";
  *
  * Skills must NOT look this up with unanchored `contains()` — that PATCHed a
  * comment that only *quoted* the marker in a table cell (aside#1514 / arc#6404).
- * Use `postOnce(pr, body, runner, VERDICT_MARKER_PREFIX)` or `scripts/post-verdict.ts`.
+ * Use `postOnce(pr, body, runner, VERDICT_MARKER_PREFIX)`.
  */
 export const VERDICT_MARKER_PREFIX = "<!-- pr-review-verdict";
 export const VERDICT_MARKER = "<!-- pr-review-verdict -->";
@@ -138,22 +137,22 @@ export function anchoredMarkerLookupJq(markerPrefix: string, field: "id" | "body
 }
 
 /**
- * `BLOCKED` (issue #3010): distinct from `FAIL` — the gate RAN but its required evidence
+ * `BLOCKED` (issue #3010): distinct from `FAIL` — the check RAN but its required evidence
  * could not be durably published (e.g. an asset upload failed, or evidence exists only
- * as a local file path never posted anywhere readable). `requireStickyGate` already
+ * as a local file path never posted anywhere readable). the sticky reader already
  * rejects anything outside {PASS, NA}, so `BLOCKED` fails closed for free — it exists so
- * reports can say WHY a gate is red (upload/publish failure) instead of conflating it
+ * reports can say WHY a check is red (upload/publish failure) instead of conflating it
  * with a technical assertion failure. Never derive `BLOCKED` by hand — it must come from
  * a structural check (e.g. "is this URL a local path or an unreachable host") the same
  * way PASS/FAIL are derived from measured outcomes, not hand-filled.
  */
 /**
- * `TIMEOUT` (issue #3170, follow-up to #2880/#3166): distinct from `FAIL` — the gate
+ * `TIMEOUT` (issue #3170, follow-up to #2880/#3166): distinct from `FAIL` — the check
  * RAN but a watchdog killed it before any check observed a real failure (a cold
  * turbo test-cache + wide affected surface can legitimately exceed the budget with
  * zero test failures). Without this, a genuine "nothing was verified" reads
  * identically to "a test broke" in the marker, so neither a human nor an agent can
- * tell them apart without opening the rawTail. `requireStickyGate` already rejects
+ * tell them apart without opening the rawTail. the sticky reader already rejects
  * anything outside {PASS, NA}, so `TIMEOUT` fails closed for free — same shape as
  * `BLOCKED` above. Never derive it by hand — it must come from `deriveResult()`
  * (report.ts), which requires every blocking failure to be a structurally-measured
@@ -161,10 +160,10 @@ export function anchoredMarkerLookupJq(markerPrefix: string, field: "id" | "body
  */
 /**
  * `PARTIAL` (issue #5067): distinct from `PASS` — every check that RAN passed, but the
- * run was scoped by `--only`/`--skip`, so the gate's coverage was never established. It
+ * run was scoped by `--only`/`--skip`, so the check's coverage was never established. It
  * is emitted for a green partial run only (a red partial stays `FAIL`/`TIMEOUT`, because
  * a red is already a red and `FAIL` carries the #3062 diagnostic semantics). Like
- * `BLOCKED` and `TIMEOUT` above, it fails closed for free: `requireStickyGate` accepts
+ * `BLOCKED` and `TIMEOUT` above, it fails closed for free: the sticky reader accepts
  * only {PASS, NA}, `--deliver-cached` exits non-zero on anything else, and
  * `tools/pre-push.sh` compares the `.result` file against PASS/NA. Never derive it by
  * hand — the scenario runner derives it from a structural fact (were `--only`/`--skip`
@@ -175,7 +174,7 @@ export type VerifyResult = "PASS" | "FAIL" | "NA" | "BLOCKED" | "TIMEOUT" | "PAR
 /**
  * Optional same-SHA retry trail on the marker line (#6158).
  *
- * `prev` is deliberately not named `priorResult`: `gate.ts` parses
+ * `prev` is deliberately not named `priorResult`: the sticky reader parses
  * `result=([A-Z]+)` unanchored, and `priorResult=FAIL` contains that
  * substring. `attempts` / `prev` do not. First-green omits both so
  * absent ≠ 1 on the marker (metadata still writes `attempts: 1`).
@@ -185,7 +184,7 @@ export interface MarkerExtras {
   prev?: VerifyResult;
 }
 
-/** Build a dynamic marker encoding sha + result (parsed by a merge-gate). */
+/** Build a dynamic marker encoding sha + result (parsed by a merge check). */
 export function makeMarker(
   sha: string,
   result: VerifyResult,
@@ -214,7 +213,7 @@ export interface CommentArgs {
  *   --comment / --comment <pr#> / --comment=<pr#>
  *   --comment-dry-run [<pr#>]
  *   --dry-run [<pr#>]        — canonical alias of --comment-dry-run. For the
- *                              verification gate the comment is the only outward
+ *                              verification run the comment is the only outward
  *                              write, so bare --dry-run unambiguously means "don't
  *                              post the report, print it" (the plugin's dry-run
  *                              contract). Checks always run either way.
@@ -284,7 +283,7 @@ export const HISTORY_MARKER = "<!-- verify-history";
 
 /**
  * How many rounds to keep. A PR that is pushed to for a week can easily see 30+
- * gate runs, and every row costs body budget against BOTH GitHub's 65536-char
+ * verification runs, and every row costs body budget against BOTH GitHub's 65536-char
  * limit and the tighter outbound comment-filter work budget (#1922) that already
  * forces `postComment` to drop the Full Logs appendix. 30 rows ≈ 3KB rendered
  * plus ≈3KB of JSON — enough to see a trend, small enough to never be the reason
@@ -294,7 +293,7 @@ export const HISTORY_CAP = 30;
 
 /**
  * Upper bound on a recorded duration: 24h. No real round approaches it — the
- * gate carries its own watchdog and the numbers come from `process.uptime()` —
+ * check carries its own watchdog and the numbers come from `process.uptime()` —
  * so a value above this is a corrupt or hand-edited record, not a slow run.
  * It exists because `Number.isFinite` is true for 1e308, which sails through a
  * plain non-negative check and then renders as `1e+305s` in the table (found by
@@ -311,7 +310,7 @@ export interface VerifyRunEntry {
   sha: string;
   scenario: string;
   result: VerifyResult;
-  /** true wall clock of the whole gate process (queueing + git + checks) */
+  /** true wall clock of the whole verification process (queueing + git + checks) */
   wallMs: number;
   /** sum of per-check durations; null when this round ran no checks at all */
   checksMs: number | null;
@@ -429,7 +428,7 @@ export function renderRunHistory(entries: VerifyRunEntry[]): string {
     `\n\n<details><summary>⏱ Verification history — ${clean.length} round${clean.length > 1 ? "s" : ""} on this PR</summary>\n\n` +
     `| when (UTC) | scenario | sha | result | wall | checks |\n` +
     `|-----------|----------|-----|--------|------|--------|\n${rows}\n\n` +
-    `<sub>\`wall\` = the whole gate process. \`checks\` = sum of the per-check durations; the gap is queueing, git and evidence publication.${reusedNote} Newest first, last ${HISTORY_CAP} kept.</sub>\n\n` +
+    `<sub>\`wall\` = the whole verification process. \`checks\` = sum of the per-check durations; the gap is queueing, git and evidence publication.${reusedNote} Newest first, last ${HISTORY_CAP} kept.</sub>\n\n` +
     `</details>\n\n${HISTORY_MARKER} ${JSON.stringify({ v: 1, runs: clean })} -->`
   );
 }
@@ -604,7 +603,7 @@ function branchesContaining(sha: string, runner: typeof run): string | undefined
  * `--comment <PR#>` used to write the sticky comment wherever it was pointed: on
  * 2026-08-25 PR #5049's sticky was overwritten with sha `4edf808af`, a commit on
  * `factory/5018-independent-substrate`, and a human had to re-deliver the real one by
- * hand. The merge gate is fail-closed on its own SHA match, so this is about the half a
+ * hand. The merge check is fail-closed on its own SHA match, so this is about the half a
  * HUMAN reads — a foreign red reads as "this PR failed", and a foreign green is worse.
  *
  * Relatedness is deliberately generous in three directions, because the accept path is
@@ -676,7 +675,7 @@ export function attributeShaToPr(pr: string, sha: string, runner = run): PrShaAt
 /**
  * Banner for the third state: a real report for a real commit on this PR's branch that
  * is NOT its head. Delivering it silently would let a green from an earlier commit read
- * as a gate for the current one; refusing it outright would throw away a legitimate
+ * as a check for the current one; refusing it outright would throw away a legitimate
  * report. So it is delivered, labelled.
  */
 export function notHeadNotice(pr: string, sha: string, prHead: string): string {
@@ -735,7 +734,7 @@ export function readStickyBody(
  * The one call the scenario runner makes after rendering. Honors --comment /
  * --comment-dry-run; no-ops when neither is present. Prints a loud line on any
  * failure so a requested post that didn't land can't pass silently — but never
- * changes the gate's exit code (PASS/FAIL is authoritative).
+ * changes the check's exit code (PASS/FAIL is authoritative).
  */
 /**
  * What this ROUND cost, for the timing history. Optional on `deliverComment` so
@@ -793,7 +792,7 @@ export function deliverComment(
     };
   }
   // Third state: a genuine report for a genuine commit on this PR's branch that is not
-  // its head. Deliverable — but never silently, or its green reads as a head gate.
+  // its head. Deliverable — but never silently, or its green reads as a head check.
   const attributed =
     attribution.relation === "behind" && attribution.prHead
       ? `${notHeadNotice(pr, sha, attribution.prHead)}\n\n${report}`
@@ -845,7 +844,7 @@ export function deliverComment(
   // Read back what GitHub actually holds (#5060). Asymmetric on purpose: POSITIVE
   // evidence of a different sha means our report is not the one on the PR and the
   // delivery failed; ABSENCE of evidence (the read-back call itself did not run) only
-  // warns, because a flaky read must not turn a landed report into a failed gate.
+  // warns, because a flaky read must not turn a landed report into a failed check.
   const delivered = readDeliveredSha(pr, runner, markerPrefix);
   if (delivered === undefined) {
     console.error(

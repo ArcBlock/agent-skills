@@ -9,7 +9,7 @@ test("resolve returns the full record", () => {
 
 // GOOD 2 — a WEAK matcher (`toBeDefined`) was dropped while the semantic one
 // (`toThrow`) stayed. That is a test getting tidier, not weaker. Flagging it
-// would punish improvement, which is how a gate becomes decoration people mute.
+// would punish improvement, which is how a check becomes decoration people mute.
 test("resolve rejects unknown ids", () => {
   expect(() => resolve("zzz")).toThrow(/unknown/);
 });

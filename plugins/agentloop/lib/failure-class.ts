@@ -44,7 +44,7 @@
  * This does not become #5493's forbidden "retry once and let it through",
  * because the guards are structural and live elsewhere: every rung above R0 is
  * narrow and probe-backed, the escaped-fixture veto sits at rung 1 above all of
- * them, and R2 forbids any of this from changing the gate's colour — a class
+ * them, and R2 forbids any of this from changing the run's colour — a class
  * only changes the SENTENCE a consumer prints.
  */
 
@@ -55,7 +55,7 @@ import type { CheckFailure, CheckResult, FailureClass } from "./report.ts";
  * REASON, not of the class: it is what forced `BUDGET` (a knob the red-holding
  * agent turns) out of `ENV_GAP` (a host capability that agent cannot install).
  */
-export type FailureActor = "red-holding-agent" | "gate-maintainer" | "human";
+export type FailureActor = "red-holding-agent" | "tooling-maintainer" | "human";
 
 /**
  * The closed reason vocabulary of §3.3. The three `CONTENTION` owner-ledger
@@ -160,9 +160,9 @@ export const FAILURE_ACTORS: Readonly<Record<FailureReason, FailureActor>> = {
   "nonzero-exit": "red-holding-agent",
   "escaped-fixture": "red-holding-agent",
   "budget-exhausted": "red-holding-agent",
-  "dns-localhost-subdomain-missing": "gate-maintainer",
-  "upstream-unreachable": "gate-maintainer",
-  "disk-exhausted": "gate-maintainer",
+  "dns-localhost-subdomain-missing": "tooling-maintainer",
+  "upstream-unreachable": "tooling-maintainer",
+  "disk-exhausted": "tooling-maintainer",
   "bun-below-declared-engines": "red-holding-agent",
   "package-manager-mismatch": "red-holding-agent",
   "owner-ledger-hook-timeouts": "red-holding-agent",
@@ -407,7 +407,7 @@ export function assertLadderIsTotalOrder(ladder: readonly LadderRung[]): string[
  * Deterministic and total: the last rung claims unconditionally, so this never
  * returns `undefined` and never returns `UNKNOWN`. `UNKNOWN` is not on the
  * ladder at all — it is synthesised by the runner when no `CheckResult` was
- * produced (`runCheckGuarded`, scenario.ts), which is a state no check-level
+ * produced (`runCheckGuarded` in the former scenario runner), which is a state no check-level
  * classifier can observe from inside itself (§5.4).
  */
 export function classifyFailure(signals: LadderSignals): CheckFailure {
@@ -452,7 +452,7 @@ export function isFailureClass(value: string): value is FailureClass {
  *
  * ## Why this order
  *
- * - `UNKNOWN` first — no `CheckResult` was produced, so the gate itself failed to
+ * - `UNKNOWN` first — no `CheckResult` was produced, so the runner itself failed to
  *   answer, and every other class in the same run was computed by machinery whose
  *   soundness is now in question. Its action ("stop, escalate") is also the only
  *   one that cannot make things worse.
@@ -507,7 +507,7 @@ export const RUN_CLASS_PRECEDENCE: readonly FailureClass[] = [
  * A warn-only check that THROWS yields a NON-BLOCKING `UNKNOWN`
  * (`runCheckGuarded` honours the spec's own `c.blocking ?? true` — the path
  * #5594 opened for mirror consumers). On class precedence alone that `UNKNOWN`
- * outranks a blocking `CODE` red, so the gate would print "stop, escalate to a
+ * outranks a blocking `CODE` red, so the runner would print "stop, escalate to a
  * human" over a bug the agent could have fixed in one round. Wrong actor, wrong
  * action, and it wastes the one thing escalation is for.
  *
@@ -525,7 +525,7 @@ export const RUN_CLASS_PRECEDENCE: readonly FailureClass[] = [
  *
  * Reading `blocking` here is a comparison, never a write: R2(b) is about
  * SETTING `pass` / clearing `blocking` / setting `skipped`, and this sets
- * nothing. The gate's colour is decided by `passed()` exactly as before; all
+ * nothing. The run's colour is decided by `passed()` exactly as before; all
  * that changes is which sentence a consumer PRINTS.
  */
 export function deriveRunClass(

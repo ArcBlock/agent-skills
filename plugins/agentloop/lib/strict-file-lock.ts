@@ -17,7 +17,7 @@
  * The other difference is the liveness predicate. `runlock`'s `isAlive` is bare
  * `process.kill(pid, 0)`, which `lib/pid-liveness.ts` was written to replace: a
  * RECYCLED pid makes a dead holder look alive forever, and measured, not
- * hypothetically (a gate ledger named pid 58249 as a live gate; 58249 was a
+ * hypothetically (a check ledger named pid 58249 as a live check; 58249 was a
  * Chrome helper that inherited the number). This module routes staleness through
  * {@link evaluateOwnerLiveness}, so "the pid is alive" and "the pid is alive and
  * is still the process that took the lock" are different answers.
@@ -27,7 +27,7 @@
  * `openSync(path, "wx")` is an atomic CREATE, but the content arrives in a
  * second syscall. A racer reading between the two sees a zero-byte file,
  * classifies it as garbage, and steals a LIVE holder's lock — the empty-file
- * window that `scripts/lib/gate-lane.ts` names explicitly. Writing a temp file
+ * window that the former machine-lane lock names explicitly. Writing a temp file
  * first and publishing it with `linkSync` makes the appearance of the lock and
  * the completeness of its content the same event. `link()` fails with EEXIST
  * when the target is present, so the claim IS the check: CAS, no window.

@@ -9,7 +9,7 @@
  * Two distinct defects lived in those five lines, failing in opposite directions.
  *
  * ① A RECYCLED pid makes a dead owner look alive. Measured, not hypothetical:
- *    a gate ledger recorded pid 58249 as a "live gate"; rechecked, 58249 was a
+ *    a check ledger recorded pid 58249 as a "live check"; rechecked, 58249 was a
  *    Chrome helper that had inherited the number, and the other five recorded
  *    pids no longer existed at all. For the lease itself that direction is
  *    fail-closed (it is never reclaimed, so nothing is corrupted), but the
@@ -26,7 +26,7 @@
  * ONE-DIRECTIONAL BY DESIGN. Only "this pid started LATER than the anchor" is
  * evidence the pid changed hands. A measured start time EARLIER than the anchor
  * is treated as clock skew or a coarser measurement source and does NOT reclaim.
- * The reason is asymmetric blast radius: an over-eager verdict makes every gate
+ * The reason is asymmetric blast radius: an over-eager verdict makes every check
  * steal every lease, which is far worse than the wedge being fixed. Every path
  * where the instrument cannot answer therefore ends in `alive`, and says so
  * with its own reason rather than blending into "verified alive".
@@ -38,7 +38,7 @@
  * assumption is made anywhere else — macOS has no `/proc`.
  *
  * WHY THIS PARSES `lstart` AT ALL, when the repo already has a module that
- * refuses to. `scripts/lib/gate-ownership.ts:95-104` states the hazard exactly:
+ * refuses to. the repo's former ownership ledger states the hazard exactly:
  *
  *   「Deliberately NOT derived from `lstart` minus a clock: `lstart` carries no
  *    timezone, so any parse of it is a guess about the reader's TZ, and a test
@@ -57,7 +57,7 @@
  * `Date.now() - parseEtime(ps -o etime=)` and `parseLstart(ps -o lstart=)`
  * return THE SAME INSTANT, delta 0.7 s — exactly etime's sub-second truncation
  * — for pid 1 at 7 days old and for pids seconds old. They are one quantity
- * computed two ways, and `parseEtime` already exists in `gate-ownership.ts`.
+ * computed two ways, and `parseEtime` already exists in the former ownership ledger.
  * So the etime construction is entirely viable, and **no step-immunity
  * advantage has been demonstrated for either construction, on either
  * platform.** Nothing below rests on one.
@@ -68,7 +68,7 @@
  *   a. `ps -o lstart= -p <pid>` is the command a human runs to recheck a number
  *      in a report — it is how the incident in #5815 was diagnosed in the first
  *      place;
- *   b. `gate-ownership.ts` already stores this exact C-locale rendering as
+ *   b. the former ownership ledger already stores this exact C-locale rendering as
  *      `identity.startTime`, so the two modules name the same field rather than
  *      two derivations of it.
  *
@@ -81,7 +81,7 @@
  *   1. the rendering is pinned at BOTH ends (`TZ=UTC` on the spawn + a literal
  *      ` GMT` in the parser), so the reading does not depend on the host zone;
  *   2. the string must match the C-locale `lstart` SHAPE before it is parsed —
- *      the same anchor `gate-ownership.ts:1140` applies — because `Date.parse`
+ *      the same anchor the former ownership ledger applies — because `Date.parse`
  *      will otherwise swallow a degraded rendering and read `dd/mm` as `mm/dd`;
  *   3. route 1 compares two readings from the SAME instrument, so any constant
  *      misparse cancels. That sameness is a recorded fact (`startTimeSource`:
@@ -98,9 +98,9 @@
  * would make a live owner look younger than its own record. This is NOT claimed
  * to differ between `lstart` and an etime-derived start — see above; that claim
  * has been made twice and been wrong twice. Nothing purely local closes it, and
- * `gate-ownership.ts` carries an exposure of the same shape, confirmed in
+ * the former ownership ledger carries an exposure of the same shape, confirmed in
  * review: `identityAgrees` (`:372-380`) returns false on a shifted `lstart` and
- * `isLiveCandidate` (`:392-393`) then reads a LIVE gate as dead, the unsafe
+ * `isLiveCandidate` (`:392-393`) then reads a LIVE check as dead, the unsafe
  * direction. Bounded here by leases living for minutes; stated rather than
  * papered over.
  */
@@ -189,7 +189,7 @@ export interface LivenessDeps {
   startTime?: (pid: number) => MeasuredStartTime | undefined;
   /**
    * Whether the `ps` clock and the runtime clock are close enough to be
-   * compared against each other. Gates route 2 only; route 1 never needs it.
+   * compared against each other. Checks route 2 only; route 1 never needs it.
    */
   clocksAgree?: () => boolean;
   now?: () => number;
@@ -222,7 +222,7 @@ export function probeSignal(pid: number): SignalProbe {
  */
 export function parseLstart(raw: string): number | undefined {
   const text = raw.trim().replace(/\s+/g, " ");
-  // Shape-anchored BEFORE parsing, the same guard `gate-ownership.ts:1140`
+  // Shape-anchored BEFORE parsing, the same guard the former ownership ledger
   // applies to the same field. `Date.parse` is far too permissive to be a
   // validator: measured across plausible degraded renderings, most of them
   // parse, and a `dd/mm/yyyy` rendering is silently read as `mm/dd` whenever
@@ -323,8 +323,8 @@ export function readProcessStartTime(pid: number): MeasuredStartTime | undefined
   const ps = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
     // `process.kill(pid, 0)` structurally could not hang; a subprocess can, and
-    // this one now sits on the gate's critical path. A wedged `ps` must degrade
-    // to "cannot measure" (fail-closed to alive) rather than stop the gate.
+    // this one now sits on the check's critical path. A wedged `ps` must degrade
+    // to "cannot measure" (fail-closed to alive) rather than stop the check.
     timeout: PS_TIMEOUT_MS,
     // LC_ALL pins the month names; TZ pins the clock the timestamp is rendered
     // in. Without TZ the reading depends on the host zone (see parseLstart).
@@ -375,7 +375,7 @@ export function readProcessStartTimeMs(pid: number): number | undefined {
  * two answers differ by more than the tolerance, the timezone/locale pinning
  * did not hold on this host and route 2 is refused rather than trusted.
  *
- * It is deliberately NOT used to gate route 1: route 1 compares two readings
+ * It is deliberately NOT used to check route 1: route 1 compares two readings
  * from the same instrument, where a constant misparse cancels, and disabling it
  * on a host with an odd clock would throw away the accurate check to protect
  * the approximate one.
@@ -512,7 +512,7 @@ export function evaluateOwnerLiveness(
   // would read as alive forever and wedge its lease. (Signal 0 delivers
   // nothing, so nothing was ever harmed; the verdict was simply meaningless.)
   //
-  // pid 1 is ALLOWED, deliberately: inside a container the gate genuinely runs
+  // pid 1 is ALLOWED, deliberately: inside a container the check genuinely runs
   // as pid 1, and rejecting it would return `alive: false` — the unsafe
   // direction — on every containerised host. This module ships to many repos
   // and many hosts; it does not get to assume it is not pid 1.

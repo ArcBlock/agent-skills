@@ -23,7 +23,7 @@
  *   bun sweep-batch.ts --mode revalidate              只重验已分类的（世界变了之后旧结论还成立吗）
  *   bun sweep-batch.ts --dry-run --scope factory      只看工厂树的候选
  *   bun sweep-batch.ts --source github                换源（GitHub issue list；投影 alias）
- *   bun sweep-batch.ts --layers '{"w_abc":"gate-credibility"}'  写入 Step 3 赋的 layer（不猜）
+ *   bun sweep-batch.ts --layers '{"w_abc":"check-credibility"}'  写入 Step 3 赋的 layer（不猜）
  *   bun sweep-batch.ts --html out.html                同时产出可交互的 HTML（双击就能开）
  *   bun sweep-batch.ts --ledger <path>                指定 ledger 位置
  *

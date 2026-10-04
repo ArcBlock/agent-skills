@@ -22,7 +22,7 @@ the places it cannot do that.
 # One PR / working tree: what did this change do to the suite?
 bun <plugin_root>/skills/test-audit/scripts/audit.ts diff [--base origin/main] [--json]
 
-# Whole tree: which tests verify nothing? (advisory backlog, never a gate)
+# Whole tree: which tests verify nothing? (advisory backlog, never blocking)
 bun <plugin_root>/skills/test-audit/scripts/audit.ts scan [--json] [--rule <id>]
 bun <plugin_root>/skills/test-audit/scripts/audit.ts scan --write-baseline
 
@@ -47,7 +47,7 @@ actually asked; do not run all of them.
 
 | What you were asked | Mode | Then |
 |---|---|---|
-| "review this PR's tests" / a PR number / you are inside `pr-review` | `diff --base <merge-base>` | **Read the gate row first.** In a repo where this is wired as a verification check (arc: `testQuality`), the PR's verification report (`<verification_entry>`, arc: `pre-pr`) already ran it — quote that row from the same-SHA report rather than re-running. Only run it yourself when there is no such row. |
+| "review this PR's tests" / a PR number / you are inside `pr-review` | `diff --base <merge-base>` | Run it on the PR's merge-base range and quote the `block` findings with their witnesses. |
 | "what's wrong with our tests" / "sweep" / "backlog" | `scan` | Report the NEW-vs-baseline split, not the raw total. The baseline is accepted debt; re-announcing it every time is how a report becomes wallpaper. |
 | "file issues for this" | `issues` | Print the drafts. Add `--create --repo <owner/name>` **only if the human asked for issues to be created** — the flag is the authorisation, and it is never inferred. |
 | "should rule X block?" / "is this rule any good?" | `replay --rule X --verbose` | Read the hits. A rule earns `block` only with a demonstrated true positive and a near-zero false-positive rate on that history. |
@@ -72,9 +72,6 @@ actually asked; do not run all of them.
 5. **Never raise a severity to make a point.** Promotion to `block` requires a
    `replay` run, and it is the repo owner's call, not the reviewing agent's.
 
-In arc the diff mode is also wired into the verification gate as the
-`testQuality` check (`.claude/verify/checks/check-test-quality.ts`), so
-`pre-pr` carries it on every PR (and `pre-merge` also lists it, but pre-merge is not part of the PR loop — read the pre-pr row).
 
 ## The five ways a suite fails
 
@@ -139,12 +136,12 @@ and hand-rolled `throw` assertions.
 ### 3. A rule may only block once measured on real history
 
 `scripts/replay.ts` walks real commits, feeds each `(parent, head)` pair through
-the same code path the gate uses, and reports what the gate **would** have done.
+the same code path the diff mode uses, and reports what `block` **would** have stopped.
 Run it before promoting any rule to `block`, and again whenever a rule changes.
 
 The bar is two-sided, because **finding a real problem and being worth blocking
 are separate questions.** A rule that stops honest work is a tax on every honest
-change, and the first thing anyone does with a gate that cries wolf is route
+change, and the first thing anyone does with a check that cries wolf is route
 around it — at which point it protects nothing.
 
 Measured on arc's last 300 test-touching commits:
@@ -157,7 +154,7 @@ Measured on arc's last 300 test-touching commits:
 | `no-assertions` | 121 findings, **65% precision** on a full-population audit | four escape hatches (accept/reject pairs, `node:assert` roots, body-level `throw`, named helpers) → 34 findings at **76.5% precision with 100% recall** |
 | `only`, `test-disabled` | block | block — 0 occurrences in 300 commits, so holding the line is free |
 
-Shipped blocking set: **0.0% of real commits.** Whole-tree scan never gates.
+Shipped blocking set: **0.0% of real commits.** Whole-tree scan never blocks.
 
 ### The bar is different for `warn` than for `block`
 
@@ -231,4 +228,4 @@ nobody had run — measured on bun 1.3.14, all three variants
 |---|---|
 | whole-tree scan (3368 files) | ~5.6s |
 | diff mode, 5 changed test files | ~0.3s |
-| gate row when the diff has no tests | self-skips with a reason |
+| diff mode when the diff has no tests | self-skips with a reason |

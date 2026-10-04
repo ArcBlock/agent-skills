@@ -33,7 +33,7 @@ description: >-
 
 - 远程名：`origin`
 - 默认分支：优先 `origin/HEAD` → 否则 `main` → 否则 `master`
-- **删除闸门 = 内容已在 `origin/<default>` 上**，不是「我记得 merge 了」
+- **删除前提 = 内容已在 `origin/<default>` 上**，不是「我记得 merge 了」
 
 ## 硬规则
 
@@ -216,8 +216,7 @@ gh pr view <n> --json state,mergedAt,mergeCommit
 1. **rebase 不 merge**：`git rebase origin/<default> <branch>`（或先 `git branch
    <branch>-pr <branch>` 复制一份再 rebase，保留原分支名不动，避免和历史上可能存在的
    同名 PR 记录混淆）。冲突 → 停，报告冲突文件，不擅自二选一。
-2. 干净 rebase 后跑验证：按仓库自己的 verification 入口（如有 `--na "docs-only
-   change"` 之类的豁免机制，纯文档改动可以用；否则跑真实验证门禁）。
+2. 干净 rebase 后跑改动包的测试（纯文档改动无需跑），PR 正文写确切命令 + 计数。
 3. push 新分支，开 PR。**PR body 必须显式说明这是「补交」**——写清楚：为什么这条工作
    之前没走 PR（如果知道原因）、内容是否仍然准确/未过时（关联 issue/epic 当前状态如何，
    有没有验证过没被后续变化淘汰）、身份行按仓库约定生成。不要让 reviewer 以为这是一个
@@ -291,5 +290,5 @@ gh pr view <n> --json state,mergedAt,mergeCommit
 
 - 不整理 stash 列表（除非用户要求）
 - 不关闭 GitHub PR / issue
-- 不升级依赖、不跑全量测试门禁（除非用户要求验证 main 可构建）
+- 不升级依赖、不跑全量测试登录校验（除非用户要求验证 main 可构建）
 - 不把「分支名像 agent 临时」当成可删充分条件

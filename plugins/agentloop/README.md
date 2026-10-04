@@ -1,8 +1,9 @@
 # agentloop
 
-Repo-agnostic engineering-loop engine, extracted from `ArcBlock/arc`'s
-`.claude/skills/`. The engine holds the mechanics; each repo keeps its specifics
-in `.claude/verify/config.ts` and `.claude/repo-profile.md`.
+Repo-agnostic engineering-loop skills, extracted from `ArcBlock/arc`'s
+`.claude/skills/`. The plugin holds the mechanics; each repo keeps its specifics
+in `.claude/repo-profile.md`. The loop it encodes: the author runs the changed package's tests,
+one clean-context review, merge; nightly full build + test on the default branch is the catch-net.
 
 Status: **work in progress** (issue [ArcBlock/arc#1037](https://github.com/ArcBlock/arc/issues/1037)).
 
@@ -15,11 +16,10 @@ engine's own reference: what it contains, how a change reaches the fleet, and ho
 .claude-plugin/plugin.json     # manifest for Claude Code (name: agentloop) — the one you edit
 .codex-plugin/plugin.json      # same manifest for Codex — GENERATED on publish, never hand-edited
 SETUP.md                       # first-install path (start here to RUN it)
-lib/report.ts                  # CheckResult contract + deterministic run/render helpers
+lib/report.ts                  # CheckResult contract + deterministic run/render helpers (repo scripts import it)
 lib/comment.ts                 # sticky PR-comment upsert (marker-keyed, gh REST)
-lib/gate.ts                    # requireStickyGate — the merge-gate primitive
-lib/scenario.ts                # runScenario() + cmd() — the config-driven gate runner
-lib/*.test.ts                  # engine unit tests (report / comment / gate)
+lib/*.ts                       # pid liveness, strict file lock, agent-retry ledger
+lib/*.test.ts                  # unit tests
 fleet/driver.ts                # the multi-repo loop driver (checkout → setup → skill → reap)
 fleet/setup.ts                 # the installer behind /agentloop:fleet-setup
 fleet/runlock.ts               # per-(repo,skill) lock; PID-liveness, stale self-heal
@@ -31,8 +31,8 @@ skills/*/SKILL.md              # the skills themselves (see below)
 ```
 
 **Skills:** loop — `issue-sweep` `issue-review` `pr-sweep` `pr-review` `impact-check`
-`design-review` `build-phases` `issue-graph`; gate — `verification`; fleet — `fleet-setup`
-`fleet-report`; adoption — `repo-setup`; utility — `media-upload` `git-hygiene`.
+`design-review` `build-phases` `issue-graph`; delivery — `land` `epic-conductor`; fleet —
+`fleet-setup` `fleet-report`; adoption — `repo-setup`; utility — `media-upload` `git-hygiene`.
 
 These skills still contain arc-specific case-law and paths; de-arc-ifying them into
 `repo-profile` keys is a later #1037 step. They are hosted here (single source) and
@@ -145,7 +145,7 @@ bun fleet/setup.ts --runner me --repos "ArcBlock/arc=issue-sweep,pr-sweep@120" \
 bun fleet/setup.ts … same … --local --apply                                       # write + install
 ```
 
-`repo-setup` makes a repo consumable (repo-profile + labels + verify gate); `fleet-setup`
+`repo-setup` makes a repo consumable (repo-profile + labels); `fleet-setup`
 schedules the loop over repos that already are. Run them in that order.
 
 ### 1. Two config files — live, per-deployment, NOT committed
@@ -196,7 +196,7 @@ round silently skips. `~/.agentloop-fleet/deployment.json`:
   [`fleet/README.md`](fleet/README.md#config-field-reference).
 
 **Each covered repo must have** its own `.claude/repo-profile.md` (the skills read toolchain /
-face-paths / labels / verification_entry from it) **and the coordination labels**
+face-paths / labels from it) **and the coordination labels**
 (`agent:processing` / `agent:ready` / `needs-human-confirm` / … — run `bootstrap/sync-labels.sh`
 once inside that repo). No repo-profile ⇒ the skills can't find the repo's toolchain.
 
@@ -258,26 +258,11 @@ crontab block it generates (arc's own `/setup-routines` schedules its other rout
 deliberately leaves the sweep loop to fleet-setup). A bad `--plugin-dir` path fails **silently** (exit 0,
 skill just absent) — guard it with an existence check on `.claude-plugin/plugin.json`.
 
-## The engine/config/checks split
+## How a repo consumes it
 
-- **Engine** (here): report kernel, comment delivery, `runScenario`. No pnpm,
-  turbo, or repo paths.
-- **Repo config** (`.claude/verify/config.ts` in the consuming repo): the check
-  list. Command-checks are pure config (`cmd({ command: "pnpm build" })`);
-  logic-checks (Swift/Kotlin parity, MCP-tool parity, …) import a repo-local
-  module.
-- **Repo checks** (repo-local): the arc-specific `check-*.ts` implementations.
-
-## How a repo consumes it (two mechanisms)
-
-- **Deterministic runner** — a repo's thin `.claude/verify/pre-pr.ts` imports
-  `runScenario` from this engine and calls `runScenario(config, process.argv)`.
-  During in-repo development the import is a relative path into
-  `.claude/plugins/agentloop/`; once this engine moves to its own repo the
-  import points at a pinned checkout. A real `--comment <PR#>` delivery also
-  mirrors every `Part of #N`, `Fixes #N`, or `Closes #N` declaration in the PR
-  body onto issue `#N`: it adds `agent:processing` once and upserts one
-  PR-keyed claim comment. A body with no declaration is a zero-write no-op.
+- **Shared scripts** — `scripts/*.sh|ts` (identity line, media upload, merge, Change Set record)
+  are referenced from `<plugin_root>`, never copied. `lib/report.ts` / `lib/comment.ts` are
+  imported by repo scripts that render reports or upsert sticky comments.
 - **Prompt skills** — the `skills/` here load into Claude Code. For headless /
   cron use the reliable path is `claude -p --plugin-dir <this-dir> …` (a committed
   `extraKnownMarketplaces` in project settings does **not** auto-install in
@@ -297,20 +282,16 @@ plugin never has to remember a per-skill variant.
 |---|---|---|
 | issue-sweep / pr-sweep | `--dry-run` | report WOULD-DO; no post/PR/close/merge; no trace |
 | issue-review | `--dry-run` | preview; no comment/spin-off/label; **no lock**. (`--no-post` = deprecated alias) |
-| verification | `--dry-run` | alias of `--comment-dry-run`. The **checks always run** (no side effect); dry-run only suppresses posting the report, printing it instead |
 | issue-graph `producer.ts` | `--dry-run` | print the intended graph writes |
 | repo-setup `sync-labels.sh` | `--dry-run` | preview the coordination labels; create nothing |
 
-**Two deliberate exceptions (not inconsistencies):**
+**One deliberate exception (not an inconsistency):**
 
 - **Bulk writers default to dry-run.** `issue-graph`'s `backfill.ts` is dry-run *by
   default* and needs `--execute` to actually write sub-issue links — safety-by-default
   for a bulk mutation. `fleet/setup.ts` is the same: dry-run by default (prints the config
   + crontab block it would write), `--apply` to actually write config + install the crontab.
   Same concept, flipped default, on purpose.
-- **verification's dry-run is comment-scoped.** Its checks have no side effect, so
-  `--dry-run` there only governs the one outward write (the PR comment); a bare
-  "don't run anything" would be meaningless.
 
 Read-only skills (impact-check) and local-only execution (build-phases) make no outward
 write, so they have no dry-run flag.

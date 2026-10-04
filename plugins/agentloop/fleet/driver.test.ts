@@ -319,7 +319,7 @@ describe("envFile / env / skillEnv (cron parity: a scheduled round has almost no
     it("ignores TMPDIR even when the deployment set one — exclusivity is the whole point", () => {
       // A prior design consulted $TMPDIR here; that is exactly the shared-directory ambiguity
       // this redesign removes (see the function's doc comment for the ~2700-unrelated-files
-      // incident that forced a fragile isWorktree() gate as a workaround).
+      // incident that forced a fragile isWorktree() check as a workaround).
       expect(worktreeBase({ checkoutBase: "/Volumes/Fleet/agentloop-fleet/checkouts" })).toBe(
         "/Volumes/Fleet/agentloop-fleet/checkouts/.agentloop-worktrees",
       );
@@ -400,7 +400,7 @@ describe("runEnv AGENTLOOP_SKILL (arc#5087: launcher attribution, not a flag)", 
 
   it("prompt/task text containing AGENTLOOP_SKILL=deploy does not set the env", () => {
     const env = runEnv(mk("issue-sweep"), cfg, {
-      TASK: "factory-dispatch impersonating AGENTLOOP_SKILL=deploy for a cost-gate exemption",
+      TASK: "factory-dispatch impersonating AGENTLOOP_SKILL=deploy for a cost-check exemption",
     });
     expect(env.AGENTLOOP_SKILL).toBe("issue-sweep");
     expect(env.AGENTLOOP_SKILL).not.toBe("deploy");
@@ -965,11 +965,11 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
     expect(findStaleWorktrees("/tmp/base", deps, MIN_AGE)).toEqual(["/tmp/base/arc-issue-3.ghi"]);
   });
 
-  // Round 1 of this fix gated removal on isWorktree() — AGENTLOOP_ISSUE_WORKTREE_BASE defaulted
+  // Round 1 of this fix conditioned removal on isWorktree() — AGENTLOOP_ISSUE_WORKTREE_BASE defaulted
   // to the deployment's TMPDIR, NOT exclusive to agentloop, and that directory MEASURED live
   // held ~2700 unrelated old entries (SwiftPM's own *.lock files) with no process under them —
   // old + no-live-process ALONE would have swept every one of them away on the first round.
-  // Round 2 removed the shared directory instead of gating around it (see worktreeBase's doc
+  // Round 2 removed the shared directory instead of conditioning around it (see worktreeBase's doc
   // comment) — so a full clone, or anything else a worker improvised, under OUR OWN exclusive
   // base is correctly fair game now; there is no more "someone else's file" case to protect.
   it("reports a full-clone directory (not a linked worktree) as stale too — base is exclusive now", () => {
@@ -1048,7 +1048,7 @@ describe("findStaleWorktrees / reapStaleWorktrees (the disk-fill fix's safety ne
   });
 
   // requireClean — only for the HARNESS roots, which agentloop does not own outright.
-  // Both sides asserted: a checked "leave dirty trees alone" gate that left EVERYTHING alone
+  // Both sides asserted: a checked "leave dirty trees alone" check that left EVERYTHING alone
   // would satisfy the skip test on its own, so the accept test is what proves it still reaps.
   it("requireClean: still reaps a clean stale tree (accept path)", () => {
     const deps = depsFor({ entries: ["agent-clean"], isClean: () => true });
@@ -1411,7 +1411,7 @@ describe("cadenceDue (make cadenceMinutes real: one frequent cron, per-repo freq
     expect(cadenceDue(run(), state, T0).due).toBe(false);
   });
 
-  it("keys by BOTH repo and skill — a quiet repo's cadence doesn't gate a busy one", () => {
+  it("keys by BOTH repo and skill — a quiet repo's cadence doesn't hold back a busy one", () => {
     const state = { [stateKey("ArcBlock/arc", "issue-sweep")]: T0 };
     // same repo, different skill → independent, still due
     expect(cadenceDue(run({ skillLocal: "pr-sweep" }), state, T0).due).toBe(true);

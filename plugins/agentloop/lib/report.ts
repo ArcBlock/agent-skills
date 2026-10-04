@@ -4,9 +4,8 @@
  *
  * Holds ONLY the data contract (`CheckResult`) + deterministic helpers (run a
  * command, time it, capture output, render markdown). It does NOT decide which
- * checks run and knows nothing about pnpm/turbo/arc paths — that lives in each
- * repo's scenario config (see `.claude/verify/config.ts` in the consuming repo),
- * which the generic `runScenario()` (scenario.ts) executes.
+ * checks run and knows nothing about pnpm/turbo/arc paths — that lives in the
+ * consuming repo's scripts (arc: `scripts/nightly-test.ts`).
  *
  * Difference vs the arc-local ancestor this was extracted from: `identityHeader`
  * is gone. Provenance headers are repo-specific (arc shells out to
@@ -25,8 +24,7 @@ import { join } from "node:path";
  * DIFFERENT next step, defined by the triple (observable criterion, actor,
  * action); two classes with the same triple would be one class.
  *
- * Only `UNKNOWN` is produced today (#5591 / W1.1a builds its carrying surface —
- * see `runCheckGuarded` in scenario.ts). The rest are declared here so the
+ * Only `UNKNOWN` is produced today (#5591 / W1.1a). The rest are declared here so the
  * classifiers that already exist in a consuming repo's checks get wired into
  * THIS vocabulary rather than each coining a parallel one.
  */
@@ -64,16 +62,16 @@ export interface CheckResult {
   /** human title for the report table */
   title: string;
   pass: boolean;
-  /** hard gate? false = warn-only */
+  /** hard requirement? false = warn-only */
   blocking: boolean;
   /**
-   * check was intentionally not run (e.g. gated off by `when`). `true`, or the
+   * check was intentionally not run (e.g. conditioned off by `when`). `true`, or the
    * reason string — a reason renders in the report row so a SKIP is never a
    * silent hole (issue #2734).
    */
   skipped?: boolean | string;
   /**
-   * measured by the engine, never hand-filled — this is the determinism gate.
+   * measured by the engine, never hand-filled — this is the determinism check.
    * Optional because a skipped check has no duration to measure; renderers MUST
    * degrade rather than assume it (see `dur`).
    */
@@ -96,10 +94,10 @@ export interface CheckResult {
    * Class + machine reason for a RED result (#5591). Optional: a passing check
    * carries none, and a check written in a consuming repo that has never heard
    * of this field keeps working unchanged — adding an optional field to this
-   * contract is free, widening `requireStickyGate`'s {PASS, NA} accept set is
+   * contract is free, widening the sticky reader's {PASS, NA} accept set is
    * not (taxonomy §0.3).
    *
-   * It never changes the gate's colour by itself. Nothing here may set
+   * It never changes the check's colour by itself. Nothing here may set
    * `pass: true`, `blocking: false`, or `skipped` — the three things `passed()`
    * tolerates (taxonomy R2).
    */
@@ -115,9 +113,9 @@ export interface CheckResult {
    * hole this field closes.
    *
    * Publish-time only. It does not recolour the check, does not change
-   * `passed()` / `deriveResult`, and does not widen `requireStickyGate`'s
+   * `passed()` / `deriveResult`, and does not widen the sticky reader's
    * {PASS, NA} accept set (taxonomy R2). The local cache still writes so this
-   * host's own push gate does not livelock.
+   * host's own push check does not livelock.
    */
   reusable?: false;
 }
@@ -335,7 +333,7 @@ export function childEnv(env: Record<string, string> = {}): NodeJS.ProcessEnv {
  * `code: 124` (matching the `timeout(1)` convention already used by
  * check-native.ts) with `timedOut: true`, instead of hanging the caller
  * forever (issue #1922: an affected-test run against a slow package could
- * block pre-pr.ts indefinitely with no report ever produced).
+ * block its caller indefinitely with no report ever produced).
  *
  * spawnSync's own timeout kill only reaches the DIRECT child (the `bash -c`), so
  * every grandchild survives and reparents to init — a timed-out `turbo run test`
@@ -482,7 +480,7 @@ export type SkipHistory = Readonly<Record<string, { pass: boolean; sha?: string 
 
 let skipHistoryLoader: () => SkipHistory = () => ({});
 
-/** Arc wires this from `.claude/verify/fail-fast-skip.ts` so scenario.ts stays untouched. */
+/** A consuming repo may wire a loader here; the default reports no history. */
 export function setSkipHistoryLoader(fn: () => SkipHistory): void {
   skipHistoryLoader = fn;
 }
@@ -562,10 +560,10 @@ const dur = (ms: number | undefined): string =>
  * before the results table. It exists so a caller can state a fact ABOUT THE RUN
  * that the results table structurally cannot show — currently a partial
  * (`--only`/`--skip`) selection, whose green rows would otherwise read exactly
- * like a full gate's (issue #5067). Omitting it leaves the report byte-identical
+ * like a full check's (issue #5067). Omitting it leaves the report byte-identical
  * to the pre-#5067 output.
  *
- * `opts.wallMs` is the gate process's TRUE wall clock. The long-standing `total`
+ * `opts.wallMs` is the verification process's TRUE wall clock. The long-standing `total`
  * is the SUM of per-check durations, which is not the same number: checks do run
  * strictly sequentially, but the sum counts none of the broker single-flight
  * wait, base/sha resolution, or evidence publication. Reporting only the sum
@@ -626,7 +624,7 @@ export function renderReport(
   // Full logs. Prefer an on-disk path (#5223) so the PR comment stays a table
   // plus failure tails, not 40+ KB of inlined turbo output. Fall back to a
   // clipped <details> body only when a check has rawFull and no logPath —
-  // that's the renderer unit-test / pre-persist shape, not the live gate.
+  // that's the renderer unit-test / pre-persist shape, not the live check.
   const withLogs = results.filter((r) => !isSkipped(r) && (r.logPath || r.rawFull));
   const LOG_BUDGET = 45000;
   const inlined = withLogs.filter((r) => !r.logPath && r.rawFull);
@@ -676,7 +674,7 @@ ${rows}
  * proxy enforces a separate, much tighter "comment-filter work budget" on `gh`
  * calls that a 45KB body can still exceed — HTTP 403 `Request body exhausted
  * the comment-filter work budget`, even for an otherwise-PASSING report with
- * no failures to show (issue #1922: a fully-green pre-pr report for PR #615
+ * no failures to show (issue #1922: a fully-green report for PR #615
  * was rejected at ~43KB, then accepted at ~4.5KB with only this section cut).
  * `postComment` retries once with this trimmed body on that specific error so
  * a large-but-legitimate report still lands instead of failing to post at all.
@@ -689,7 +687,7 @@ export function trimFullLogsSection(report: string, sha?: string): string {
   // Name the actual file when the caller knows the sha — this pointer is the only
   // route left to the dropped output, so it should not make the reader guess.
   const cacheRef = `\`.verify/${sha ?? "<sha>"}.md\``;
-  return `${report.slice(0, start)}\n\n### Full Logs\n\nOmitted — the full report exceeded this environment's PR-comment size gate (issue #1922). Full output is in the ${cacheRef} cache on the machine that generated this report.${rest}`;
+  return `${report.slice(0, start)}\n\n### Full Logs\n\nOmitted — the full report exceeded this environment's PR-comment size check (issue #1922). Full output is in the ${cacheRef} cache on the machine that generated this report.${rest}`;
 }
 
 const REPO_GIT = "<repo>/.git";

@@ -1,7 +1,6 @@
 # Headless Factory run — no next turn (arc#7617)
 
-> Shared reference for [`land`](../skills/land/SKILL.md), [`epic-conductor`](../skills/epic-conductor/SKILL.md)
-> and [`verification`](../skills/verification/SKILL.md). Each SKILL.md carries the one-line rule; this file
+> Shared reference for [`land`](../skills/land/SKILL.md) and [`epic-conductor`](../skills/epic-conductor/SKILL.md). Each SKILL.md carries the one-line rule; this file
 > holds the why and the commands.
 
 ## When it applies
@@ -17,10 +16,10 @@
 ## Why
 
 A headless run has exactly one turn. When the model ends its turn, the engine process exits, and
-its background shells are reaped with it. Nothing wakes it up again: not the gate finishing, not a
+its background shells are reaped with it. Nothing wakes it up again: not the tests finishing, not a
 child run settling. "I'll pick up when it finishes" is abandoning the work.
 
-Seen twice on epic #7614: a land run put `pre-pr` in the background and ended its turn (the gate was
+Seen twice on epic #7614: a land run put its verification run in the background and ended its turn (it was
 reaped, nothing reached GitHub); another spawned a reviewer child run and ended its turn to wait for
 it (the child settled and nothing resumed the parent).
 
@@ -34,9 +33,8 @@ the host. Either way the turn was wasted.
 
 1. **Never end the turn while something whose result the flow still needs is pending.** A
    background shell, a background subagent, a child run: all of them.
-2. **Run the gate in the foreground**, to its result, in this turn. Do not use
-   `run_in_background` (or `&`, `nohup`, `setsid`) for `<verification_entry>`, a build, or a test
-   you will read.
+2. **Run tests in the foreground**, to their result, in this turn. Do not use
+   `run_in_background` (or `&`, `nohup`, `setsid`) for a build or a test you will read.
 3. **A command that may outlive one tool call's timeout** may be started in the background, but then
    wait for it **in the same turn**: repeat a blocking wait (the engine's "wait for background task
    output" call, or a poll loop that stays under the tool timeout) until it has exited and you hold
@@ -79,7 +77,7 @@ the host. Either way the turn was wasted.
    `arc work review` already blocks until its reviewer settles; run it in the foreground the same
    way. An epic conductor's hired workers are the same case: `assert-no-live-children.ts` must exit 0
    before the turn ends.
-5. Waiting is work. A slow gate that fills the whole run is correct; fire-and-forget followed by
+5. Waiting is work. A slow test run that fills the whole run is correct; fire-and-forget followed by
    ending the turn is the defect.
 
 Outside a Factory run (an attended session with a person who will send the next turn), backgrounding
@@ -90,20 +88,20 @@ is a scheduling choice, not this defect, and this file does not apply.
 A Factory run takes the work up to **ready to merge** and stops. The merge is a person's decision,
 whatever `--merge` mode or single/batch default the skill would otherwise use.
 
-1. Do everything up to the merge: review, one batched fix, one gate with `--comment <PR#>` (the
-   verification sticky on the PR is the gate evidence), the Change Set record, the review verdict,
-   the one `bot-clean.ts` check.
-2. **Do not run** `<merge_gate_entry>` or `merge-verified-pr.sh`, and never `gh pr merge`. The
-   merge gate belongs to the merger: it writes the verdict record on the machine that merges, right
-   before the merge, so the person who merges runs it.
+1. Do everything up to the merge: the changed package's tests, the one clean-context review (read-only
+   in the run's own tree, **no new worktree**), one batched fix, the PR, the Change Set record. After
+   delivery the host's cross-engine review follows (approval drain for an armed-epic member, else
+   `arc work review`), see [land/reference/factory-run-review.md](../skills/land/reference/factory-run-review.md)
+   (arc#7707). The factory's merge check (independent approve on the latest round, producer
+   path-compliant at the PR head) is the product's (aos `checkFactoryMerge`, CLI `arc work
+   merge-check`); the person's `merge-verified-pr.sh` runs it through the repo profile.
+2. **Never merge**: not `merge-verified-pr.sh`, not `gh pr merge`.
 3. Tell the person on GitHub: one PR comment (identity line) with the ready-to-merge checklist (head
-   sha, verification verdict, review verdict, bot-clean result), and the `needs-human-confirm` label.
-   The checklist tells the merger to run `<merge_gate_entry>` **on the factory host** (or, elsewhere,
-   with `--work-instance <the factory instance>`), so the gates that read the run's work ledger and
-   run records (cross-engine review, allowed paths) bind to this run, then `merge-verified-pr.sh`.
+   sha, test command + counts, review outcome, the host cross-engine review still to come — with the
+   `arc work review` command when no drain will run it), and the `needs-human-confirm` label.
 4. Report the PR as **"ready to merge, human decision"**. The run's exit is a success; this is the
-   intended end state. **Never wait for the human merge** (it is not a child run; waiting for it
-   only burns the run).
+   intended end state. **Never wait for the human merge** (it is not a child run; waiting only burns
+   the run).
 5. **An epic conductor in a run** dispatches only members whose dependencies are already merged on
    the default branch. When every remaining wave needs a member that is still unmerged, report all
    ready-to-merge PRs and end the run; the next run picks up after the person merges.
@@ -112,10 +110,10 @@ Why: a single target defaults to `--merge=auto`, so one land run merged its own 
 stopped only by accident (an `agent:hold` label). The incident and the decision are arc#7662.
 
 **The guardrail.** `merge-verified-pr.sh` refuses with exit 3 when `ARC_CODE_AGENT_RUN_ID` is set,
-before any GitHub call, and `--no-gate-record` does not lift it. Exit 3 means "stop at ready to
-merge", not "retry another way". It is not an access control: a run whose credential can merge can
-still call `gh` itself. A consumer repo can narrow that with a PreToolUse hook (arc ships one, not yet registered); the real control is a
-run credential that cannot merge.
+before any GitHub call. Exit 3 means "stop at ready to merge", not "retry another way". It is not an
+access control: a run whose credential can merge can still call `gh` itself. A consumer repo can
+narrow that with a PreToolUse hook (arc: `deny-factory-self-merge`); the real control is a run
+credential that cannot merge.
 
 **Operator override.** `ARC_FACTORY_ALLOW_SELF_MERGE=1` in the run's environment, set by the
 operator. A run never sets it itself. Note the scope: the code-agents host copies its own

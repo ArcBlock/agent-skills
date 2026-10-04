@@ -2,7 +2,7 @@
 name: repo-setup
 description: >-
   One-time onboarding of a repo to the agentloop skills: scaffold repo-profile, create the
-  controlled labels, scaffold the verification gate, preflight the environment. Does not schedule
+  controlled labels, preflight the environment. Does not schedule
   routines.
 ---
 
@@ -10,7 +10,7 @@ description: >-
 
 Run once per repo to go from "plugin installed" to "loop skills can actually run here".
 The supporting environment the sweep/review skills assume (a repo-profile, the coordination
-labels, a verify gate, a working toolchain + gh auth) is otherwise **implicit** — this makes it
+labels, a working toolchain + gh auth) is otherwise **implicit** — this makes it
 explicit and reproducible. All scripts live in `<plugin_root>/bootstrap/` and are idempotent
 (the directory keeps its name: there it means "the scripts that bootstrap a repo", which is
 unambiguous — the skill was renamed because `/agentloop:bootstrap` alone did not say *what*
@@ -22,7 +22,7 @@ This is **hybrid by design**. The split, and why it matters:
   (repo_slug, plugin_root, default_branch, package_manager, the fixed label set, the env
   assertions). They never guess values they can't ground in a file, and never mutate your system.
 - **You, the agent**, do what needs *judgement or side-effects*: install missing tools, fill the
-  profile fields that require reading the repo, write the real verification checks. Scripts hand
+  profile fields that require reading the repo. Scripts hand
   you a stable skeleton; you supply the parts a script can't reliably infer.
 
 > This is **adoption**, not **scheduling**. How you run the skills on an interval (cron / CI /
@@ -60,7 +60,6 @@ exactly the values a script can't reliably infer:
 
 - **toolchain commands** ← `package.json` `"scripts"`, `turbo.json`, `biome.json` / prettier, `tsconfig`
 - **UI / Backend face paths** ← the actual source layout (which dirs are renderer/pages vs server/data)
-- **gate_mode** ← is there CI? (`scripts` if none, `both` if CI must also be green)
 - **cli_binary / kb_issue / comment_language / milestones** ← infer from the repo, or leave `<FILL>` for a human
 
 Rule: **don't invent a value you can't ground in a file.** If you can't determine it, leave the
@@ -76,18 +75,7 @@ Creates only the loop's **coordination** vocabulary (agent:* / needs-* / pr-swee
 deliberately *not* agentic — the label set is fixed; a script gets colours/names right every time.
 Your repo's own work-type / priority / status labels are yours to add to the profile.
 
-### Step 3 — verify gate  ·  *script scaffolds, you write the real checks*
-
-```bash
-bash "$PR/bootstrap/scaffold-verify.sh"       # writes .claude/verify/{config,pre-pr,pre-merge}.ts
-```
-
-Generates the gate wired to the engine, using the detected `package_manager` + `default_branch`,
-with **STARTER** build/test checks. Then **you edit `.claude/verify/config.ts`**: replace the
-starters with this repo's real build / lint / type-check / test commands, and add the arch/logic
-checks it needs. Verify wiring with `bun .claude/verify/pre-pr.ts --only build`.
-
-### Step 4 — confirm  ·  *script*
+### Step 3 — confirm  ·  *script*
 
 ```bash
 bash "$PR/bootstrap/check-env.sh"             # should now be all green (exit 0)
@@ -100,9 +88,6 @@ bash "$PR/bootstrap/check-env.sh"             # should now be all green (exit 0)
   current branch → main), `package_manager` (lockfile). Leaves judgement fields as `<FILL>` for you.
   Refuses to overwrite (`--force` to replace).
 - **`sync-labels.sh`** — `gh label create`/`edit` for the coordination vocabulary only. Idempotent.
-- **`scaffold-verify.sh`** — generates `.claude/verify/` (config + thin pre-pr/pre-merge entries) that
-  `import` the engine from `plugin_root`, pre-wired to the detected pm/branch. The check list is a
-  starter you replace.
 - **`check-env.sh`** — preflight: `bun`/`git`/`gh`/`jq` present, `gh` authenticated (a real REST
   probe, not `gh auth status`), an origin remote, repo-profile present with the required keys, and
   `plugin_root` resolving to a real plugin checkout. Suggests install commands on a miss but never
@@ -110,6 +95,5 @@ bash "$PR/bootstrap/check-env.sh"             # should now be all green (exit 0)
 
 ## Reference
 
-Arc (`ArcBlock/arc`) is the reference implementation — copy its `.claude/repo-profile.md` and
-`.claude/verify/` patterns. The bundled skills (issue-graph / design-review / build-phases) need no
-setup; the repo-specific companions (e2e-gate / e2e-verify / ui-verify) you supply or drop.
+Arc (`ArcBlock/arc`) is the reference implementation — copy its `.claude/repo-profile.md`. The bundled skills (issue-graph / design-review / build-phases) need no
+setup; the repo-specific companions (e2e-verify / ui-verify) you supply or drop.

@@ -87,7 +87,7 @@ function deadPid(): number {
 
 /**
  * A REAL signal-refusing process, found rather than assumed. pid 1 is the
- * container gate's own pid, so leaning on it would conflate two arms.
+ * container check's own pid, so leaning on it would conflate two arms.
  */
 function findEpermPid(): { pid?: number; scanned: number } {
   const ps = spawnSync("ps", ["-Ao", "pid="], { encoding: "utf8" });
@@ -548,10 +548,10 @@ describe("epic-conductor SKILL.md bun invocations resolve via AGENTLOOP_ROOT (#5
   const bunLines = [...text.matchAll(/bun\s+\S+/g)].map((m) => m[0]);
   const conductorBun = bunLines.filter((l) => /epic-conductor\/scripts\//.test(l));
 
-  test("positive control: SKILL.md has bun invocations of the three conductor scripts", () => {
+  test("positive control: SKILL.md has bun invocations of the two conductor scripts", () => {
     // Vacuous REJECT (zero bun lines) would look exactly like "no hardcoded
     // path". Count first; a broken scan reporting 0 is not a skip.
-    expect(conductorBun.length).toBeGreaterThanOrEqual(3);
+    expect(conductorBun.length).toBeGreaterThanOrEqual(2);
   });
 
   test("ACCEPT: live-children and compact-findings bun commands use AGENTLOOP_ROOT + marketplace fallback", () => {
@@ -559,12 +559,6 @@ describe("epic-conductor SKILL.md bun invocations resolve via AGENTLOOP_ROOT (#5
       `bun "${PLUGIN}/skills/epic-conductor/scripts/assert-no-live-children.ts"`,
     );
     expect(text).toContain(`bun "${PLUGIN}/skills/epic-conductor/scripts/compact-findings.ts"`);
-  });
-
-  test("ACCEPT: §9 closeout bun command stays AGENTLOOP_ROOT (do not regress #5615)", () => {
-    expect(text).toContain(
-      `bun "${PLUGIN}/skills/epic-conductor/scripts/assert-no-blocked-prs.ts"`,
-    );
   });
 
   test("REJECT: no bun invocation uses the vendored-in-arc relative plugin path", () => {

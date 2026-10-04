@@ -122,7 +122,7 @@ describe("unattended orchestration contract", () => {
 // ---------------------------------------------------------------------------
 // A realistic autonomous verdict carries a sweep-trace (SKILL.md §sweep-trace mandates it).
 const TRACE =
-  '\n<!-- sweep-trace: {"ver":1,"issue":1,"gate":"disposition","val":"x","run":"2026-07-01T00:00:00Z","runner":"r","skills":"h"} -->';
+  '\n<!-- sweep-trace: {"ver":1,"issue":1,"step":"disposition","val":"x","run":"2026-07-01T00:00:00Z","runner":"r","skills":"h"} -->';
 
 describe("isAiAgentComment (marker-based: a machine sweep-trace, not the copyable 🤖 header)", () => {
   it("a real sweep verdict (carries a sweep-trace) is agent — any opener form", () => {
@@ -209,8 +209,8 @@ describe("labelStance (arc#1722: which of agent:ready / needs-human-confirm was 
     ).toBe("work"); // confirm was removed → only ready stands
   });
 
-  // #1831 盲区一:verification-report / e2e-gate 的 HTML 标记必须在正文最前
-  // (merge-gate.ts 解析需要),导致 startswith 判据把机器评论误判为人类
+  // #1831 盲区一:verification-report 的 HTML 标记在正文最前,
+  // 导致 startswith 判据把机器评论误判为人类
   it("recognizes AI comment behind a leading verification-report HTML marker (#1831)", () => {
     expect(
       isAiAgentComment(
@@ -222,7 +222,7 @@ describe("labelStance (arc#1722: which of agent:ready / needs-human-confirm was 
   it("recognizes AI comment behind multiple leading HTML markers (#1831)", () => {
     expect(
       isAiAgentComment(
-        '<!-- pr-review-verdict -->\n<!-- sweep-trace: {"ver":1,"pr":1,"gate":"verdict","val":"MERGE","run":"2026-07-17T00:00:00Z"} -->\n> 🤖 AI Agent PR Review @ vm · runner:robert · skills@abc\nverdict',
+        '<!-- pr-review-verdict -->\n<!-- sweep-trace: {"ver":1,"pr":1,"step":"verdict","val":"MERGE","run":"2026-07-17T00:00:00Z"} -->\n> 🤖 AI Agent PR Review @ vm · runner:robert · skills@abc\nverdict',
       ),
     ).toBe(true);
   });
@@ -364,7 +364,7 @@ describe("isTerminalAiComment", () => {
     const body =
       "> 🤖 AI Agent Issue Review\n" +
       "A2(did-space authed `/explorer` 走查)和 B(todo 宿主 + 嵌入 explorer 走查)不受这个虚假前提影响,可以独立往前推。\n" +
-      '<!-- sweep-trace: {"ver":1,"issue":1923,"gate":"disposition","val":"needs-human-confirm","run":"2026-07-19T02:30:00Z"} -->';
+      '<!-- sweep-trace: {"ver":1,"issue":1923,"step":"disposition","val":"needs-human-confirm","run":"2026-07-19T02:30:00Z"} -->';
     expect(isNonTerminalAiComment(body)).toBe(false);
     expect(isTerminalAiComment(body)).toBe(true);
   });
@@ -687,20 +687,20 @@ describe("forbidden_actions", async () => {
 describe("extractSweepTraces", () => {
   it("extracts a well-formed trace from a comment body", () => {
     const body =
-      '> 🤖 AI Agent\n<!-- sweep-trace: {"ver":1,"issue":533,"gate":"step2","val":"non-terminal","run":"2026-07-10T12:00:00Z"} -->';
+      '> 🤖 AI Agent\n<!-- sweep-trace: {"ver":1,"issue":533,"step":"step2","val":"non-terminal","run":"2026-07-10T12:00:00Z"} -->';
     const traces = extractSweepTraces(body);
     expect(traces.length).toBe(1);
-    expect(traces[0]).toMatchObject({ ver: 1, issue: 533, gate: "step2", val: "non-terminal" });
+    expect(traces[0]).toMatchObject({ ver: 1, issue: 533, step: "step2", val: "non-terminal" });
   });
 
   it("extracts multiple traces from a single body", () => {
     const body = [
-      '<!-- sweep-trace: {"ver":1,"gate":"step1","val":"keep","run":"2026-07-10T12:00:00Z"} -->',
-      '<!-- sweep-trace: {"ver":1,"gate":"step2","val":"human-reply","run":"2026-07-10T12:00:01Z"} -->',
+      '<!-- sweep-trace: {"ver":1,"step":"step1","val":"keep","run":"2026-07-10T12:00:00Z"} -->',
+      '<!-- sweep-trace: {"ver":1,"step":"step2","val":"human-reply","run":"2026-07-10T12:00:01Z"} -->',
     ].join("\n");
     const traces = extractSweepTraces(body);
     expect(traces.length).toBe(2);
-    expect(traces.map((t) => t.gate)).toEqual(["step1", "step2"]);
+    expect(traces.map((t) => t.step)).toEqual(["step1", "step2"]);
   });
 
   it("returns an empty array when no trace is present", () => {
@@ -713,7 +713,7 @@ describe("extractSweepTraces", () => {
   });
 
   it("handles extra whitespace around the JSON", () => {
-    const body = '<!--  sweep-trace:  {"ver":1,"gate":"test","val":"ok","run":"r"}  -->';
+    const body = '<!--  sweep-trace:  {"ver":1,"step":"test","val":"ok","run":"r"}  -->';
     const traces = extractSweepTraces(body);
     expect(traces.length).toBe(1);
   });
@@ -770,7 +770,7 @@ describe("live-sweep regressions", () => {
   });
 
   it("an HTML-ESCAPED marker is still extracted (#1278 double-escape, seen live)", () => {
-    const body = '&lt;!-- sweep-trace: {"ver":1,"gate":"g","val":"v","run":"r"} --&gt;';
+    const body = '&lt;!-- sweep-trace: {"ver":1,"step":"g","val":"v","run":"r"} --&gt;';
     expect(extractSweepTraces(body).length).toBe(1);
   });
 

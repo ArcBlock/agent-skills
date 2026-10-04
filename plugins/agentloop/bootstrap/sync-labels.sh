@@ -5,7 +5,7 @@
 #   bash <plugin_root>/bootstrap/sync-labels.sh [--dry-run]
 #
 # These are the loop-engine's COORDINATION vocabulary — required for the sweeps to
-# function (disposition, hold/mutex, human-gate signals). Work-type / priority /
+# function (disposition, hold/mutex, wait-for-human signals). Work-type / priority /
 # status labels (bug, P0-P3, status:*, doc-audit, …) are your repo's OWN convention;
 # add them per your repo-profile "Label Vocabulary" section — this script does not
 # invent project taxonomy for you.

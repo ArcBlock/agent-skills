@@ -10,7 +10,7 @@
 #   - channel select (gh contents API, else git push into a loop-agent-assets clone)
 #   - returns raw.githubusercontent.com/<repo>/main/<path> — the only host+ref the GitHub MCP
 #     comment-writer keeps as an inline image (#1334); never MCP file-write for binaries (#1079)
-#   - content-type=image/* OR video/* gate (catches double-encoding / unreachable)
+#   - content-type=image/* OR video/* check (catches double-encoding / unreachable)
 # This wrapper only loops a directory and calls it per file.
 #
 # EMBEDDING is the CALLER's job and is NOT uniform: image/gif → `![](url)` inline; video → a LINK

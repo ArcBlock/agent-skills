@@ -51,7 +51,7 @@ export const expandHome = (p: string): string => (p.startsWith("~/") ? homedir()
 /**
  * Which CLI drives a run. The fleet was born claude-only; codex support was added after a
  * live probe proved a REAL sweep — create files → commit → push → open a draft PR, with the
- * verification gate run and honestly attributed — runs end-to-end on `codex exec` using the
+ * verification run run and honestly attributed — runs end-to-end on `codex exec` using the
  * SAME shipped prompt, unchanged. The two CLIs differ in only a handful of flags (see
  * buildArgv); everything else in the driver (checkout, reap, TEE, the run-report contract,
  * the per-(repo,skill) lock) is engine-agnostic.
@@ -659,7 +659,7 @@ export interface StaleWorktreeDeps {
   isClean: (p: string) => boolean;
   /**
    * True for an actual LINKED git worktree — its `.git` is a FILE (containing `gitdir: ...`),
-   * unlike a full clone's `.git` DIRECTORY. Informational only now, NOT a removal gate (see
+   * unlike a full clone's `.git` DIRECTORY. Informational only now, NOT a removal check (see
    * findStaleWorktrees) — `base` is `worktreeBase()`, exclusive to agentloop, so anything found
    * there is ours regardless of shape. Still used to choose HOW to remove: a linked worktree
    * gets `git worktree remove` (also clears the base checkout's `.git/worktrees/<leaf>` admin
@@ -698,7 +698,7 @@ const realStaleDeps = (now: number = Date.now()): StaleWorktreeDeps => ({
  * the only two questions worth asking are (1) no process anywhere under it (pidsWithCwdUnder —
  * the exact signal reapOrphans trusts) and (2) older than `minAgeMs` (a grace window against
  * the boundary case where a worker just created the dir and has not cd'ed into it yet — a
- * live-process check sampled in that instant would see nothing and misfire). Does NOT gate on
+ * live-process check sampled in that instant would see nothing and misfire). Does NOT check on
  * "is this actually a linked git worktree": a worker that improvised something else (a full
  * clone, a stray file) under OUR OWN exclusive directory is still ours to clean up — shape is
  * only consulted later, for HOW to remove it (see reapStaleWorktrees). Read-only: does not
@@ -836,7 +836,7 @@ export function pruneWorktreeRecords(
  * and nothing at all clears a custom path. MEASURED here: 142,122 entries / 16 GB accumulated,
  * and the directory inode alone had grown to 4.5 MB — every `mkdtemp` in it pays for that.
  *
- * The gate is `cfg.env.TMPDIR`, NOT the ambient `$TMPDIR`, and that distinction is the entire
+ * The check is `cfg.env.TMPDIR`, NOT the ambient `$TMPDIR`, and that distinction is the entire
  * safety argument: a declared TMPDIR is a directory this deployment chose for the fleet; the
  * ambient one is the machine's shared `/tmp`, full of other tools' files (this driver already
  * learned that the hard way — see worktreeBase's comment on the ~2700 foreign entries). Age is
@@ -1266,7 +1266,7 @@ export const WORKTREE_BASE_ENV = "AGENTLOOP_WORKTREE_BASE";
  * preferred `$TMPDIR` when set (reasoning: reuse whatever disk the deployment already pointed
  * temp files at) — but `$TMPDIR` is NOT exclusive to agentloop: MEASURED live, that same
  * directory held ~2700 unrelated entries from other tools (SwiftPM's own `*.lock` files,
- * editor/electron scratch dirs), which forced the stale-worktree reaper to gate on "is this
+ * editor/electron scratch dirs), which forced the stale-worktree reaper to check on "is this
  * actually a linked git worktree" before touching anything — a fragile, shape-based safety
  * check standing in for the real fix. Owning a dedicated subdirectory removes the ambiguity at
  * the source: NOTHING but agentloop's own scratch worktrees ever lives here, so the reaper
@@ -1324,7 +1324,7 @@ export function runEnv(
   for (const ref of run.referenceRepos ?? []) merged[referenceEnvKey(ref.slug)] = ref.path;
   merged[WORKTREE_BASE_ENV] = worktreeBase(cfg);
   // Beside the checkout, never inside it: an in-tree file would dirty `git status` and
-  // disarm the repo's own push/verify gates — the same reason the fleet marker lives out.
+  // disarm the repo's own push/verify checks — the same reason the fleet marker lives out.
   merged[RUN_REPORT_ENV] = `${run.checkoutPath.replace(/\/+$/, "")}.run-report.json`;
   return merged;
 }
@@ -1478,7 +1478,7 @@ export async function executeRun(
     write(`# reference ${ref.slug} ${rc.action} → ${ref.path}\n`);
   }
   // Dependencies BEFORE the skill: a fresh tree has none, and a sweep that dies on a missing
-  // module reads as "the gate is broken" rather than "nobody installed anything".
+  // module reads as "the check is broken" rather than "nobody installed anything".
   if (run.setupCommand) {
     const st = sh(`cd ${run.checkoutPath} && ${run.setupCommand}`, env);
     write(`# setup: ${run.setupCommand}\n${st.out}`);
@@ -1603,23 +1603,23 @@ if (import.meta.main) {
     `# ${plan.length} run(s) across ${new Set(plan.map((p) => p.slug)).size} repo(s). Claiming is per-item via GitHub labels.`,
   );
 
-  // Cadence gate: a repo declaring cadenceMinutes is skipped if it ran too recently, so one
+  // Cadence check: a repo declaring cadenceMinutes is skipped if it ran too recently, so one
   // frequent cron can cover many repos at their own frequencies. `--force` overrides (manual run).
   const force = argv.includes("--force");
   const now = Number(process.env.FLEET_NOW_MS) || Date.now();
   const sPath = statePath(cfg.checkoutBase);
   const state = readState(sPath);
-  const gated = plan.map((p) => ({ p, ...cadenceDue(p, force ? {} : state, now) }));
+  const cadenced = plan.map((p) => ({ p, ...cadenceDue(p, force ? {} : state, now) }));
 
   const baseStatus = checkoutBaseStatus(cfg.checkoutBase, existsSync);
   const diskStatus = baseStatus.ok ? diskHeadroomStatus(cfg.checkoutBase) : { ok: true };
 
   if (!run) {
-    for (const { p, due, remainingMin } of gated) {
+    for (const { p, due, remainingMin } of cadenced) {
       const tag = due ? "" : `  [cadence: skip, due in ${remainingMin}m]`;
       console.log(`\n[${p.slug} · ${p.skill}]${tag}\n${p.command}`);
     }
-    const due = gated.filter((g) => g.due).length;
+    const due = cadenced.filter((g) => g.due).length;
     if (!baseStatus.ok) console.log(`\n# ⚠ checkoutBase unavailable: ${baseStatus.reason}`);
     if (!diskStatus.ok) console.log(`\n# ⚠ disk headroom: ${diskStatus.reason}`);
     console.log(
@@ -1702,10 +1702,10 @@ if (import.meta.main) {
     });
   };
 
-  const dueRuns = gated.filter((g) => g.due).map((g) => g.p);
-  const skipped = gated.length - dueRuns.length;
+  const dueRuns = cadenced.filter((g) => g.due).map((g) => g.p);
+  const skipped = cadenced.length - dueRuns.length;
   if (skipped) {
-    for (const g of gated.filter((g) => !g.due)) {
+    for (const g of cadenced.filter((g) => !g.due)) {
       recordSkip(g.p, "skipped-cadence", `within cadence, due in ${g.remainingMin}m`);
       console.log(
         `# skip [${g.p.slug} · ${g.p.skill}] — within cadence, due in ${g.remainingMin}m`,

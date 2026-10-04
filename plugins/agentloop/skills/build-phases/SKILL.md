@@ -46,7 +46,7 @@ Autonomous mode: apply that test and state the choice in the PR body. A human pr
 
 ## How It Works
 
-For each phase, in order: **1 IMPLEMENT** (TDD) → **2 VERIFY** (three layers; Layer 2 writes `logs/s{N}-e2e.log` — hard gate) → **3 COMMIT** `phase N: implement` → **4 SIMPLIFY** → **5 RE-VERIFY** Layer 1 (revert simplify on failure) → **6 COMMIT** `phase N: simplify` → **7 DESIGN REVIEW** (parent dispatches a **different** clean-context agent; below target → respawn the executor with the findings) → **8** a ≤3-line completion, then Phase N+1 immediately.
+For each phase, in order: **1 IMPLEMENT** (TDD) → **2 VERIFY** (three layers; Layer 2 writes `logs/s{N}-e2e.log` — hard requirement) → **3 COMMIT** `phase N: implement` → **4 SIMPLIFY** → **5 RE-VERIFY** Layer 1 (revert simplify on failure) → **6 COMMIT** `phase N: simplify` → **7 DESIGN REVIEW** (parent dispatches a **different** clean-context agent; below target → respawn the executor with the findings) → **8** a ≤3-line completion, then Phase N+1 immediately.
 
 ## CRITICAL: Execution Continuity
 
@@ -66,7 +66,7 @@ Stop only when (1) every phase is done → final report, (2) an escalation fires
 
 Each invocation is **Init** (no `.build-progress.json`: pre-flight, write the checkpoint, spawn the first phase, schedule a wake) or **Watchdog** (file exists: read it, take **one** action, schedule the next wake or stop).
 
-**The parent session is the only spawner.** One background sub-agent (`run_in_background: true`, `general-purpose`) executes exactly one phase and must not spawn the next. The parent schedules, runs the E2E log gate, and dispatches review. Primary wake is the executor's task-notification; `ScheduleWakeup(1800s)` is the stall fallback (heartbeat ≥ 30 min → `TaskStop` + respawn). The same phase at `executor_respawn_count ≥ 3` stops the loop and escalates. Do not trust the executor's self-report. On every wake, emit the tick report **before** acting (including `WAIT`). All phases done → final report, delete the progress file, do not reschedule.
+**The parent session is the only spawner.** One background sub-agent (`run_in_background: true`, `general-purpose`) executes exactly one phase and must not spawn the next. The parent schedules, runs the E2E log check, and dispatches review. Primary wake is the executor's task-notification; `ScheduleWakeup(1800s)` is the stall fallback (heartbeat ≥ 30 min → `TaskStop` + respawn). The same phase at `executor_respawn_count ≥ 3` stops the loop and escalates. Do not trust the executor's self-report. On every wake, emit the tick report **before** acting (including `WAIT`). All phases done → final report, delete the progress file, do not reschedule.
 
 When running the watchdog / executing a phase, read [reference/watchdog.md](reference/watchdog.md) and [reference/execute-phase.md](reference/execute-phase.md).
 
@@ -78,7 +78,7 @@ Read `<planning-dir>/.build-progress.json`. Missing → **Init**. Present → **
 
 **Init.** No design review on record, or last score < 95% → **STOP and run `/agentloop:design-review` first.** Parse `tasks.md` for `total_phases`. Write the initial progress file (`current_phase` = `--start-phase` or 0, `completed_phases: []`, `executor_status: null`). Spawn the first phase. `ScheduleWakeup(delaySeconds: 1800, prompt: "/loop /agentloop:build-phases <planning-dir>")`. Emit the init tick and `tail -f <executor_log>`.
 
-**Watchdog.** One action from the state machine: spawn / gate+review / respawn (`TaskStop` the stale executor first) / stop. The parent's own hands are bookkeeping, the E2E log gate (bash), and dispatching the review agent. Findings go back to a respawned executor — the parent and the reviewer do not fix. Not done → `ScheduleWakeup(1800)`. Done → Step 3 final report, delete `.build-progress.json`, do not reschedule. Escalation (`respawn_count ≥ 3` on this phase, or `executor_status === "error"` with an unresolvable reason) → escalation report, do not reschedule.
+**Watchdog.** One action from the state machine: spawn / check+review / respawn (`TaskStop` the stale executor first) / stop. The parent's own hands are bookkeeping, the E2E log check (bash), and dispatching the review agent. Findings go back to a respawned executor — the parent and the reviewer do not fix. Not done → `ScheduleWakeup(1800)`. Done → Step 3 final report, delete `.build-progress.json`, do not reschedule. Escalation (`respawn_count ≥ 3` on this phase, or `executor_status === "error"` with an unresolvable reason) → escalation report, do not reschedule.
 
 ### Step 0.5: Pre-code check (executor, every phase)
 
@@ -97,16 +97,16 @@ If the phase's files exist, have real content, and tests pass → SKIP ("already
 Independent phases: parallel subagents, then verify together. Otherwise sequential. Order inside a phase:
 
 1. **2.1 IMPLEMENT** — tests first (they fail), then code. Parallel subagents only for independent sub-tasks.
-2. **2.2 VERIFY — three layers, none skippable.** **Layer 1: Static — scoped per phase, the repo gate once at the end.** Per phase: `<package_manager> build`, `check-types`, and `--filter <affected-packages> test`. A dropped pass count → FAIL. **Do not run the full suite every phase.** After the **last** phase — and after that phase's review findings are fixed — run the repo gate **once**: `<verification_entry>` (arc: `pre-pr`). Do not substitute a raw `<package_manager> test`. `TIMEOUT` with `failed=0` → re-run once with the raise-only timeout override (arc: `ARC_VERIFY_TEST_TIMEOUT_MS`) and state the value; never when `failed>0`. **Layer 2:** follow the phase's `### E2E Verification (mandatory)` table (no table → STOP and escalate). **Hard gate:** not `done` unless `<planning-dir>/logs/s{N}-e2e.log` exists, is non-empty, holds raw JSON `afs_*` output (not a paraphrase), covers every call in the table plus one negative case, and admits no deferred work. **Layer 3:** at least one adversarial break (empty, oversize, `../`, kill mid-op, concurrency, prototype pollution); paste the output. Any failure → fix → re-run all three layers.
+2. **2.2 VERIFY — three layers, none skippable.** **Layer 1: Static — scoped per phase.** Per phase: `<package_manager> build`, `check-types`, and `--filter <affected-packages> test`. A dropped pass count → FAIL. **Do not run the full suite**: nightly on the default branch owns it. **Layer 2:** follow the phase's `### E2E Verification (mandatory)` table (no table → STOP and escalate). **Hard requirement:** not `done` unless `<planning-dir>/logs/s{N}-e2e.log` exists, is non-empty, holds raw JSON `afs_*` output (not a paraphrase), covers every call in the table plus one negative case, and admits no deferred work. **Layer 3:** at least one adversarial break (empty, oversize, `../`, kill mid-op, concurrency, prototype pollution); paste the output. Any failure → fix → re-run all three layers.
 3. **2.3 COMMIT** — `<formatter>`, then `git add <specific-files>` only (never `-A`, never `git add -f` on ignored logs). A dependency edit **includes** its lockfile; an unrelated lockfile diff stays out. Message: `phase N: implement <description>`.
 4. **2.4 SIMPLIFY** — skip under 50 lines of production code. Otherwise clarity only, recent files, no behavior change.
 5. **2.5 RE-VERIFY** — Layer 1, scoped, not the full suite. If simplify broke it, revert and commit without simplify. Else `phase N: simplify`.
-6. **2.6 DESIGN REVIEW — parent only**, after the E2E log gate, by a clean-context agent that is not the executor. Below `--review-target`, or an E2E log that is missing or unqualified, is NOT APPROVED. Respawn the executor with **all** findings in one batch, re-run scoped Layer 1, then review again. Same `respawn_count ≤ 3` budget. The reviewer does not edit.
-7. **2.7 REPORT** — after approval, the completion block must include tests, three layers, the **E2E log path**, simplify, score, and commits. A missing log line means the hard gate failed. Then start Phase N+1 (Rule 2).
+6. **2.6 DESIGN REVIEW — parent only**, after the E2E log check, by a clean-context agent that is not the executor. Below `--review-target`, or an E2E log that is missing or unqualified, is NOT APPROVED. Respawn the executor with **all** findings in one batch, re-run scoped Layer 1, then review again. Same `respawn_count ≤ 3` budget. The reviewer does not edit.
+7. **2.7 REPORT** — after approval, the completion block must include tests, three layers, the **E2E log path**, simplify, score, and commits. A missing log line means the hard requirement failed. Then start Phase N+1 (Rule 2).
 
 ### Step 3: Final report
 
-After the last phase: planning dir, N/total, test count before → after, PASSED, and **Repo gate (once, after the last phase):** `<verification_entry>` → PASS/FAIL @ sha7 plus the report path.
+After the last phase: planning dir, N/total, test count before → after, PASSED, and **Tests:** the affected packages' test command + counts at the final head.
 
 ## Escalation Rules
 
@@ -136,7 +136,7 @@ TDD every phase. Three-layer verification is mandatory (paste real output). Each
 Every phase-progress comment ends with:
 
 ```html
-<!-- sweep-trace: {"ver":1,"issue":N,"gate":"phase","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
+<!-- sweep-trace: {"ver":1,"issue":N,"step":"phase","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
 
 This machine marker is how issue-sweep tells an agent verdict from human input. The identity header is not a marker. A comment without it is re-processed every round.

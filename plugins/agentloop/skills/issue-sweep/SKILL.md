@@ -11,8 +11,7 @@ description: >-
 
 > **Repo profile — read `.claude/repo-profile.md` first.** This skill is repo-agnostic;
 > **arc is the reference implementation.** Use the profile's values wherever this doc shows an
-> arc default: `repo_slug` (the `gh -R <owner/repo>` target), `gate_mode` (arc = `scripts`: no
-> CI on PRs), `verification_entry` / `pre_merge_entry` (gate commands),
+> arc default: `repo_slug` (the `gh -R <owner/repo>` target), `package_manager` / `test_runner`,
 > `kb_issue`, the UI Face Paths, and `plugin_root` (where issue-graph's scripts live). Arc's own provenance for the lessons below (issue numbers,
 > war-stories) is not inlined here (fuller case narratives, where they exist, are under `.claude/case-law/`).
 
@@ -103,7 +102,7 @@ human's latest comment — this is `issue-review`'s resolve phase:
 
 **Concurrency:** `--concurrency <N>` → env `AGENTLOOP_SKILL_CONCURRENCY` (the fleet driver injects `skillConcurrency["issue-sweep"]` from `repos.json`) → default `3`; integer `1..16` else config error; shrink to the runtime's free agent slots; 没有非交互 agent 能力时降到 `1`. It caps **active issue workers**, not issues per run.
 
-**重闸另算,同一台机器最多 2 个。** Workers may be 3, but at most 2 heavy gates (`<verification_entry>` / e2e-gate / ui-verify / full build/test) run at once: a worker asks the controller for a gate slot; the controller counts running gates, not `load1`. Scheduling, not a lock. Inside a worker, **review before the gate**, fix the findings in one batch, then gate once; `design-review` is skipped when the human already recorded the decisions, else `--max-rounds 2`.
+Inside a worker: the changed package's tests, **one clean-context review before the PR**, fix the findings in one batch; `design-review` is skipped when the human already recorded the decisions, else `--max-rounds 2`.
 
 1. **主控分配,worker 即时 claim。** The controller keeps the deduped queue and free slots and does **不预加** `agent:processing`; the worker's first act is `issue-review` Step 0 (re-verify + acquire); lost race → `SKIP_LOCKED`.
 2. **One worker owns one issue** and writes only that issue's comment/label/PR/branch.
@@ -145,7 +144,7 @@ The default sweep only touches issues with an **unprocessed human reply**. With
 agent can fix end-to-end without a human in the loop**. The whole idea: many small,
 unambiguous, *verifiable* gaps don't need a person to approve them — reproduce →
 fix → test → PR, one at a time. But the bar for "no human needed" is high, and
-**verifiability is the gate**, not cleverness.
+**verifiability is the bar**, not cleverness.
 
 ### Triage every candidate into 🟢 / 🟡 / 🔴
 
@@ -153,7 +152,7 @@ fix → test → PR, one at a time. But the bar for "no human needed" is high, a
 
 Triage rules (🟢 / 🟡 / 🔴): Read [reference/autofix.md](reference/autofix.md).
 
-### The verifiability gate is environment-dependent (and that's the leverage)
+### Verifiability is environment-dependent (and that's the leverage)
 
 Why verifiability is environment-dependent: Read [reference/autofix.md](reference/autofix.md).
 
@@ -165,7 +164,7 @@ Probe commands, multi-machine claiming and the hard rule: Read [reference/autofi
 
 ### The 🟢 pipeline (one issue at a time, serial)
 
-One 🟢 issue at a time: reproduce → failing test → fix → targeted test → `<verification_entry>` → PR (`Fixes #N`). Never auto-merge.
+One 🟢 issue at a time: reproduce → failing test → fix → the changed package's tests → one review → PR (`Fixes #N`). Never auto-merge.
 
 Step-by-step: Read [reference/autofix.md](reference/autofix.md).
 
@@ -188,12 +187,12 @@ When the candidate carries a `test-sweep-failure` / `test-sweep-report` label: R
   gh pr list --state open --json number,headRefName,body --jq '.[] | select((.headRefName|test("(^|[-/])issue-<N>([-/]|$)|-<N>-")) or (.body|test("(Fixes|Part of) #<N>\\b"))) | .number'
   ```
   output → SKIP; none → `git checkout -B claude/issue-<N> origin/<default_branch>`.
-- **Every spin-off writes a native edge**: `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <new>` (+ `--issue <later> --blocked-by <earlier>` for hard phase order).
+- **Every spin-off writes a native edge**: `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <new>` (+ `--issue <later> --depends-on <earlier>` for hard phase order).
 - One issue, one PR; `Part of #N`, or `Fixes #N` only when fully closed. PR body starts with the `<agent_identity_script> --header "PR" --skill issue-sweep` line.
 - Conventional Commits; never `--no-verify` by default (a hook that fails to spawn usually means `<package_manager> install` has not run).
 - Before any deletion/edit: `git grep` for importers + targeted `check-types`/test; dep changes stage the lockfile too. AI **never** merges.
 - Push: `git push -u origin <branch>`; after rebase/amend `bun scripts/git-push-lease.ts`.
-- **Verification**: `<verification_entry>` before push (red → no push, no PR); after `gh pr create`, `<verification_entry> --comment <PR#>`. Acceptance-named e2e (`/e2e-verify`) must really run.
+- **Tests**: the changed package's tests before push (red → no push, no PR); the PR body names the command + counts. Acceptance-named e2e (`/e2e-verify`) must really run.
 - **UI diff** (`<UI Face Paths>`): screenshots before the PR (`<ui_shot_script>` / `/ui-verify`), self-checked, embedded in the PR body via `<ui_upload_script>`, and echoed on the issue.
 - The PR inherits the issue's milestone and its author + assignees (also as reviewers when human review is needed).
 
@@ -206,10 +205,10 @@ PR, message nothing.** A no-op sweep is silent. Only speak when you acted.
 
 **★ 沉默也是 PER-ISSUE 的,不只是 per-round。** 上面那条只覆盖「本轮一个候选都没有」。
 下一层的漏斗:一条 issue 被处理了,不等于这一轮就该在它下面留一条 comment。收尾前过
-[`issue-review` 的 Step 5.7 沉默闸](../issue-review/SKILL.md)——**动作 / 新信息 / 都不是**,
+[`issue-review` 的 Step 5.7 沉默规则](../issue-review/SKILL.md)——**动作 / 新信息 / 都不是**,
 第三类零 outward 写,结果只进 `$AGENTLOOP_RUN_REPORT`。判据是**状态变化**,不是**是否处理过**。
 
-**适用面(照抄 Step 5.7,别记反):沉默闸只管 agent 自发的路径**——`--autofix-green` 扫描、
+**适用面(照抄 Step 5.7,别记反):沉默规则只管 agent 自发的路径**——`--autofix-green` 扫描、
 Step 0.5 的 kicks / rollupCandidates、定期复核、状态跟踪。**人类输入触发的必须回应**,
 否则 Step 2 的谓词永远看到「未回应的人类评论」,**每轮重新全额核验一遍、一条 comment 都不产出**
 ——那比刷屏更贵。回应的内容照 ★Idea/★Research 铁律 10 的 ratchet 收尾,不是「复核确认,现状不变」。
@@ -245,13 +244,13 @@ The key principles (full text): Read [reference/principles.md](reference/princip
 每条本 skill 发出的 AI comment 末尾**必须**附一行 sweep-trace HTML 注释（人不可见、grep 可查、L1 eval 复用为 golden baseline 数据来源）：
 
 ```html
-<!-- sweep-trace: {"ver":1,"issue":N,"gate":"<gate>","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
+<!-- sweep-trace: {"ver":1,"issue":N,"step":"<step>","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
 
 字段：
 - `ver`：schema 版本，当前 `1`
 - `issue`：对应 issue 编号（数字）
-- `gate`：决策闸门名称，取受控词表：`disposition` / `skip`
+- `step`：决策步骤名称，取受控词表：`disposition` / `skip`
 - `val`：决策值，取 disposition 受控词表：`pr` / `comment` / `close` / `skip` / `research` / `idea` / `feature` / `needs-human-confirm`
 - `run`：UTC 时间，`new Date().toISOString()` 格式
 - `runner` / `skills`（溯源扩展，v1 兼容可选）：取 `<agent_identity_script>` 输出中的对应段——routine 归属者 + `.claude/skills/` 树版本 hash，用于按版本切分 golden baseline、定位低版本 routine 的产出

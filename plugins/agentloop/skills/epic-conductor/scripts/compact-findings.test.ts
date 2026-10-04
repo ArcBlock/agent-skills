@@ -213,14 +213,14 @@ describe("compactFindings — R2 reject: must never drop a still-valid finding",
       {
         id: "p1",
         severity: "P1",
-        path: "src/gate.ts",
+        path: "src/check.ts",
         line: 5,
         description: "auth bypass on empty token",
       },
     ];
     // No expectedSnippet on the finding, and the current snippet is unreadable — both
     // signals are missing, so the module cannot tell fixed from not-fixed.
-    const current: CurrentSnippet[] = [{ path: "src/gate.ts", line: 5, snippet: undefined }];
+    const current: CurrentSnippet[] = [{ path: "src/check.ts", line: 5, snippet: undefined }];
 
     const compacted = compactFindings(findings, current);
 
