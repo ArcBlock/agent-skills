@@ -107,13 +107,19 @@ if [ -z "$check_entry" ]; then
   echo "note: no factory_merge_check_entry in the default branch's repo profile; no factory merge check for PR #$pr"
 else
   read -r -a check_cmd <<<"$check_entry"
-  # "No factory to ask" is: no arc (127), an arc too old to have the check
-  # (its --help fails), no factory instance on this machine, or no daemon (6).
+  # "No factory to ask" is: no arc (127), an arc too old to have the check,
+  # no factory instance on this machine, or no daemon (6). "Too old" is a
+  # --help that fails OR does not name --base-sha, the newest flag the call
+  # passes: an old arc answers the subcommand's --help with its top-level
+  # help, exit 0 (arc#7775), and its real call's usage error would otherwise
+  # read as a final refusal. Captured, not piped: no SIGPIPE under pipefail.
   no_factory=0
   set +e
-  if ! "${check_cmd[@]}" --help >/dev/null 2>&1; then
+  check_help="$("${check_cmd[@]}" --help 2>&1)"
+  check_help_rc=$?
+  if [ "$check_help_rc" -ne 0 ] || [[ "$check_help" != *--base-sha* ]]; then
     no_factory=1; check_rc=127
-    check_out="this machine's arc cannot run: ${check_entry} (missing, or too old to have it)"
+    check_out="this machine's arc cannot run: ${check_entry} (missing, too old to have it, or its help lacks --base-sha)"
   else
     check_out="$("${check_cmd[@]}" --pr "$pr_url" --head "$sha" --head-ref "$head_ref" --base-sha "$base_sha" --json 2>&1)"
     check_rc=$?

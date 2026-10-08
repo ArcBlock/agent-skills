@@ -298,7 +298,15 @@ echo "ok"
 cat > "$tmp/check" <<'CHECK'
 #!/usr/bin/env bash
 case "${TEST_CHECK:-ok}" in old) echo 'Unknown command: "-i"'; exit 5 ;; esac
-[ "$1" = --help ] && exit 0
+# An arc that predates the check (arc#7775) answers `--help` with its
+# top-level help, exit 0; it may even name merge-check, but not its flags.
+# The real call then fails with yargs usage.
+if [ "${TEST_CHECK:-ok}" = oldhelp ]; then
+  if [ "$1" = --help ]; then printf 'arc <command>\n\nCommands:\n  arc factory work merge-check  Check a PR\n'; exit 0; fi
+  printf 'arc <command>\n\nUnknown command: "-i"\n'; exit 5
+fi
+# A current arc's subcommand help names every flag the call passes.
+[ "$1" = --help ] && { printf 'Options:\n  --pr\n  --head\n  --head-ref\n  --base-sha\n  --json\n'; exit 0; }
 printf '%s\n' "$*" >> "$TEST_PATCH_DIR/.check-args"
 case "${TEST_CHECK:-ok}" in
   noinstance) echo 'ERROR: no instance named "factory"'; exit 1 ;;
@@ -342,9 +350,10 @@ TEST_CHECK=missing fails "no arc, no assertion" "$root/merge-verified-pr.sh" 42 
 rm -f "$TEST_LOG"
 TEST_CHECK=missing "$root/merge-verified-pr.sh" 42 --repo owner/repo --not-factory "cloud runner without arc"
 grep -F 'api --method PUT' "$TEST_LOG"
-# No factory instance on this machine, or an arc too old for the check: no
-# factory to ask, liftable only with the assertion.
-for mode in noinstance old; do
+# No factory instance on this machine, or an arc too old for the check (its
+# --help fails, or exits 0 without --base-sha, arc#7775): no factory to ask,
+# liftable only with the assertion.
+for mode in noinstance old oldhelp; do
   TEST_CHECK=$mode fails "$mode, no assertion" "$root/merge-verified-pr.sh" 42 --repo owner/repo
   rm -f "$TEST_LOG"
   TEST_CHECK=$mode "$root/merge-verified-pr.sh" 42 --repo owner/repo --not-factory "no factory on this runner"
