@@ -66,7 +66,7 @@ export interface IssueDraft {
  * `no-assertions` at 76.5% is the sharp one. Roughly one site in four is the
  * accept half of an accept/reject pair — a test that calls a void guard and
  * expects no throw — and "fixing" those deletes exactly the coverage this repo
- * cares most about, leaving a gate with only reject tests behind it.
+ * cares most about, leaving a check with only reject tests behind it.
  *
  * An issue that hides its own error rate is asking to be acted on blindly.
  */
@@ -87,7 +87,7 @@ export const CONFIDENCE: Record<string, string> = {
 /**
  * What to do about each rule, in the words the fix actually needs.
  *
- * Exported because the PR gate renders the same advice next to a finding. One
+ * Exported because the diff mode renders the same advice next to a finding. One
  * source of truth: a reviewer reading the report and an agent reading the issue
  * must not be told two different things about the same rule.
  */

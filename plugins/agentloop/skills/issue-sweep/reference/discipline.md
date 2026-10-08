@@ -35,7 +35,7 @@
 - **开任何派生/spin-off issue 必须写原生边(图精确性的来源)。** body 首行
   `<!-- spinoff-of: #N -->` 标记之外,**同时**执行
   `bun <plugin_root>/skills/issue-graph/scripts/link.ts --parent <N> --child <新号>`(幂等);
-  phase 之间有硬次序的再加 `--issue <后> --blocked-by <前>`。标记是 provenance,
+  phase 之间有硬次序的再加 `--issue <后> --depends-on <前>`。标记是 provenance,
   **原生边才进 Step 0.5 的确定性图计算**——不写边 = 这个 spin-off 对 close-kick /
   rollup 永久不可见,回到"要人 bump"的旧病。
 - 一个 issue 一个 PR(确定性分支),`body references the issue（`Part of #N`;完全闭合
@@ -56,7 +56,7 @@
   fall back to `--no-verify` if the hook is confirmed broken *after* install
   (rare), and even then keep changes clean by hand via the `<formatter>` per CLAUDE.md's "别随手
   `--no-verify`" rule — it also skips the formatter, so formatting/lint issues
-  silently leak into the PR (there's no CI gate to catch them).
+  silently leak into the PR (nothing on the PR path catches them).
 - **Safety before any deletion/edit:** `git grep` confirms no external code
   importers; `<package_manager> --filter <pkg> check-types` (or a
   targeted test) shows no
@@ -70,22 +70,12 @@
 - **Deletion provenance:** content is recoverable via git history; the audit
   comment preserves it. AI **never** auto-merges; humans merge.
 - Push: `git push -u origin <branch>` for a fast-forward / new branch. After rebase/amend, `bun scripts/git-push-lease.ts` — never bare `git push --force-with-lease` (fetch updates the tracking ref and the lease silently passes; #5212). Retry on network error with backoff.
-- **★ Verification 强约束(proposing 侧,机制而非纪律):** PR 路径**不再有
-  任何 CI**(`ci.yml`/`pr-title.yml` 已删),verification 脚本是唯一 pre-submit 门控。
-  - push 前**必须**跑 `<verification_entry>`,硬门控未过
-    **不得** push / 开 PR。
-  - **开 PR 后用一条命令把「跑 + 贴」焊死**——`--comment` 让脚本自己把报告 upsert 到 PR,
-    agent 无法只跑不贴、也无法手改数字:
-    ```bash
-    <verification_entry> --comment <PR#>
-    ```
-    (报告 = 状态 + 耗时 + 可折叠完整日志,数字由脚本测出;marker sticky comment,重跑
-    只编辑同一条不刷屏。)见 CLAUDE.md「Self-Verification」+
-    [`verification` skill](../../verification/SKILL.md)。
+- **★ 测试(proposing 侧):** push 前跑改动包的测试(`<package_manager> --filter <pkg> test`),红了
+  **不得** push / 开 PR;PR 正文写确切命令 + 通过/失败计数。pre-commit 只跑 Biome,nightly 才跑全量。
 - **★ 验收点名的集成验证不可预先开脱:** 当 issue 的验收标准 / human **点名** `/e2e-verify`
   (该仓库的 companion，见 repo-profile 的 Companion Skills；没有就 stub 或跳过该步)
   等集成验证(blocklet render / mount / serve),proposing 侧**必须真跑**——`<cli_binary>`
-  CLI 缺失/陈旧就先跑 `<cli_setup_command>`,**不得**以「需要 daemon / 本环境无法执行」开脱,**也不得**拿 `pre-pr.ts` 的 unit
+  CLI 缺失/陈旧就先跑 `<cli_setup_command>`,**不得**以「需要 daemon / 本环境无法执行」开脱,**也不得**拿 unit
   test 顶替点名的 e2e。缺依赖 = 多一步 setup(编译原生插件、link CLI),只有实际撞上硬工具链缺失(无
   Xcode/Android SDK/Playwright)才算跑不动,且贴**确切报错** + 标注跳过层。见 `e2e-verify` skill。
 - **★ UI 改动的截图左移(proposing 侧生图,不留给 review 侧):** diff 命中
@@ -118,7 +108,7 @@
   assignees**(去重)设为 PR 的 assignee——他们是这件事的知情人和责任人,PR 出现在他们的
   待办里才不会漏。**需要 human review 的 PR**(🔴 高风险 / security / A-vs-B 待拍板 /
   🟡 draft `needs-human-review`)**同时把这些人设为 reviewer**;判断**不需要人确认**的
-  (🟢 机械修复、低风险档,pr-sweep 闸内可自动合)可不指定 reviewer,免得制造无意义的
+  (🟢 机械修复、低风险档,pr-sweep 的合并规则内可自动合)可不指定 reviewer,免得制造无意义的
   review 请求。
   ```bash
   people=$(gh issue view <N> --json author,assignees \

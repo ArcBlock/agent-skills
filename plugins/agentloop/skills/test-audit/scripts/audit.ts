@@ -7,7 +7,7 @@
  * `scan` walks the adapter's test globs, runs every enabled static rule, and
  * reports findings split into NEW (absent from the baseline) and KNOWN. Only
  * NEW findings can fail the run: a repo adopting this on an existing tree needs
- * a floor, or the gate is unadoptable and gets switched off — which is the
+ * a floor, or the check is unadoptable and gets switched off — which is the
  * failure mode that leaves you with a check nobody reads.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -127,7 +127,7 @@ export function scanTree(adapter: Adapter, files: string[]): Finding[] {
 /**
  * Static findings this diff INTRODUCED into a file — not the ones it inherited.
  *
- * Some static rules matter enough to gate on (`.only` disables a whole file),
+ * Some static rules matter enough to block on (`.only` disables a whole file),
  * but the diff tier alone would miss them: they are properties of the file, not
  * of the change. Running the static rules over changed files naively is the
  * wrong fix — it makes anyone who touches a file inherit every pre-existing

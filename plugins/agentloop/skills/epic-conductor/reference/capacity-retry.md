@@ -4,7 +4,7 @@
 
 - **A worker dies on a provider capacity limit (429), not on its task** (arc#6204): both arrive as
   `status=failed`, so the work is dropped unless you happen to be watching. Measured twice in one
-  run — one worker had already committed its fix and died queued behind a gate; another died
+  run — one worker had already committed its fix and died queued behind a test run; another died
   mid-edit holding uncommitted work. Do NOT re-dispatch blindly and do NOT treat it as a task
   outcome. Classify it, record it, retry after the reset:
   ```bash

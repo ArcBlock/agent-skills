@@ -123,7 +123,7 @@ describe("withStrictFileLock", () => {
       const holder: LockHolder = {
         pid: process.pid,
         at: 1_000_000,
-        purpose: "the other gate",
+        purpose: "the other check",
         cwd: "/somewhere",
         processStartedAt: 999_000,
         startTimeSource: "ps",
@@ -147,7 +147,7 @@ describe("withStrictFileLock", () => {
       ).toThrow(LockUnavailableError);
       // The whole point: `fn` did NOT run, and the holder's file is untouched.
       expect(ran).toBe(false);
-      expect(JSON.parse(readFileSync(lock, "utf8")).purpose).toBe("the other gate");
+      expect(JSON.parse(readFileSync(lock, "utf8")).purpose).toBe("the other check");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -189,7 +189,7 @@ describe("withStrictFileLock", () => {
       const lock = join(dir, "x.lock");
       writeFileSync(
         lock,
-        `${JSON.stringify({ pid: 999_999, at: 1_000_000, purpose: "dead gate", cwd: "/x" })}\n`,
+        `${JSON.stringify({ pid: 999_999, at: 1_000_000, purpose: "dead check", cwd: "/x" })}\n`,
       );
       const got = withStrictFileLock(lock, "unit", () => "ran", {
         waitMs: 500,
@@ -241,7 +241,7 @@ describe("withStrictFileLock", () => {
     const dir = scratch();
     try {
       const lock = join(dir, "x.lock");
-      const stale = { pid: 999_999, at: 1_000_000, purpose: "dead gate", cwd: "/x" };
+      const stale = { pid: 999_999, at: 1_000_000, purpose: "dead check", cwd: "/x" };
       const fresh = { pid: process.pid, at: 1_000_050, purpose: "the racer that won", cwd: "/y" };
       writeFileSync(lock, `${JSON.stringify(stale)}\n`);
       let swapped = false;

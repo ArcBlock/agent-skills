@@ -10,13 +10,17 @@
  *    「没测到冲突」与「测过了没冲突」完全同色——这是 accept-path 铁律作用在测量本身上。
  * 2. **交集算文件级。** 目录级会把 `.claude/verify/checks/check-tests.ts` 与
  *    `check-metadata.ts` 判成相交，产生假冲突。
- * 3. **pre-pr.ts / pre-merge.ts 是命令引用，不是编辑目标。** 几乎每条 issue 的复现
- *    步骤里都会出现它们；当成落点会让所有 issue 互相「相交」。
  */
 
 import { createHash } from "node:crypto";
 
 /* ===== 路径面 ===== */
+
+/**
+ * 命令引用，不是编辑目标：历史 issue 的复现步骤大量引用 `.claude/verify/pre-pr.ts` /
+ * `pre-merge.ts`（已删除的 PR 期脚本）；当成落点会让这些 issue 互相「相交」。
+ */
+const COMMAND_QUOTE = /(^|\/)\.claude\/verify\/pre-(pr|merge)\.ts$/;
 
 /**
  * `partial` = 抽到了一些落点，但正文里还有**未识别**的路径样 token。
@@ -37,9 +41,6 @@ export interface PathSurface {
   lanes: string[];
   state: SurfaceState;
 }
-
-/** 命令引用，不是编辑目标。 */
-const COMMAND_QUOTE = /(^|\/)(pre-pr|pre-merge)\.ts$/;
 
 /**
  * 缺省根目录 —— **arc 自己的布局**，不是普适清单。

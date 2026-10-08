@@ -1,3 +1,0 @@
-"<!-- verification-report sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa result=PASS -->\n> Synthetic evidence block for transport tests (arc#6334).\n> Produced at tree `/tmp/synthetic-worktree`.\n\n| Check | Result |\n|-------|--------|\n| Build | PASS |\n\n<details><summary>notes</summary>\n\nline one of a multiline detail block\nline two still in the same comment body\n\n</details>\n"
-"<!-- pr-review-verdict -->\n> Synthetic PR review\n\n## MERGE (held)\n\nSynthetic verdict body with newlines so raw gh jq body spans many lines.\n\n<!-- sweep-trace: {\"ver\":1,\"pr\":34,\"gate\":\"verdict\",\"val\":\"MERGE\",\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"round\":1} -->\n"
-"<!-- ordinary discussion -->\nShort third comment.\nStill has\nmultiple lines.\n"

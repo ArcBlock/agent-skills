@@ -10,21 +10,21 @@ For each round (1 to maxRounds):
 
 The subagent prompt varies by document type. Include the classification in the prompt so the subagent knows which strategy to apply.
 
-**For Implementation Plans (has `tasks.md`, hard gate ON):**
+**For Implementation Plans (has `tasks.md`, hard requirement ON):**
 
 ```
 你是一个独立的架构审查者，对这个项目没有任何先验知识。这是第 {round} 轮 review{previousScore}。目标 ≥{target}%。
-文档类型：实施计划（Implementation Plan）。Test coverage hard gate 启用。
+文档类型：实施计划（Implementation Plan）。Test coverage hard requirement 启用。
 
 1. 读取以下设计文档：
 {list of doc file paths}
 
-2. **事实 + 数字 grounding 审计（HARD GATE）** — 文档里关于**现状**的每条断言都要坐实，别凭记忆或旧 planning 草稿：
+2. **事实 + 数字 grounding 审计（HARD REQUIREMENT）** — 文档里关于**现状**的每条断言都要坐实，别凭记忆或旧 planning 草稿：
    - **定性事实**：用 Grep/Read 把每条现状断言坐实到 `path:line` —— 接口/类型存在性、文件路径、方法签名、**存储后端、文件布局、现有行为**是否真的如文档所述。**代码是唯一权威**：引用的 planning/docs 与代码冲突时**以代码为准**，并标出"该文档已过时"。
    - **定量数字**：每个数字（延迟/吞吐/大小/数量/上限/成本）必须**实测**（附确切命令 + 输出）或**显式标注为未验证估计**（含依据），否则删掉。**凭空给出却当作分析/事实呈现的数字（尤其延迟/性能）= must-fix**；与 human 在 issue 里给的实测经验冲突时以实测为准。
    - **任一未坐实 / 与代码矛盾的现状断言，或任一凭空数字 = CRITICAL → NOT APPROVED**（错的地基会让后续 phase 全盘皆错）。
 
-3. **测试覆盖审计（HARD GATE）** — 对每个 phase/task，检查测试 spec 是否覆盖以下 6 类：
+3. **测试覆盖审计（HARD REQUIREMENT）** — 对每个 phase/task，检查测试 spec 是否覆盖以下 6 类：
    - ✅ Happy path（正常流程）
    - ✅ Bad input（非法输入、边界条件）
    - ✅ Security（path traversal, injection, prototype pollution, resource exhaustion）
@@ -35,7 +35,7 @@ The subagent prompt varies by document type. Include the classification in the p
    对每个 phase 标注：6/6, 5/6, ... 缺哪一类就列出来。
    **如果任何 phase 缺少 2 类以上 → 测试覆盖不足 → 自动 NOT APPROVED（不管总分多高）。**
 
-   3b. **E2E Verification 审计（HARD GATE）** — 对每个 phase，检查是否有 `### E2E Verification (mandatory)` section：
+   3b. **E2E Verification 审计（HARD REQUIREMENT）** — 对每个 phase，检查是否有 `### E2E Verification (mandatory)` section：
    - 必须包含具体的 AFS MCP tool call 路径（`afs_read /dev/ui/web/sessions/e2e-xxx/...`）
    - 必须使用 named session（`?session=e2e-{name}`）实现确定性访问，不依赖 session discovery
    - 必须描述预期返回结构（JSON 字段、类型），不能只写"验证成功"
@@ -56,32 +56,32 @@ The subagent prompt varies by document type. Include the classification in the p
    - 有没有文档描述但代码中不存在的概念
 
 6. 输出格式（严格遵守）：
-   a. **测试覆盖审计表**（每 phase 的 6 类覆盖情况，HARD GATE）
-   a2. **E2E Verification 审计表**（每 phase 是否有 E2E section + 具体 tool call，HARD GATE）
+   a. **测试覆盖审计表**（每 phase 的 6 类覆盖情况，HARD REQUIREMENT）
+   a2. **E2E Verification 审计表**（每 phase 是否有 E2E section + 具体 tool call，HARD REQUIREMENT）
    b. 文档 vs 代码 Gap 列表（带信心百分比）
    c. Dry Run 发现的问题列表（按 phase）
    d. 测试遗漏列表（按严重程度）
    e. 总体评估：实现信息完整度百分比（0-100%）
-   f. 如果 ≥{target}% 且测试覆盖 + E2E + 事实/数字 grounding HARD GATE 均通过（无未坐实/与代码矛盾的现状断言、无凭空数字）：输出 "APPROVED"；否则输出 "NOT APPROVED"
+   f. 如果 ≥{target}% 且测试覆盖 + E2E + 事实/数字 grounding HARD REQUIREMENT 均通过（无未坐实/与代码矛盾的现状断言、无凭空数字）：输出 "APPROVED"；否则输出 "NOT APPROVED"
 
 请非常彻底和严格。不要做任何修改，只做 review 和分析。
 ```
 
-**For Design / Architecture (no `tasks.md`, hard gate OFF):**
+**For Design / Architecture (no `tasks.md`, hard requirement OFF):**
 
 ```
 你是一个独立的架构审查者，对这个项目没有任何先验知识。这是第 {round} 轮 review{previousScore}。目标 ≥{target}%。
-文档类型：设计/架构文档。Test coverage hard gate 不启用（测试覆盖作为建议）。
+文档类型：设计/架构文档。Test coverage hard requirement 不启用（测试覆盖作为建议）。
 
 1. 读取以下设计文档：
 {list of doc file paths}
 
-2. **事实 + 数字 grounding 审计（HARD GATE）** — 文档里关于**现状**的每条断言都要坐实，别凭记忆或旧 planning 草稿：
+2. **事实 + 数字 grounding 审计（HARD REQUIREMENT）** — 文档里关于**现状**的每条断言都要坐实，别凭记忆或旧 planning 草稿：
    - **定性事实**：用 Grep/Read 把每条现状断言坐实到 `path:line` —— 接口/类型存在性、文件路径、方法签名、**存储后端、文件布局、现有行为**是否真的如文档所述。**代码是唯一权威**：引用的 planning/docs 与代码冲突时**以代码为准**，并标出"该文档已过时"。
    - **定量数字**：每个数字（延迟/吞吐/大小/数量/上限/成本）必须**实测**（附确切命令 + 输出）或**显式标注为未验证估计**（含依据），否则删掉。**凭空给出却当作分析/事实呈现的数字（尤其延迟/性能）= must-fix**；与 human 在 issue 里给的实测经验冲突时以实测为准。
    - **任一未坐实 / 与代码矛盾的现状断言，或任一凭空数字 = CRITICAL → NOT APPROVED**（错的地基会让后续 phase 全盘皆错）。
 
-3. **AFS 原则合规检查（HARD GATE）** — 检查设计是否违反以下核心原则：
+3. **AFS 原则合规检查（HARD REQUIREMENT）** — 检查设计是否违反以下核心原则：
    - **AFS-Only I/O**：任何 I/O 是否都通过 AFS API？有没有绕过 AFS 直接访问底层资源的设计？
    - **抽象复用**：有没有设计要新建的东西其实已有现成的 provider/utility？有没有重复发明轮子？
    - **Provider 边界**：provider 之外的代码是否都通过 AFS 接口？
@@ -102,7 +102,7 @@ The subagent prompt varies by document type. Include the classification in the p
    - 声称修改的文件是否确实被修改
    - 性能数据是否有可信来源
 
-7. 测试覆盖建议（非 hard gate）：
+7. 测试覆盖建议（非 hard requirement）：
    - 已完成工作的已有测试和缺失测试
    - 待做工作的测试需求
    - 区分"已有"和"缺失"，缺失项是否被 tracked
@@ -128,7 +128,7 @@ The subagent prompt varies by document type. Include the classification in the p
 1. 读取以下文档：
 {list of doc file paths}
 
-2. **事实准确性验证（HARD GATE）** — 使用 Grep 和 Read 工具验证：
+2. **事实准确性验证（HARD REQUIREMENT）** — 使用 Grep 和 Read 工具验证：
    - 每个 commit hash 是否存在且 message 匹配（用 git log 验证）
    - 每个文件路径是否正确
    - 每个方法签名/接口声明是否与实际代码匹配
@@ -140,7 +140,7 @@ The subagent prompt varies by document type. Include the classification in the p
    - 已知问题/遗留项是否被 tracked
    - 相关文件引用是否完整
 
-4. AFS 原则合规（信息性，非 hard gate）：
+4. AFS 原则合规（信息性，非 hard requirement）：
    - 记录中的已完成工作是否遵守 AFS 原则
    - 如有违反，标注为建议而非阻塞
 

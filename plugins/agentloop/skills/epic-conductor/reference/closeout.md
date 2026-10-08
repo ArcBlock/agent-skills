@@ -1,35 +1,29 @@
-# epic-conductor — closeout procedure
+# epic-conductor — closeout
 
-> On-demand reference for [`epic-conductor`](../SKILL.md) (§9). Moved out of SKILL.md in #7105.
-> The hard exit gate (`assert-no-blocked-prs.ts`, exit 0, fail-closed) stays in SKILL.md.
-> Witness-precision limits: [closeout-gate.md](closeout-gate.md).
+> On-demand reference for [`epic-conductor`](../SKILL.md) (§9).
 
-The epic is not done until closeout is posted. Run the blocked-PR gate before any wrap step. Exit 0 is required. There is no bypass flag.
+The epic is not done until closeout is posted, and you do not exit on unfinished state you created
+(open PRs of yours with unresolved findings, live hired children).
 
-This is the artifact-side twin of `assert-no-live-children.ts`. That one says no worker is still running. This one says no product is still hanging. One discipline: a conductor must not exit on unfinished state it created. Foreign-red ownership was assigned to the conductor so those PRs would have an owner. A conductor that closes the epic while one still hangs hands it straight back to nobody.
+## Cohesion — read nightly, do not run a private suite
 
-## Cohesion — read the catch-net, do not run your own suite
+N PRs merged in sequence must cohere. That is the job of the nightly full build + test on the
+default branch. Read the nightly result for a run that includes the epic's last merge. Green →
+record it. Red → its auto-opened issue is the link; the epic is not cohesive until nightly is green
+again. Not yet covered → wait for the next nightly. You never write or "confirm" a nightly result.
 
-N PRs merged in sequence must cohere. That is the job of the repo's post-merge catch-net (arc: the L1 main catch-net, `docs/guides/main-catchnet.md`). Read its verdict for a range that includes the epic's last merge.
+## End-to-end
 
-Where to read it (arc):
+Drive the epic's thesis end to end on real infrastructure, as far as the merged code allows. Say
+user-reachable vs mechanism-level where a wiring seam remains, and file the seam.
 
-- The catch-net's state dir: `$ARC_CATCHNET_STATE_DIR`, else `<git-common-dir>/arc-catchnet/` **of the dedicated catch-net clone**, not necessarily your checkout. Look at `latest.json` and `verdicts/*.json`.
-- Or the `main-catchnet hourly` presence heartbeat, whose outcome carries the verdict and range.
-- `bun scripts/main-catchnet.ts plan` in that clone says when the next run covers the merge. Its `range.to` must be at or after that merge.
+## UI
 
-Green → record the verdict id in the closeout. Red → the catch-net's own bisect files the issue; link it and treat the epic as not cohesive until the catch-net itself turns green again. Not yet covered → wait for its next batch rather than running a private full suite.
-
-**You never write, edit, or "confirm" a catch-net verdict or its heartbeat.** The verdict comes only from its deterministic script (catch-net independence, arc#7068 §5.3). A repo without a catch-net keeps the old step: run the deterministic gate across the touched packages on the merged main.
-
-## End-to-end verification
-
-Drive the epic's actual thesis end-to-end on real infrastructure (real data, real services), as far as the merged code allows. Be honest about **user-reachable vs mechanism-level** where a wiring seam remains, and file the seam as a follow-up. Do not describe a mechanism-level proof as something a user can already do.
-
-## Visual verification when there is a UI
-
-Capture screenshots of every real rendered surface. Upload them so they inline in GitHub (raw host on the default branch — a bare comment post can drop images; use the repo's upload script, arc: `scripts/gh-upload-media.sh`). Post ONE walkthrough comment on the epic with captioned inline screenshots plus the terminal evidence for non-UI steps. If the human asked for a screenshotted closeout, this step is the deliverable, not an extra.
+Screenshots of every real rendered surface, uploaded so they inline (the repo's upload script, arc:
+`scripts/gh-upload-media.sh`), in ONE walkthrough comment on the epic with terminal evidence for the
+non-UI steps.
 
 ## Wrap
 
-Close sub-issues and the epic with a summary: a deliverables table, the closeout verdict (catch-net id or the reason it is not cohesive yet), and the follow-ups filed. Clear the lock list so the refresher exits. Report to the human with the epic URL, the PR URLs, and what each screenshot proves.
+Close sub-issues and the epic with a deliverables table, the nightly result, the follow-ups filed.
+Clear the labels. Report the epic URL, PR URLs, and what each screenshot proves.

@@ -268,7 +268,7 @@ describe("执行页面脚本后的概览图", () => {
       rects.filter((r) => (r.querySelector("title")?.textContent ?? "").includes(` · ${kw} `));
     const opened = side("开");
     const closed = side("关");
-    // ★ 正控：两侧都必须真的取到 rect，否则 every() 对空集恒真，闸就瞎了
+    // ★ 正控：两侧都必须真的取到 rect，否则 every() 对空集恒真，检查就瞎了
     expect(opened.length).toBeGreaterThan(0);
     expect(closed.length).toBeGreaterThan(0);
     expect(opened.length + closed.length).toBe(rects.length);

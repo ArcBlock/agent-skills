@@ -12,10 +12,10 @@
  * not that what its author meant is useful on this repo's actual commits.
  *
  * Replay walks commits that touched test files, feeds each one's (parent, head)
- * pair through the same code path the PR gate uses, and reports what the gate
+ * pair through the same code path the diff mode uses, and reports what it
  * WOULD have done. Every `block` it reports on a commit that shipped fine is a
  * false positive you would have paid for; the total wall-clock is the tax the
- * gate adds to every PR.
+ * check adds to every PR.
  *
  * Run this BEFORE turning a rule's severity to `block` in a repo's adapter, and
  * re-run it when a rule changes. A rule that blocks a meaningful fraction of
@@ -111,7 +111,7 @@ async function main(): Promise<number> {
   console.log(`test-audit replay — ${results.length} commits touching test files`);
   console.log(`  commits with ≥1 finding : ${flagged.length}`);
   console.log(
-    `  commits the gate WOULD BLOCK: ${blocked.length}  (${((blocked.length / Math.max(withFiles.length, 1)) * 100).toFixed(1)}% of test-touching commits)`,
+    `  commits blocking rules WOULD STOP: ${blocked.length}  (${((blocked.length / Math.max(withFiles.length, 1)) * 100).toFixed(1)}% of test-touching commits)`,
   );
   for (const [rule, n] of [...byRule].sort((a, b) => b[1] - a[1])) console.log(`    ${rule}: ${n}`);
   console.log(

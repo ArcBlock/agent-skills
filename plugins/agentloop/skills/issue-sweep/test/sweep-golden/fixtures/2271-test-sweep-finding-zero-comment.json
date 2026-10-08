@@ -3,7 +3,7 @@
   "issue": {
     "number": 2271,
     "labels": ["P2", "test-sweep-failure"],
-    "body": "\n## test-sweep 失败：aistro\n\n**时间**: 2026-07-22 20:05 UTC\n**URL**: https://aistro.afsd.dev\n\n### 发现：chat 页 `.man` 文档与实际行为不符（doc-vs-code drift）\n\nchat.yaml 声称外层视图无 authenticated gate，实际匿名访问观测到登录墙。\n\n**建议**：更新 chat.yaml 的门禁描述以匹配实际部署行为，或排查该门禁是否为非预期回归。\n\n> 🤖 AI Agent @ vm · runner:yechao · skills@56f6c81c",
+    "body": "\n## test-sweep 失败：aistro\n\n**时间**: 2026-07-22 20:05 UTC\n**URL**: https://aistro.afsd.dev\n\n### 发现：chat 页 `.man` 文档与实际行为不符（doc-vs-code drift）\n\nchat.yaml 声称外层视图无登录校验，实际匿名访问观测到登录墙。\n\n**建议**：更新 chat.yaml 的登录校验描述以匹配实际部署行为，或排查该登录校验是否为非预期回归。\n\n> 🤖 AI Agent @ vm · runner:yechao · skills@56f6c81c",
     "comments": []
   },
   "expected": {

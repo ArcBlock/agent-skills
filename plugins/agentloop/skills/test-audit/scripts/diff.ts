@@ -279,7 +279,7 @@ const assertionWeakened: DiffRule = {
  * and common. Measured over 300 real commits, the top hits were exactly that —
  * `refactor(cli): drop the -i REPL entry point` deleting the four tests for the
  * entry point it deleted. Blocking on this would tax every honest refactor,
- * and a gate that fires on honest work is a gate people learn to bypass.
+ * and a check that fires on honest work is a check people learn to bypass.
  *
  * So it says what it can prove ("these N tests are gone") and leaves the
  * judgement to the reviewer, who can see the rest of the diff.

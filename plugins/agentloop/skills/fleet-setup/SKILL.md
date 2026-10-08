@@ -78,7 +78,7 @@ hook. Per the plugin CLAUDE.md, a per-machine preference belongs in a local prom
 shared `fleet/prompts/*.md`.
 
 The recipe that was measured to work: point `promptDir` at `~/.agentloop-fleet/prompts/` holding a
-**thin wrapper** per skill — a SCOPE GATE at the top, then an instruction to read the upstream
+**thin wrapper** per skill — a SCOPE CHECK at the top, then an instruction to read the upstream
 `<plugin>/fleet/prompts/<skill>.md` verbatim at the bottom, so a plugin upgrade never leaves a
 stale copy running. Both directions were verified on a native-capable Mac: with zero in-scope
 issues, a 62-second no-op round left 12 PRs' comments / `updated_at` / labels **line-for-line
@@ -204,7 +204,7 @@ Plus:
   delete — handle at https://claude.ai/code/routines"; any old local block that was replaced.
 - **Single-identity caveat (local)**: a local cron's PRs are authored by your own `gh` account, and
   GitHub forbids self-approving — so a clean local-loop PR stops at "ready, awaiting human
-  approve+merge" (a safety gate, not a bug). Cloud routines posting as `claude[bot]` don't hit this.
+  approve+merge" (a safety rule, not a bug). Cloud routines posting as `claude[bot]` don't hit this.
 - **Re-run = upgrade path**: change the catalog / bump the plugin, re-run `/agentloop:fleet-setup`.
   It reconciles, never rebuilds.
 

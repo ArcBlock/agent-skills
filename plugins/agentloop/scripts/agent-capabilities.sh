@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-capabilities — probe which native build/test toolchains this machine
-# actually has, so issue-sweep/pr-sweep can match an environment-gated task
+# actually has, so issue-sweep/pr-sweep can match an environment-dependent task
 # (declared via a `<!-- requires: <tag>[,<tag>...] -->` marker in the issue
 # body) to an agent that can really verify it (issue #1574).
 #
@@ -46,7 +46,7 @@ if [ -n "${android_home}" ] && [ -d "${android_home}" ] && command -v java >/dev
   echo "native-android"
 fi
 
-# gh-cli: binary present. Do NOT gate on `gh auth status` — in this harness, writes go through an
+# gh-cli: binary present. Do NOT key on `gh auth status` — in this harness, writes go through an
 # injected GitHub App credential that `gh auth status` can report as "invalid" even while every
 # actual `gh api`/`gh issue`/`gh pr` call works fine (verified empirically: real 403s in this same
 # session were rate-limit errors, never auth errors). Presence of the binary is the honest signal.

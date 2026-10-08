@@ -35,17 +35,17 @@ const results: CheckResult[] = [
 describe("renderReport", () => {
   test("injected identity string opens the report", () => {
     const identity = "> 🤖 AI Agent Verification @ host · runner:r · skills@abc";
-    const md = renderReport(results, { scenario: "pre-pr", sha: "deadbeef123", identity });
+    const md = renderReport(results, { scenario: "nightly", sha: "deadbeef123", identity });
     expect(md.split("\n")[0]).toBe(identity);
   });
 
   test("no identity → report opens directly with the heading (no blank leader)", () => {
-    const md = renderReport(results, { scenario: "pre-pr" });
+    const md = renderReport(results, { scenario: "nightly" });
     expect(md.startsWith("## Verification Report")).toBe(true);
   });
 
   test("body content is intact: heading, table, overall", () => {
-    const md = renderReport(results, { scenario: "pre-pr", base: "abcdef1234", sha: "deadbeef" });
+    const md = renderReport(results, { scenario: "nightly", base: "abcdef1234", sha: "deadbeef" });
     expect(md).toContain("## Verification Report");
     expect(md).toContain("| Build | ✅ PASS |");
     expect(md).toContain("**Overall: ✅ PASS**");
@@ -63,7 +63,7 @@ describe("renderReport", () => {
         rawTail: "TS2345: bad",
       },
     ];
-    const md = renderReport(failing, { scenario: "pre-pr" });
+    const md = renderReport(failing, { scenario: "nightly" });
     expect(md).toContain("**Overall: ❌ FAIL**");
     expect(md).toContain("### Failures");
     expect(md).toContain("TS2345: bad");
@@ -131,7 +131,7 @@ describe("renderReport", () => {
         stats: {},
       },
     ];
-    const md = renderReport(warn, { scenario: "pre-pr" });
+    const md = renderReport(warn, { scenario: "nightly" });
     expect(md).toContain("**Overall: ✅ PASS**");
     expect(md).toContain("⚠️ WARN");
   });
@@ -154,47 +154,47 @@ describe("renderReport totality (#2734 — a check's missing optional field must
   ] as CheckResult[];
 
   test("a skip carrying only the required fields renders instead of throwing", () => {
-    expect(() => renderReport(skipOnly, { scenario: "pre-pr" })).not.toThrow();
-    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    expect(() => renderReport(skipOnly, { scenario: "nightly" })).not.toThrow();
+    const md = renderReport(skipOnly, { scenario: "nightly" });
     expect(md).toContain("⊘ SKIP");
     expect(md).toContain("**Overall: ✅ PASS**");
   });
 
   test("missing durationMs renders 0.0s, never NaNs — in the row and in the total", () => {
-    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    const md = renderReport(skipOnly, { scenario: "nightly" });
     expect(md).not.toContain("NaN");
     expect(md).toContain("| 0.0s |");
     expect(md).toContain("(0.0s total)");
   });
 
   test("a skip reason surfaces in the row so ⊘ SKIP always says why", () => {
-    const md = renderReport(skipOnly, { scenario: "pre-pr" });
+    const md = renderReport(skipOnly, { scenario: "nightly" });
     expect(md).toContain("gh not available — cannot read the mirror");
   });
 
   test("a sibling check's real results survive alongside a field-less skip", () => {
-    const md = renderReport([...skipOnly, ...results], { scenario: "pre-pr" });
+    const md = renderReport([...skipOnly, ...results], { scenario: "nightly" });
     expect(md).toContain("| Build | ✅ PASS |");
     expect(md).toContain("(1.2s total)");
   });
 
   // ⏱ wall clock. `total` is the SUM of per-check durations and always has been;
-  // `wallMs` is the gate process's real elapsed time, which additionally covers
+  // `wallMs` is the verification process's real elapsed time, which additionally covers
   // broker queueing and git work. Both are shown because the GAP between them is
   // the diagnostic — a round that waited four minutes for another runner's lease
   // is otherwise indistinguishable from one that started instantly.
   test("omits the wall clock when it was not measured (byte-identical to before)", () => {
-    expect(renderReport(results, { scenario: "pre-pr" })).toContain("(1.2s total)");
+    expect(renderReport(results, { scenario: "nightly" })).toContain("(1.2s total)");
   });
 
   test("shows the wall clock beside the checks total when measured", () => {
-    const md = renderReport(results, { scenario: "pre-pr", wallMs: 5000 });
+    const md = renderReport(results, { scenario: "nightly", wallMs: 5000 });
     expect(md).toContain("(1.2s total · 5.0s wall)");
     expect(md).not.toContain("NaN");
   });
 
   test("a wall clock far above the checks total still renders both (the queueing case)", () => {
-    expect(renderReport(results, { scenario: "pre-pr", wallMs: 254000 })).toContain(
+    expect(renderReport(results, { scenario: "nightly", wallMs: 254000 })).toContain(
       "(1.2s total · 254.0s wall)",
     );
   });
@@ -203,8 +203,8 @@ describe("renderReport totality (#2734 — a check's missing optional field must
     const bare = [
       { check: "native", title: "Native", pass: true, blocking: false, skipped: true },
     ] as CheckResult[];
-    expect(() => renderReport(bare, { scenario: "pre-pr" })).not.toThrow();
-    expect(renderReport(bare, { scenario: "pre-pr" })).toContain("| — |");
+    expect(() => renderReport(bare, { scenario: "nightly" })).not.toThrow();
+    expect(renderReport(bare, { scenario: "nightly" })).toContain("| — |");
   });
 
   // Found by adversarially fuzzing the renderer while fixing #2734: `null` is not
@@ -213,15 +213,15 @@ describe("renderReport totality (#2734 — a check's missing optional field must
     const nulled = [
       { check: "a", title: "A", pass: true, blocking: false, skipped: true, stats: null },
     ] as unknown as CheckResult[];
-    expect(() => renderReport(nulled, { scenario: "pre-pr" })).not.toThrow();
-    expect(renderReport(nulled, { scenario: "pre-pr" })).not.toContain("NaN");
+    expect(() => renderReport(nulled, { scenario: "nightly" })).not.toThrow();
+    expect(renderReport(nulled, { scenario: "nightly" })).not.toContain("NaN");
   });
 
   test("a NaN durationMs renders 0.0s, not NaNs", () => {
     const nan = [
       { check: "b", title: "B", pass: true, blocking: true, durationMs: NaN, stats: {} },
     ] as CheckResult[];
-    expect(renderReport(nan, { scenario: "pre-pr" })).not.toContain("NaN");
+    expect(renderReport(nan, { scenario: "nightly" })).not.toContain("NaN");
   });
 
   test("an empty skip reason still reads as SKIP, never as PASS", () => {
@@ -229,14 +229,14 @@ describe("renderReport totality (#2734 — a check's missing optional field must
     const blank = [
       { check: "c", title: "C", pass: true, blocking: false, skipped: "" },
     ] as CheckResult[];
-    expect(renderReport(blank, { scenario: "pre-pr" })).toContain("⊘ SKIP");
+    expect(renderReport(blank, { scenario: "nightly" })).toContain("⊘ SKIP");
   });
 
   test("a reason containing | is escaped so it cannot forge a table column", () => {
     const piped = [
       { check: "d", title: "D", pass: true, blocking: false, skipped: "cmd a | b failed" },
     ] as CheckResult[];
-    const row = renderReport(piped, { scenario: "pre-pr" })
+    const row = renderReport(piped, { scenario: "nightly" })
       .split("\n")
       .find((l) => l.startsWith("| D |")) as string;
     expect(row).toContain("cmd a \\| b failed");
@@ -247,7 +247,7 @@ describe("renderReport totality (#2734 — a check's missing optional field must
     const huge = [
       { check: "e", title: "E", pass: true, blocking: false, skipped: "x".repeat(50_000) },
     ] as CheckResult[];
-    expect(renderReport(huge, { scenario: "pre-pr" }).length).toBeLessThan(1_000);
+    expect(renderReport(huge, { scenario: "nightly" }).length).toBeLessThan(1_000);
   });
 });
 
@@ -264,7 +264,7 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
         rawFull: "a".repeat(100),
       },
     ];
-    const md = renderReport(results, { scenario: "pre-pr", sha: "deadbeef123" });
+    const md = renderReport(results, { scenario: "nightly", sha: "deadbeef123" });
     expect(md).toContain("### Full Logs");
     expect(md).toContain("<details>");
 
@@ -309,7 +309,7 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
         logPath: ".verify/deadbeef.build.log",
       },
     ];
-    const md = renderReport(withPath, { scenario: "pre-pr", sha: "deadbeef123" });
+    const md = renderReport(withPath, { scenario: "nightly", sha: "deadbeef123" });
     expect(md).toContain("### Full Logs");
     expect(md).toContain("`.verify/deadbeef.build.log`");
     expect(md).not.toContain("<details>");
@@ -320,7 +320,7 @@ describe("trimFullLogsSection (#1922 — comment-filter work-budget retry)", () 
     const results: CheckResult[] = [
       { check: "build", title: "Build", pass: true, blocking: true, durationMs: 1000, stats: {} },
     ];
-    const md = renderReport(results, { scenario: "pre-pr" });
+    const md = renderReport(results, { scenario: "nightly" });
     expect(md).not.toContain("### Full Logs");
     expect(trimFullLogsSection(md)).toBe(md);
   });
@@ -486,7 +486,7 @@ describe("run() color env (#4591 — FORCE_COLOR must not leak into gh JSON.pars
   });
 });
 
-describe("run() timeoutMs (#2054 — a stuck subprocess must not hang pre-pr.ts forever)", () => {
+describe("run() timeoutMs (#2054 — a stuck subprocess must not hang a caller forever)", () => {
   test("kills a hung command at timeoutMs and reports code 124 + timedOut:true", () => {
     const start = Date.now();
     const r = run("sleep 999", {}, undefined, 300);
@@ -713,13 +713,6 @@ describe("run() job-control leak (#6090 — batch and solo must share a colour)"
     expect(r.code).toBe(0);
     expect(r.out.trim()).toBe("hi\n[1] not a job status");
   });
-
-  test("accept-path ratchet: #5067 arm 1 still lives in scenario.test.ts", () => {
-    const src = readFileSync(join(import.meta.dir, "scenario.test.ts"), "utf8");
-    expect(src).toContain("arm 1 (accept): a full scenario PASS is still a gate token");
-    expect(src).toContain("arm 1 survives a partial run afterwards");
-    expect(src).toContain("partial verification is not a gate token (#5067)");
-  });
 });
 
 /**
@@ -734,10 +727,10 @@ describe("redactPublicEvidencePaths (#6401 — no home dir on a public comment)"
   const TREE = "/Users/robmao/.arc-workers/trees/aside-1464";
   const HOST = "/Users/robmao/work/arcblock/aside/.git";
   const RECORD =
-    "/Users/robmao/work/arcblock/aside/.git/agentloop/verification/f4a7c31abc/pre-pr/4341d87def/by-location/aside-1464-8a33c01eac9f";
+    "/Users/robmao/work/arcblock/aside/.git/agentloop/verification/f4a7c31abc/nightly/4341d87def/by-location/aside-1464-8a33c01eac9f";
   const SHA = "f4a7c31abcdeadbeefcafef00d";
 
-  const origin = `> 📍 **Produced at** — tree \`${TREE}\` · host clone \`${HOST}\` · scenario \`pre-pr\` · base \`${SHA}\``;
+  const origin = `> 📍 **Produced at** — tree \`${TREE}\` · host clone \`${HOST}\` · scenario \`nightly\` · base \`${SHA}\``;
   const reused =
     `> ℹ **Reused evidence** — produced by an earlier run at a sibling location in this git common-dir store, under the ` +
     "same declared capabilities, for this same commit — not by the invocation that delivered it.\n" +
@@ -758,7 +751,7 @@ describe("redactPublicEvidencePaths (#6401 — no home dir on a public comment)"
     expect(leak(out)).toBe(false);
     expect(out).toContain("tree `aside-1464`");
     expect(out).toContain("host clone `<repo>/.git`");
-    expect(out).toContain("scenario `pre-pr`");
+    expect(out).toContain("scenario `nightly`");
     expect(out).toContain(`base \`${SHA}\``);
     expect(out).toContain("📍 **Produced at**");
   });
@@ -792,10 +785,10 @@ describe("redactPublicEvidencePaths (#6401 — no home dir on a public comment)"
 
   test("accept: host clone `unknown` and non-path backticks are left alone", () => {
     const line =
-      "> 📍 **Produced at** — tree `/tmp/tree` · host clone `unknown` · scenario `pre-pr` · base `abc`";
+      "> 📍 **Produced at** — tree `/tmp/tree` · host clone `unknown` · scenario `nightly` · base `abc`";
     const out = redactPublicEvidencePaths(line);
     expect(out).toContain("host clone `unknown`");
-    expect(out).toContain("scenario `pre-pr`");
+    expect(out).toContain("scenario `nightly`");
     expect(out).toContain("tree `tree`");
     expect(out).not.toContain("`/tmp/tree`");
   });
@@ -826,7 +819,7 @@ describe("redactPublicEvidencePaths (#6401 — no home dir on a public comment)"
   });
 
   test("renderReport still embeds the caller-supplied origin verbatim (local stdout keeps full paths)", () => {
-    const md = renderReport(results, { scenario: "pre-pr", origin });
+    const md = renderReport(results, { scenario: "nightly", origin });
     expect(md).toContain(TREE);
     expect(md).toContain("/Users/robmao");
   });
@@ -870,13 +863,13 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
     // Mutation: `const ok = passed(results)` inside renderReport → this is red.
     expect(passed(foreignFlaky)).toBe(false);
     expect(deriveResult(foreignFlaky)).toBe("FAIL");
-    const md = renderReport(foreignFlaky, { scenario: "pre-pr", derived: "PASS" });
+    const md = renderReport(foreignFlaky, { scenario: "nightly", derived: "PASS" });
     expect(overall(md)).toBe("✅ PASS");
     expect(md).not.toContain("**Overall: ❌ FAIL**");
   });
 
   test("恢复: same fixture keeps the foreign row red — attribution is not a wash", () => {
-    const md = renderReport(foreignFlaky, { scenario: "pre-pr", derived: "PASS" });
+    const md = renderReport(foreignFlaky, { scenario: "nightly", derived: "PASS" });
     expect(md).toMatch(/\| Tests \(root: scripts\) \| ❌ FAIL \|/);
     expect(md).toContain("passed=3766 failed=1");
     expect(md).toContain("### Failures");
@@ -886,14 +879,14 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
   });
 
   test("ACCEPT: a real in-diff FAIL still renders Overall FAIL when derived is FAIL", () => {
-    const md = renderReport(foreignFlaky, { scenario: "pre-pr", derived: "FAIL" });
+    const md = renderReport(foreignFlaky, { scenario: "nightly", derived: "FAIL" });
     expect(overall(md)).toBe("❌ FAIL");
     expect(md).toMatch(/\| Tests \(root: scripts\) \| ❌ FAIL \|/);
   });
 
   test("ACCEPT: omitting derived on a real FAIL is still Overall FAIL (legacy unit-test shape)", () => {
-    const supplied = renderReport(foreignFlaky, { scenario: "pre-pr", derived: "FAIL" });
-    const omitted = renderReport(foreignFlaky, { scenario: "pre-pr" });
+    const supplied = renderReport(foreignFlaky, { scenario: "nightly", derived: "FAIL" });
+    const omitted = renderReport(foreignFlaky, { scenario: "nightly" });
     expect(overall(omitted)).toBe("❌ FAIL");
     expect(omitted).toBe(supplied);
   });
@@ -908,8 +901,8 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
       stats: { timedOut: "true", failed: 0 },
     };
     expect(deriveResult([timeoutRow])).toBe("TIMEOUT");
-    const supplied = renderReport([timeoutRow], { scenario: "pre-pr", derived: "TIMEOUT" });
-    const omitted = renderReport([timeoutRow], { scenario: "pre-pr" });
+    const supplied = renderReport([timeoutRow], { scenario: "nightly", derived: "TIMEOUT" });
+    const omitted = renderReport([timeoutRow], { scenario: "nightly" });
     expect(supplied).toBe(omitted);
     expect(overall(supplied)).toBe("⏱️ BUDGET");
     expect(supplied).toContain("| Tests (affected) | ⏱️ BUDGET |");
@@ -917,8 +910,8 @@ describe("renderReport Overall follows derived, not the row sum (#6197)", () => 
   });
 
   test("误拦: green rows + derived PASS (PARTIAL's underlying derived) stay Overall PASS", () => {
-    const supplied = renderReport(results, { scenario: "pre-pr", derived: "PASS" });
-    const omitted = renderReport(results, { scenario: "pre-pr" });
+    const supplied = renderReport(results, { scenario: "nightly", derived: "PASS" });
+    const omitted = renderReport(results, { scenario: "nightly" });
     expect(supplied).toBe(omitted);
     expect(overall(supplied)).toBe("✅ PASS");
     expect(supplied).not.toMatch(/\*\*Overall:[^*]*PARTIAL/);

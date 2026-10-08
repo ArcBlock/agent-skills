@@ -226,12 +226,12 @@ fi
 
 RAW_URL="https://raw.githubusercontent.com/${ASSETS_REPO}/main/${ASSET_PATH}"
 
-# ── Anonymous-reachability + content-type gate (exit 4) ──
+# ── Anonymous-reachability + content-type check (exit 4) ──
 # GitHub's camo proxy fetches embedded media WITHOUT credentials, so an upload only visible when
 # authenticated renders broken for every reader. AND the bytes must be real media, not corrupted: a
 # double base64-encode (the #1079 MCP-file-write corruption) yields HTTP 200 but content-type text/*
 # (an ASCII string). GitHub serves images as image/* but video / unclassified binaries often as
-# application/octet-stream, so the gate is permissive on TYPE, strict on the one corruption
+# application/octet-stream, so the check is permissive on TYPE, strict on the one corruption
 # signature: reachable AND not text/*. Retries absorb post-commit CDN propagation lag.
 CODE=000; CT=""
 for wait in 1 2 3 5 8; do
@@ -242,7 +242,7 @@ for wait in 1 2 3 5 8; do
   # Accept ANY real binary media type, reject only text/*. GitHub raw serves images as image/* but
   # video (and binaries it can't classify) often as application/octet-stream — NOT video/* (measured:
   # a .webm came back application/octet-stream). The one thing the #1079 double-base64 corruption
-  # produces is text/* (an ASCII string). So the honest gate is "reachable AND not text/*".
+  # produces is text/* (an ASCII string). So the honest check is "reachable AND not text/*".
   [[ "$CODE" == "200" && -n "$CT" && "$CT" != text/* ]] && break
   sleep "$wait"
 done

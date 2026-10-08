@@ -170,30 +170,26 @@ bun <plugin_root>/skills/issue-graph/scripts/graph-scan.ts --window-hours 24
 - **逐条验收** —— mutation pair 的两臂都写出来（弄坏 → 必须红；恢复 → 必须绿）
 - **误拦一侧** —— 若本 epic 在修「假红」，必须要求配一条证明真红仍红的测试
 - **round 上限 3**（第二轮警告，第三轮未收敛即停机挂起并 @ 人）
-- **flake 处置** —— 看到红先查机器负载，别盲目重跑整条闸
+- **flake 处置** —— 看到红先找根因，别盲目重跑
 - **scrum 派工** —— 成员由 agent **自认领**（`claimed_by`），不是 `assigned_to`
-- **成本闸四问** —— 见下。epic 是本 skill **唯一**的写出物，也是工厂里最贵的一种工作项，
-  所以开 epic 这一步在 `scripts/lint-issue-cost-gate.ts` 的 `ISSUE_OPENING_ROUTINES`
-  里申报为 `gated`（不是豁免：它没有 env / 窄标签凭据，也不该有）。
+- **成本四问** —— 见下。epic 是本 skill **唯一**的写出物，也是工厂里最贵的一种工作项。
 
 正文里必须带这一段并**如实填写**：
 
 ```markdown
-<!-- cost-gate -->
 - substrate: no — <换个地基为什么不会自动消失：给一个与地基无关的凭据（文件路径 / 复现命令 / #issue / SHA）>
 - duty-log: no — <为什么这是一个工作项，而不是「本轮跑了什么、看到什么」的叙事>
 - normal-state: no — <为什么这个状态是故障而不是正常态：干净机器上、清理之后也这样吗>
-- cheaper-rung: <lint-rule|pre-pr-check|pr-template|doc|config|none-cheaper> — <便宜一档的解法是什么，为什么不够>
+- cheaper-rung: <lint-rule|pre-commit-check|pr-template|doc|config|none-cheaper> — <便宜一档的解法是什么，为什么不够>
 ```
 
-⚠️ 无人值守时，四问缺段落或原样复制占位符**不会被 hook 拦住**。这一段要自己守。
-When comparing how hard each enforcement face is, read [reference/cost-gate.md](reference/cost-gate.md).
+⚠️ 没有任何脚本替你检查这四问；缺段落或原样复制占位符都是你自己的缺陷。
 
 ### 一个 epic 的四问答的是**这一簇**，不是某一条成员
 
 - `substrate` 的凭据用簇内最具体的那条落点（Step 2 定位出来的文件路径），
   不要用症状描述——「换个地基就消失」的那一类恰恰是本 skill 最容易聚出来的假簇。
-- `cheaper-rung` 问的是「这一簇能不能被**一条 lint / 一个 pre-pr 检查**一次性覆盖」。
+- `cheaper-rung` 问的是「这一簇能不能被**一条 lint / 一个 pre-commit 检查 / 一条 nightly 检查**一次性覆盖」。
   能，就**不该形成 epic**——去写那条 lint，那比派 N 个 agent 便宜一整个量级。
   这一问因此不是手续——它问的正是「这一簇到底该不该以 epic 的形态存在」。
 
@@ -250,7 +246,7 @@ When changing a source adapter, or when asking why the abstraction is an efficie
 
 ## 埋点
 
-沿用 `sweep-trace`，`gate` 取 `cluster`，`val` 取
+沿用 `sweep-trace`，`step` 取 `cluster`，`val` 取
 `epic-formed` / `unproven-blocked` / `no-cluster`。dry-run 不发 comment、不附 trace。
 
 ## 一句话心智模型

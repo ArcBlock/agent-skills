@@ -1,6 +1,6 @@
-# Execute a phase — layer walkthroughs, gates, and prompts
+# Execute a phase — layer walkthroughs, requirements, and prompts
 
-> On-demand detail for build-phases Step 2 (and the phase diagram). Layer 1 still runs **scoped per phase, the repo gate once at the end** — that rule is in `SKILL.md`. Read this when executing a phase.
+> On-demand detail for build-phases Step 2 (and the phase diagram). Layer 1 still runs **scoped per phase** — that rule is in `SKILL.md`. Read this when executing a phase.
 
 ## How It Works
 
@@ -21,7 +21,7 @@ For each phase in `tasks.md`:
 │     Layer 2: Start service, send real requests        │
 │            → write raw afs_exec output to            │
 │            planning/<dir>/logs/s{N}-e2e.log          │
-│            (HARD GATE — phase NOT done without it)   │
+│            (HARD REQUIREMENT — phase NOT done without it)   │
 │     Layer 3: Adversarial — break it intentionally    │
 │     → ALL must pass, or go back to 1                 │
 │                                                      │
@@ -105,28 +105,22 @@ Read the phase spec carefully. Follow TDD strictly:
 
 This is the critical step. Do NOT skip any layer.
 
-**Layer 1: Static — scoped per phase, the repo gate once at the end**
+**Layer 1: Static — scoped per phase**
 ```bash
 <package_manager> build
 <package_manager> check-types
 <package_manager> --filter <affected-packages> test    # the packages this phase touched
 ```
 - Compare the affected packages' pass count with the previous phase; if it decreased → FAIL
-- **Do not run the full test suite (`<package_manager> test`) every phase.** The
-  cross-package closure is the repo gate's and the post-merge catch-net's job, not a
-  per-phase cost (arc: the full suite is ~230 test tasks). After the **last** phase —
-  and after the phase-level review findings are fixed — run the repo gate **once**:
-  `<verification_entry>` (arc: `pre-pr`, the L0 gate: scoped tests plus one dependent
-  layer, measured numbers). Its PASS is the evidence the PR carries; do not substitute a
-  raw `<package_manager> test` for it (a raw run has no measured report).
-- `TIMEOUT` with `failed=0` on that gate → re-run once with the repo's raise-only timeout
-  override (arc: `ARC_VERIFY_TEST_TIMEOUT_MS`) and state the value; never when `failed>0`.
+- **Do not run the full test suite (`<package_manager> test`).** The cross-package
+  closure is nightly's job on the default branch (arc: the full suite is ~230 test tasks).
+  The PR carries the affected packages' exact test command and counts.
 
 **Layer 2: Dynamic — Actually run the feature (E2E, not just unit tests)**
 
 **MANDATORY:** Follow the `### E2E Verification (mandatory)` table from tasks.md for this phase. If the table doesn't exist, STOP and escalate — every phase must have one.
 
-#### HARD GATE: E2E log file
+#### HARD REQUIREMENT: E2E log file
 
 **Phase cannot be marked `done` unless `<planning-dir>/logs/s{N}-e2e.log` exists AND contains the raw afs_exec output.**
 
@@ -204,7 +198,7 @@ Choose additional verification based on change type:
 | **CLI** | Run CLI commands, verify stdout/exit code |
 | **Refactoring** | Layer 1 sufficient — Layer 2 = verify one happy path via AFS MCP |
 
-**OUTPUT THE ACTUAL TOOL CALL RESULTS.** Paste the `afs_read` / `afs_list` / `afs_exec` responses. Do not just say "verified via AFS". Show the JSON. These same outputs must also land in `<planning-dir>/logs/s{N}-e2e.log` (see HARD GATE above).
+**OUTPUT THE ACTUAL TOOL CALL RESULTS.** Paste the `afs_read` / `afs_list` / `afs_exec` responses. Do not just say "verified via AFS". Show the JSON. These same outputs must also land in `<planning-dir>/logs/s{N}-e2e.log` (see HARD REQUIREMENT above).
 
 **Layer 3: Adversarial — Try to break it**
 Try at least ONE of:
@@ -232,7 +226,7 @@ git commit -m "phase N: implement <description>"
 `<planning-dir>/.build-logs/`、`.build-progress*.json` 都已被 `.gitignore` 覆盖——它们是本地证据/状态，
 不是交付物。规则：
 - 只 `git add <specific-files>`，绝不 `git add -A` / `git add .`；
-- 绝不 `git add -f` 强加被 ignore 的 log——E2E hard gate 验证的是文件**存在于本地**，不要求入库；
+- 绝不 `git add -f` 强加被 ignore 的 log——E2E hard requirement 验证的是文件**存在于本地**，不要求入库；
   design review 的 reviewer 直接读本地文件。
 - **改了依赖 → lockfile 必须一起 add。** "specific files" **包含**本次连带产生的改动:改了 `package.json` 的依赖后,安装会更新 `<package_manager>` 的 lockfile(如 `pnpm-lock.yaml`/`package-lock.json`/`yarn.lock`);只提 manifest 不提 lockfile → 两者不一致,别处 / 后续 phase / 其他 agent 的 `<package_manager> install --frozen-lockfile` 直接红。**commit 前先 `git status` 扫连带改动:**
   - 本次动了依赖、lockfile 有对应 diff → 一起 `git add <lockfile>`(`git diff` 确认 diff 只含你增删的包,scoped);
@@ -263,7 +257,7 @@ git commit -m "phase N: simplify"
 
 #### 2.6 DESIGN REVIEW（parent 负责，不在 executor 内）
 
-收到 executor 完成通知并通过 E2E log gate 后，**parent** launch 一个 clean-context review agent（与 /agentloop:design-review 同模式）。审查者与实现者是不同的 agent——独立性是设计要求：NOT APPROVED 时 parent 把 review 发现写进 respawn prompt 重派 executor 修复，而不是 reviewer 自己修。Review prompt:
+收到 executor 完成通知并通过 E2E log check 后，**parent** launch 一个 clean-context review agent（与 /agentloop:design-review 同模式）。审查者与实现者是不同的 agent——独立性是设计要求：NOT APPROVED 时 parent 把 review 发现写进 respawn prompt 重派 executor 修复，而不是 reviewer 自己修。Review prompt:
 
 ```
 你是一个独立的代码审查者。检查 Phase {N} 的实现是否符合 spec。
@@ -304,7 +298,7 @@ Output phase completion summary:
 **Commits:** {hash1} (implement), {hash2} (simplify)
 ```
 
-The E2E log line is **required** — omitting it (or pointing at a missing/empty file) means the phase did not pass the hard gate.
+The E2E log line is **required** — omitting it (or pointing at a missing/empty file) means the phase did not pass the hard requirement.
 
 ### Step 3: Final report after all phases
 
@@ -315,5 +309,5 @@ The E2E log line is **required** — omitting it (or pointing at a missing/empty
 **Phases completed:** {N} / {total}
 **Total test count:** {before} → {after}
 **All phases:** PASSED
-**Repo gate (once, after the last phase):** `<verification_entry>` → {PASS/FAIL} @ {sha7} (report path)
+**Tests:** `<affected-package test command>` → {pass}/{fail} @ {sha7}
 ```

@@ -18,7 +18,7 @@
 > 重入恢复弥补这一点。
 
 **双驱动模型：**
-1. **通知驱动（主）** — executor agent 结束时 parent 自动被 task-notification 唤醒，立即走状态机（验 gate → review → 推进/重派）
+1. **通知驱动（主）** — executor agent 结束时 parent 自动被 task-notification 唤醒，立即走状态机（验 E2E log → review → 推进/重派）
 2. **Wakeup 兜底（辅）** — `ScheduleWakeup(1800s)` 防 executor 卡死不退出（通知永远不来）的情况：醒来读 heartbeat，stale 则 `TaskStop` + respawn
 
 **为什么这样做：**
@@ -43,8 +43,8 @@
 | 条件 | 动作 |
 |------|------|
 | `completed_phases.length === total_phases` | **全部完成** — 输出 final report、删 progress 文件、不 reschedule |
-| `executor_status === "done"` 且 **gate 全过 + review approved** 且还有 phase 未完成 | **链条推进** — `current_phase` +1，spawn 下一个 phase 的 executor，reschedule 兜底 tick |
-| `executor_status === "done"` 但 parent 守门未跑 | **守门** — parent 亲自跑 E2E log gate（存在/非空/含 JSON/无 deferred 自白），过 → 发 clean-context review agent；review approved → 推进；NOT APPROVED → 把 review 发现写进 respawn prompt，respawn 修复（计 respawn_count） |
+| `executor_status === "done"` 且 **检查全过 + review approved** 且还有 phase 未完成 | **链条推进** — `current_phase` +1，spawn 下一个 phase 的 executor，reschedule 兜底 tick |
+| `executor_status === "done"` 但 parent 守门未跑 | **守门** — parent 亲自跑 E2E log check（存在/非空/含 JSON/无 deferred 自白），过 → 发 clean-context review agent；review approved → 推进；NOT APPROVED → 把 review 发现写进 respawn prompt，respawn 修复（计 respawn_count） |
 | `executor_status === "running"` 且 heartbeat < 30 min | **一切正常** — 什么都不做，reschedule 兜底 tick |
 | `executor_status === "running"` 且 heartbeat stale ≥ 30 min | **卡死** — `TaskStop` 旧 executor、`executor_respawn_count` +1、respawn 当前 phase，reschedule |
 | executor 的 task-notification 显示 agent 死亡/出错（或 `executor_status === "error"`） | **显式失败** — 读 `executor_error`；`E2E_LOG_*` 类 → escalation 停止 loop；spec 歧义/需外部操作 → 停止 loop；其余 respawn 并 reschedule |
@@ -111,7 +111,7 @@
    ```
 2. 读 `tasks.md`，跑当前 phase 的 implement→verify→commit→simplify→re-verify→commit 流程（Section 2.1-2.5。**design review 不归 executor**——parent 在收到完成通知后亲自派发独立 reviewer）
 3. 每完成一个 sub-task：更新 `executor_last_heartbeat` + `executor_current_task`，并向 `<planning-dir>/.build-logs/phase-N.log` append 一行 `▸ <sub-task>`（用户 tail -f 的进度面板）
-4. **E2E log gate 自检（必做，在写 `done` 之前）**：确认 `<planning-dir>/logs/s{N}-e2e.log` 存在、非空、含 JSON 形输出、无 deferred 自白（out-of-scope/deferred/skipped/will be done later）。不满足 → 写 `executor_status: "error"` + `executor_error: {reason: E2E_LOG_MISSING|E2E_LOG_NO_JSON|E2E_LOG_HAS_DEFERRED, detail}` 并结束。parent 还会复检一遍——自检是为了少跑一轮 respawn
+4. **E2E log check 自检（必做，在写 `done` 之前）**：确认 `<planning-dir>/logs/s{N}-e2e.log` 存在、非空、含 JSON 形输出、无 deferred 自白（out-of-scope/deferred/skipped/will be done later）。不满足 → 写 `executor_status: "error"` + `executor_error: {reason: E2E_LOG_MISSING|E2E_LOG_NO_JSON|E2E_LOG_HAS_DEFERRED, detail}` 并结束。parent 还会复检一遍——自检是为了少跑一轮 respawn
 5. Phase 完成 → 更新：
    ```json
    {
@@ -181,7 +181,7 @@ Agent(
     Rules:
     - After each sub-task: update executor_last_heartbeat + executor_current_task,
       and append "▸ <sub-task>" to {planning-dir}/.build-logs/phase-{N}.log
-    - E2E HARD GATE self-check before flipping to "done": logs/s{N}-e2e.log
+    - E2E HARD REQUIREMENT self-check before flipping to "done": logs/s{N}-e2e.log
       exists, non-empty, contains JSON-shaped afs output, no deferred-work
       admissions. Fail → executor_status: "error" + executor_error{reason,detail}.
     - On success update progress JSON: executor_status "done", append {N} to
@@ -223,7 +223,7 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 #### Branch A: Init Mode
 
-**0a. Design Review Gate:**
+**0a. Design Review Check:**
 - Check if the planning directory has a recent design review result
 - If no review on record, or last review was < 95% → **STOP. Run `/agentloop:design-review` first.**
 
@@ -257,7 +257,7 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 **0a'. Output the Watchdog Tick Report** (see Rule 4) — mandatory even for `WAIT` action. The user needs to see the watchdog is alive every tick.
 
-**0b. Take at most ONE action:** spawn / gate+review / respawn (`TaskStop` the stale executor first) / stop. Do not run the phase implementation in the current session — the only "work" the parent does directly is the E2E log gate check (bash) and dispatching the clean-context review agent.
+**0b. Take at most ONE action:** spawn / check+review / respawn (`TaskStop` the stale executor first) / stop. Do not run the phase implementation in the current session — the only "work" the parent does directly is the E2E log check check (bash) and dispatching the clean-context review agent.
 
 **0c. If task not complete** → call `ScheduleWakeup(delaySeconds: 1800, prompt: "/loop /agentloop:build-phases <planning-dir>", reason: "fallback watchdog tick for phase <N>")`.
 
@@ -265,4 +265,4 @@ Read `<planning-dir>/.build-progress.json`. If it does not exist → **Branch A 
 
 **0e. If escalation** (`executor_respawn_count ≥ 3` on same phase, or `executor_status === "error"` with unresolvable `executor_error.reason`) → output the escalation report format (see Escalation Rules), **do not reschedule**, wait for user input.
 
-**NEVER write implementation code in either branch.** Spawning is the only way implementation happens. The parent's own hands-on work is limited to: progress-file bookkeeping, the E2E log gate (bash), dispatching the review agent, and fixing nothing — review findings go back to a respawned executor.
+**NEVER write implementation code in either branch.** Spawning is the only way implementation happens. The parent's own hands-on work is limited to: progress-file bookkeeping, the E2E log check (bash), dispatching the review agent, and fixing nothing — review findings go back to a respawned executor.

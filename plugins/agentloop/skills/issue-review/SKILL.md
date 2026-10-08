@@ -9,7 +9,7 @@ description: >-
 # Issue Review — AI Agent Review / Audit for Doc-from-Issue
 
 > **Repo profile — read `.claude/repo-profile.md` first.** This skill is repo-agnostic;
-> **arc is the reference implementation.** Use the profile's `repo_slug`, `verification_entry`,
+> **arc is the reference implementation.** Use the profile's `repo_slug`, `package_manager` / `test_runner`,
 > `kb_issue`, `plugin_root` (where issue-graph's scripts live), and toolchain wherever this doc shows an arc default. Arc's own provenance
 > for the lessons below is not inlined here (fuller case narratives, where they exist, are under `.claude/case-law/`).
 
@@ -122,7 +122,7 @@ status 只用受控 5 类(见 reference);存量审计只改 frontmatter `status`
 │  5. 出结论:逐条验证表 + 测试结果 + gap + 推荐 status,带证据  │
 │                                                             │
 │ 5.5 能给安全默认就别升级(needs-human-confirm 硬前置)         │
-│ 5.7 沉默闸:agent 自发 + 无动作无新信息 → 本条不发,只记账    │
+│ 5.7 沉默规则:agent 自发 + 无动作无新信息 → 本条不发,只记账    │
 │                                                             │
 │  6. 落 comment(中文),挂 status(+ 真分叉才挂                │
 │     needs-human-confirm);不 close、不删文件、不改 frontmatter│
@@ -167,7 +167,7 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 
 ### Step 4 — ★ 真跑测试(doc-audit / 验收点名的验证)
 
-找到相关测试,**真的跑**,把确切命令 + 真实 pass/fail 计数记进结论(单条 doc-audit claim 只跑那一个 targeted 测试)。验收 / human 点名了验证时:结构门控走 `/agentloop:verification`(`<verification_entry>`,数字由脚本测、**不手填**);点名的集成 e2e 走 `/e2e-verify`(`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`;`<dev_server_edge>` 是本地环境,永远不算「跑不动」)。缺依赖 = 多一步 setup。只有 repo profile **Deployment Environments** 所列工具链真缺且已撞墙才算跑不动:贴确切命令 + 报错,显式标注跳过了哪一层。**不拿 unit test 顶替点名的 e2e,不假装跑过。**
+找到相关测试,**真的跑**,把确切命令 + 真实 pass/fail 计数记进结论(单条 doc-audit claim 只跑那一个 targeted 测试)。验收 / human 点名了验证时:跑改动包的测试(`<package_manager> --filter <pkg> test`,贴确切命令 + 计数,**不手填**);点名的集成 e2e 走 `/e2e-verify`(`<cli_binary>` 缺/陈旧先跑 `<cli_setup_command>`;`<dev_server_edge>` 是本地环境,永远不算「跑不动」)。缺依赖 = 多一步 setup。只有 repo profile **Deployment Environments** 所列工具链真缺且已撞墙才算跑不动:贴确切命令 + 报错,显式标注跳过了哪一层。**不拿 unit test 顶替点名的 e2e,不假装跑过。**
 
 逐条展开与反例: Read [reference/verification.md](reference/verification.md).
 
@@ -183,11 +183,11 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 
 打 `needs-human-confirm` 标之前先问一遍:**我能不能说出一个安全默认动作?** 能 → 禁止升级,当场按 ratchet(默认放行,出问题再收紧,同 [`pr-review` Step 5.5](../pr-review/SKILL.md))执行该动作并留 trace;不能,才是真判断题,才配打 `needs-human-confirm` 走 Step 6 的结构化拍板块。这条硬前置在**打标动作之前**过,不是打完标再补。
 
-### ★ Step 5.7 — 沉默闸:没有状态变化就不要发言(硬前置,在 Step 6 之前过)
+### ★ Step 5.7 — 沉默规则:没有状态变化就不要发言(硬前置,在 Step 6 之前过)
 
 **发 comment 前先答:这一轮让世界发生了什么变化?** 有动作(开 issue/PR、改 label)或有新信息 → 发;两者都没有 → **不发**,只进 run report。**只管 agent 自发的复核;对人类输入必须回应**(否则 round-awareness 认定未处理、每轮重跑)。
 
-适用面与边界细则: Read [reference/silence-gate.md](reference/silence-gate.md).
+适用面与边界细则: Read [reference/silence-rule.md](reference/silence-rule.md).
 
 ### Step 6 — 落 comment(产物归宿)
 用 `comment_language` 指定的正文语言写(arc 默认:中文),顶部标 AI 身份与读取/运行范围:
@@ -204,7 +204,7 @@ bash <agent_identity_script> --header "Audit" --skill issue-review
 runner 解析优先级、skills hash 语义、前缀谓词纪律见根 CLAUDE.md「Agent Comment 格式」。
 
 ```bash
-# ★ 先过 Step 5.7 沉默闸:agent 自发路径 + 无动作 + 无新信息 ⇒ 这三行一行都不跑。
+# ★ 先过 Step 5.7 沉默规则:agent 自发路径 + 无动作 + 无新信息 ⇒ 这三行一行都不跑。
 gh issue comment <n> --body-file <draft.md>                 # 新发现 = 新 comment
 gh issue comment <n> --edit-last --body-file <draft.md>     # 改写/补充既有结论(如翻译)= 原地编辑,不新发
 gh issue edit <n> --add-label "status:<x>"                  # needs-human-confirm 另说,见下
@@ -222,7 +222,7 @@ gh issue edit <n> --add-label "status:<x>"                  # needs-human-confir
   (camo 匿名视角;脚本已内置该抽查)——非 200 的 URL 内嵌必破图,禁止发出;③ **上传器两条通道都不可用
   (exit 2)时的确定性兜底是浏览器原生附件上传**(已登录 GitHub 的浏览器打开 issue/PR 评论框 → file
   chooser 附件 → GitHub 附件 CDN `user-attachments`/`user-images.githubusercontent.com` URL → 提交前
-  截图确认已渲染,不是破链接;完整步骤见 [`ui-verify` SKILL 的 Step 3](../../../../skills/ui-verify/SKILL.md)兜底小节)——
+  截图确认已渲染,不是破链接;用 `scripts/ui-shot/` 截图)——
   **不再有"MCP 直传"这条路**(旧文案已随 #1037 收编移除,MCP 二进制写会双重 base64 损坏,#1079)。
   **无论走哪条通道,上传/发布失败绝不能被写成"已完成验证"或"截图待处理"**——评论里必须显式标注
   "截图发布失败,证据缺失"(与 `ui-verify`/`pr-sweep` 的 `BLOCKED` 语义一致),不得用中性措辞掩盖。
@@ -234,7 +234,7 @@ gh issue edit <n> --add-label "status:<x>"                  # needs-human-confir
 
 ## Key Principles
 
-1. 先判轮次 + 按价值分档。2. human comment 是方向不是圣旨:没 cover 的真问题仍指出,多人冲突摆出来让人定。3. 产物落 issue,不落会话。4. 每条发现带可复现证据(`path:line` / 真实测试输出),无证据不写。5. 对照已落地实现第一优先,doc-audit 必须真跑测试。6. 价值在独立发现。7. 按后果可逆性划自主边界:comment/label/开 issue 自动做;删文件、搬目录、merge/close、改架构方向挂 `needs-human-confirm`;**绝不**自动 merge/close/删文件/改 frontmatter(唯一例外 = 父级 rollup)。8. 不另起炉灶,增量叠在已有真相源上。9. 不搬目录。10. 共享 KB 热启动。11. partial 剩余工作要拆,拆完即摘 label。12. 开工 acquire 锁,收尾 release。13. 验收点名的验证是契约:结构门控走 `/agentloop:verification`,点名 e2e 走 `/e2e-verify`;「跑不动」要贴确切报错先证明,不拿 unit test 顶替、不手填数字。15. 沉默闸 + ratchet 收尾。16. 产出方案时 grounding 同样严:现状断言 `path:line`、数字要么实测要么标注未验证、区分 as-is/proposed;post 前过 `/agentloop:design-review`。
+1. 先判轮次 + 按价值分档。2. human comment 是方向不是圣旨:没 cover 的真问题仍指出,多人冲突摆出来让人定。3. 产物落 issue,不落会话。4. 每条发现带可复现证据(`path:line` / 真实测试输出),无证据不写。5. 对照已落地实现第一优先,doc-audit 必须真跑测试。6. 价值在独立发现。7. 按后果可逆性划自主边界:comment/label/开 issue 自动做;删文件、搬目录、merge/close、改架构方向挂 `needs-human-confirm`;**绝不**自动 merge/close/删文件/改 frontmatter(唯一例外 = 父级 rollup)。8. 不另起炉灶,增量叠在已有真相源上。9. 不搬目录。10. 共享 KB 热启动。11. partial 剩余工作要拆,拆完即摘 label。12. 开工 acquire 锁,收尾 release。13. 验收点名的验证是契约:改动包的测试真跑,点名 e2e 走 `/e2e-verify`;「跑不动」要贴确切报错先证明,不拿 unit test 顶替、不手填数字。15. 沉默规则 + ratchet 收尾。16. 产出方案时 grounding 同样严:现状断言 `path:line`、数字要么实测要么标注未验证、区分 as-is/proposed;post 前过 `/agentloop:design-review`。
 
 每条的原因与事故来源: Read [reference/principles.md](reference/principles.md).
 
@@ -243,9 +243,9 @@ gh issue edit <n> --add-label "status:<x>"                  # needs-human-confir
 本 skill 发往 issue 的**每一条** comment(verdict / Research / Idea / 父级 rollup)末尾必须附:
 
 ```html
-<!-- sweep-trace: {"ver":1,"issue":N,"gate":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
+<!-- sweep-trace: {"ver":1,"issue":N,"step":"review","val":"<val>","run":"<ISO8601>","runner":"<runner>","skills":"<hash>"} -->
 ```
 
 它是 issue-sweep 轮次感知的机器标记(identity 头人和 agent 逐字节相同,不算标记);不带 trace 的评论会被当成未处理的人类输入,每轮重复处理。沉默轮(Step 5.7)不发 comment 也就没有 trace;人类触发的轮次必发、必带 trace。
 
-为什么是机器标记、与沉默闸的关系、val 取值: Read [reference/comment-format.md](reference/comment-format.md).
+为什么是机器标记、与沉默规则的关系、val 取值: Read [reference/comment-format.md](reference/comment-format.md).

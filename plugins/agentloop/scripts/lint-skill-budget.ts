@@ -31,13 +31,14 @@ import { dirname, join, resolve } from "node:path";
 export const BUDGETS: Record<string, number> = {
   "issue-review": 25_000, // ≤25 KB
   "issue-sweep": 22_000, // ≤22 KB
-  "pr-sweep": 20_000, // ≤20 KB
-  "pr-review": 20_000, // ≤20 KB
   "build-phases": 15_000, // ≤15 KB
-  "epic-conductor": 18_000, // ≤18 KB
-  land: 15_000, // ≤15 KB
   "design-review": 12_000, // ≤12 KB
   "issue-sweep-batch": 18_000, // issue says 瘦身; pinned at 18 KB (about 40% off the 30 KB body)
+  // arc#7729: the delivery loop lost its PR-time machinery; these four were rewritten short.
+  land: 8_000,
+  "epic-conductor": 7_000,
+  "pr-review": 7_000,
+  "pr-sweep": 7_000,
 };
 /** Cap for every other SKILL.md (the largest un-dieted skill was 16.2 KB at #7105). */
 export const DEFAULT_CAP = 17_000;

@@ -23,11 +23,22 @@ const BODY_5596_MEMBER = `26 个包声明的入口 build 后不存在。
 const BODY_NO_PATHS = `peer 应该自报：版本号、系统环境、git 服务、健康指数、网络信息。
 工厂不主动探测，peer 自己 publish。`;
 
-// 命令引用 ≠ 编辑目标
-const BODY_ONLY_CMD = `复现步骤：在干净 worktree 里跑 \`bun .claude/verify/pre-pr.ts\`，
+// 命令引用 ≠ 编辑目标（历史 issue 里引用的已删除 PR 期脚本）
+const BODY_NO_PATHS_2 = `复现步骤：在干净 worktree 里跑 \`bun .claude/verify/pre-pr.ts\`，
 再跑一次 \`bun .claude/verify/pre-merge.ts --comment 5083\`。`;
 
 describe("pathSurface", () => {
+  test("只出现历史 PR 期脚本的命令引用 → 不算落点，仍是 unproven", () => {
+    const s = pathSurface(BODY_NO_PATHS_2);
+    expect(s.files).toEqual([]);
+    expect(s.state).toBe("unproven");
+  });
+
+  test("ACCEPT：同目录下别的真实文件仍是落点（排除只认那两个命令引用）", () => {
+    const s = pathSurface("改 `.claude/verify/checks/check-tests.ts`");
+    expect(s.files).toContain(".claude/verify/checks/check-tests.ts");
+  });
+
   test("抽出正文里点名的文件，state=measured", () => {
     const s = pathSurface(BODY_5031);
     expect(s.state).toBe("measured");
@@ -39,13 +50,6 @@ describe("pathSurface", () => {
     const s = pathSurface(BODY_NO_PATHS);
     expect(s.state).toBe("unproven");
     expect(s.files).toEqual([]);
-  });
-
-  test("只出现 pre-pr / pre-merge 的命令引用 → 不算落点，仍是 unproven", () => {
-    const s = pathSurface(BODY_ONLY_CMD);
-    expect(s.files).not.toContain(".claude/verify/pre-pr.ts");
-    expect(s.files).not.toContain(".claude/verify/pre-merge.ts");
-    expect(s.state).toBe("unproven");
   });
 
   test("空正文 → unproven，不抛", () => {
@@ -82,7 +86,7 @@ describe("disjointness — 三态", () => {
   });
 
   test("★ 两边都 unproven → 仍是 unproven（不得因为都没路径就判互不相交）", () => {
-    const r = disjointness(pathSurface(BODY_NO_PATHS), pathSurface(BODY_ONLY_CMD));
+    const r = disjointness(pathSurface(BODY_NO_PATHS), pathSurface(BODY_NO_PATHS_2));
     expect(r.state).toBe("unproven");
   });
 
@@ -108,7 +112,7 @@ describe("sameLayer — 按缺陷层，不按症状", () => {
     expect(sameLayer("share-worker-slots", "exclusive-heavy-lease")).toBe(false);
   });
   test("ACCEPT：同一层归一", () => {
-    expect(sameLayer("gate-credibility", "gate-credibility")).toBe(true);
+    expect(sameLayer("check-credibility", "check-credibility")).toBe(true);
   });
 });
 

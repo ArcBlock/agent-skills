@@ -254,11 +254,11 @@ function callsNamedAssertionHelper(node: ts.Node, adapter: Adapter): boolean {
  */
 
 /**
- * An exploratory benchmark that prints a report rather than gating on one.
+ * An exploratory benchmark that prints a report rather than blocking on one.
  *
  * Five of a 40-finding population were these — `test("print summary", …)`,
  * multi-model comparison tables, corpora deltas — all under one directory, all
- * carrying comments like "Informational — no hard quality gate".
+ * carrying comments like "Informational — no hard quality bar".
  *
  * Two conditions, both required. Console-heaviness alone would excuse a
  * genuinely broken test that happens to log; the title check is what keeps the

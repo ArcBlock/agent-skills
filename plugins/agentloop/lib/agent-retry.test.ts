@@ -170,7 +170,7 @@ describe("classifyAgentDeath", () => {
 
   test("REJECT — a task report that ends by mentioning the agent was terminated", () => {
     const d = classifyAgentDeath(
-      `${TASK_FAILURE_MENTIONING_429} Note: the agent was terminated after the gate timed out.`,
+      `${TASK_FAILURE_MENTIONING_429} Note: the agent was terminated after the check timed out.`,
       NOW_1634_PT,
     );
     expect(d.retryable).toBe(false);
@@ -407,9 +407,9 @@ describe("classifyAgentDeath", () => {
   test("ONE WORD — the shipped reject fixture must not flip when 'after' becomes 'early'", () => {
     // The exact falsification of the old docblock's claim, kept as a fixture so
     // the claim cannot be re-asserted without this going red.
-    const shipped = `${TASK_FAILURE_MENTIONING_429} Note: the agent was terminated after the gate timed out.`;
+    const shipped = `${TASK_FAILURE_MENTIONING_429} Note: the agent was terminated after the check timed out.`;
     const reworded = shipped.replace(
-      "terminated after the gate timed out.",
+      "terminated after the check timed out.",
       "terminated early, so the remaining 429 assertions never ran.",
     );
     expect(classifyAgentDeath(shipped, NOW_1634_PT).retryable).toBe(false);

@@ -1,5 +1,5 @@
 /**
- * The auditor's own accept-path gate.
+ * The auditor's own accept-path test.
  *
  * A test-quality rule that flags EVERYTHING satisfies every reject-only test it
  * will ever be given — "flags the bad fixture" and "flags correct code too" are
@@ -19,7 +19,7 @@
  *      floating expect-promises and fails the test. A rule whose bad fixture
  *      goes RED here is not describing a defect the runner misses; it is
  *      describing something the suite already catches, and it must be demoted
- *      to advisory rather than shipped as a gate.
+ *      to advisory rather than shipped as blocking.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -77,7 +77,7 @@ describe("falsifiability — each bad fixture is a defect the runner cannot see"
       const rel = `./fixtures/${rule.id}/bad.fixture.ts`;
       // bun 1.4+ refuses `test.only` when CI=true; the point of this fixture is
       // that `.only` silently drops siblings while the run stays green — so the
-      // child must not inherit a CI gate that turns the defect into a hard error.
+      // child must not inherit a CI setting that turns the defect into a hard error.
       const env = { ...process.env };
       delete env.CI;
       const r = spawnSync("bun", ["test", rel], { cwd: SKILL_ROOT, encoding: "utf8", env });

@@ -4,7 +4,7 @@
  *
  * 用法：
  *   bun link.ts --parent <N> --child <M> [--repo owner/name]     # 挂原生 sub-issue 父子边
- *   bun link.ts --issue <Y> --blocked-by <X> [--repo owner/name] # 挂依赖边（Y 被 X block）
+ *   bun link.ts --issue <Y> --depends-on <X> [--repo owner/name] # 挂依赖边（Y 被 X block）
  *
  * 幂等：边已存在（422）→ 视为成功。child 已有不同 parent → 报错退出
  * （GitHub 单 parent 约束；换 parent 是显式人类决定，不自动做）。
@@ -52,10 +52,10 @@ if (args.has("parent") && args.has("child")) {
     console.error(`FAILED：${r.stderr.slice(0, 300)}`);
     process.exit(1);
   }
-} else if (args.has("issue") && args.has("blocked-by")) {
+} else if (args.has("issue") && args.has("depends-on")) {
   const issue = Number(args.get("issue"));
-  const blocker = Number(args.get("blocked-by"));
-  if (issue === blocker) throw new Error("issue == blocked-by，拒绝自环");
+  const blocker = Number(args.get("depends-on"));
+  if (issue === blocker) throw new Error("issue == depends-on，拒绝自环");
 
   const r = apiRaw(`repos/${repo}/issues/${issue}/dependencies/blocked_by`, [
     "-X",
@@ -64,16 +64,16 @@ if (args.has("parent") && args.has("child")) {
     `issue_id=${issueDbId(blocker)}`,
   ]);
   if (r.ok) {
-    console.log(`LINKED：#${issue} blocked-by #${blocker}`);
+    console.log(`LINKED：#${issue} depends-on #${blocker}`);
   } else if (r.stderr.includes("422")) {
-    console.log(`OK（幂等）：依赖边已存在 #${issue} blocked-by #${blocker}`);
+    console.log(`OK（幂等）：依赖边已存在 #${issue} depends-on #${blocker}`);
   } else {
     console.error(`FAILED：${r.stderr.slice(0, 300)}`);
     process.exit(1);
   }
 } else {
   console.error(
-    "用法：link.ts --parent N --child M | --issue Y --blocked-by X（可选 --repo owner/name）",
+    "用法：link.ts --parent N --child M | --issue Y --depends-on X（可选 --repo owner/name）",
   );
   process.exit(64);
 }

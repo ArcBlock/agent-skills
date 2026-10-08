@@ -12,7 +12,7 @@
 | **`agent:hold`** | **人类保留 = 终态冻结**——"没我反馈别做不可逆动作(close/merge)",**不是"别理它"**(**issue/PR 通用**) | **只人加、只人摘**;agent 永不自动摘。**唯一例外(arc#2914)**:本 skill 产出「建议关闭」类结论清单时,**自动加**给清单点名的 issue(见下 ★「建议关闭」类结论清单)——**摘除仍然只人**。 | **`issue-sweep` / `pr-sweep` 冻结终态动作**(永不 close/去重关闭/合并),但**人类新评论/新 commit 照常触发 review + 响应**(人的反馈是最高优先级输入);无新输入才跳过。**`issue-review` / `pr-review` 显式手工调用只提示不挡**(人点名就是要处理) |
 | **`agent:processing`** | **处理中互斥锁**(advisory,带 TTL 30min) | agent 开工 acquire、收尾 release | 任何 run 见**新鲜**的锁就 **SKIP**;**过期**(上一个 runner 崩了)则抢锁重做 |
 
-关闭带 `agent:hold` / `needs-human-confirm` 的 issue，可执行闸是 hook `deny-guarded-issue-close.ts`（#5426）；散文不是闸。
+关闭带 `agent:hold` / `needs-human-confirm` 的 issue，可执行的拦截是 hook `deny-guarded-issue-close.ts`（#5426）；散文不是检查。
 
 > **跨 issue/PR 边界:** `agent:hold` 两边通用——「人类保留」是与对象类型无关的预约(GitHub label 仓库级共享),两侧语义一致:**冻结终态动作(close/merge),不冻结响应**——人类新评论照常处理,`pr-review` 显式调用只提示不挡(见各自 SKILL)。`agent:processing`(TTL 互斥锁)**只用于 issue**:PR 侧的并发去重由 `pr-sweep` 自己的确定性分支 `claude/issue-<N>` + 开 PR 前认领检查 + disposition label 承载,不复用这个锁。
 

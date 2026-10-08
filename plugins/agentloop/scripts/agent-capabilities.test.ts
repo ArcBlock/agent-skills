@@ -94,7 +94,7 @@ describe("dns-localhost-subdomain probe (arc#4102)", () => {
 
   test("still reports other capabilities on a probe-fail machine (does not swallow gh-cli)", () => {
     const { tags } = runCaps(fakeNodeOnPath(1));
-    // gh is present in this harness (identity.test.ts / pre-pr both use it).
+    // gh is present in this harness (identity.test.ts uses it).
     // A probe that `exit 1`s the whole script would drop every other tag.
     expect(tags).toContain("gh-cli");
   });

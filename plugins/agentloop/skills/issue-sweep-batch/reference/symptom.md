@@ -26,7 +26,7 @@ symptom 的产物是一个**判决**，必须终结成闭合词表里的一个�
 | `test-defect` | 走查机具 / fixture 自己错了 —— 关闭 |
 | `env` | 环境或部署态，不是产品缺陷 —— 关闭 |
 | `stale` | 已被别的改动修掉，复现不了 —— 关闭 |
-| `normal` | 是正常态（对应 cost-gate 的 `normal-state` 一问）—— 关闭 |
+| `normal` | 是正常态（对应成本四问的 `normal-state` 一问）—— 关闭 |
 
 **闭合词表不是手续**：`undiagnosed-symptom` detector 把「仍然 open 且超期」读成
 「还没有人判决」，这个推断**只有在其余判决一律关闭时才成立**。这条前提钉在

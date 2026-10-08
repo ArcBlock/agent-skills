@@ -5,20 +5,20 @@
 
 ### Triage every candidate into 🟢 / 🟡 / 🔴
 
-A 🟢 issue must pass **all four** gates:
+A 🟢 issue must pass **all four** checks:
 
 1. **Unambiguous** — the fix is determined; no design decision, no A-vs-B, no "should we even do this".
-2. **Verifiable in THIS environment** — there is a test or repro you can *actually run* and watch go fail → pass. No runnable proof ⇒ not green. (This is the gate that disqualifies most things — see below.)
+2. **Verifiable in THIS environment** — there is a test or repro you can *actually run* and watch go fail → pass. No runnable proof ⇒ not green. (This is the check that disqualifies most things — see below.)
 3. **Low blast radius** — a leaf fix (one handler, one wire field, a missing test, a polyfill). Not core-architecture, not a cross-cutting contract, not a public API shape.
 4. **Not security-sensitive** — crypto, auth, token compare, access control, path-traversal guards stay human even when "obvious".
 
-🟡 = mechanical but **fails gate 2 or 3**: e.g. native Swift/Kotlin code in a sandbox with no Xcode/Android SDK (can't build/test), or a change that touches CI/build config or a broad surface. → write the fix, open a **draft PR** with evidence, label `needs-human-review`, and **say plainly it is not verified here**. Never auto-merge, never claim a green check you didn't run.
+🟡 = mechanical but **fails check 2 or 3**: e.g. native Swift/Kotlin code in a sandbox with no Xcode/Android SDK (can't build/test), or a change that touches CI/build config or a broad surface. → write the fix, open a **draft PR** with evidence, label `needs-human-review`, and **say plainly it is not verified here**. Never auto-merge, never claim a green check you didn't run.
 
 🔴 = needs design direction / architecture / security → **comment only** (the existing Step 3 red row). Do not touch code.
 
-### The verifiability gate is environment-dependent (and that's the leverage)
+### Verifiability is environment-dependent (and that's the leverage)
 
-The same issue can be 🟡 in one environment and 🟢 in another. In a **TS-only sandbox**, `bun test`/`tsx` run, so TS-side issues with a conformance/unit test are 🟢 — but every Swift/Kotlin parity issue is 🟡 (can't compile). On a **machine that can build all platforms** (`swift test`, `./gradlew test`, YAML-runner-vs-native-server), those native parity issues move 🟡 → 🟢. So the realistic auto-fix coverage ≈ *the fraction of the backlog you can prove a fix for right here*. State which environment you're in and which gate it opens.
+The same issue can be 🟡 in one environment and 🟢 in another. In a **TS-only sandbox**, `bun test`/`tsx` run, so TS-side issues with a conformance/unit test are 🟢 — but every Swift/Kotlin parity issue is 🟡 (can't compile). On a **machine that can build all platforms** (`swift test`, `./gradlew test`, YAML-runner-vs-native-server), those native parity issues move 🟡 → 🟢. So the realistic auto-fix coverage ≈ *the fraction of the backlog you can prove a fix for right here*. State which environment you're in and which classes it unlocks.
 
 ### Env-capability probe (multi-machine claiming)
 
@@ -34,7 +34,7 @@ compare against the issue's declared requirement, marked in its body as:
 <!-- requires: native-ios,native-android -->
 ```
 
-- **Capability present** → proceed normally (🟢/🟡 gates above still apply).
+- **Capability present** → proceed normally (🟢/🟡 checks above still apply).
 - **Capability declared but missing here** → this is a *this-environment* verifiability gap, not a
   design gap: leave the issue untouched and silent (per the "🟢 candidate, no capacity this round"
   silence rule below) rather than downgrading it to 🟡/`needs-human-review` — a different machine's
@@ -59,7 +59,7 @@ floor.
   issue you are triaging* ("no CF creds", "can't start daemon", "browser can't reach it"). Those
   describe a **different runtime at a different time**; this fleet is heterogeneous (the whole
   premise of this section). A capability claim copied from a comment is not a capability check.
-- **Probe the axis that actually gates the work, not a scalar prior.** Capability is
+- **Probe the axis that actually limits the work, not a scalar prior.** Capability is
   high-dimensional: *live-HTTP reachable* ≠ *headless browser reachable*; *some creds present* ≠
   *the specific cred this task needs*; *`gh` binary exists* ≠ *`gh` REST works here*. A blanket
   "cloud sandbox = no live env" is wrong in exactly the details where the decision lives. Run the
@@ -80,7 +80,7 @@ Step 1/2's candidate loop, and adopting the same convention in `pr-sweep`, is Ph
 
 ### The 🟢 pipeline (one issue at a time, serial)
 
-0. **Verify the issue's PREMISE first — this is a hard gate (a real
+0. **Verify the issue's PREMISE first — this is a hard stop (a real
    false-premise trap; archetype: `test/sweep-golden/fixtures/535-false-premise-trap.json`).**
    AI-authored spin-off issues carry their own evidence (`grep`/`path:line`)
    and a stated framing ("this is dead code" / "pure placeholder" / "3 lines,
@@ -95,7 +95,7 @@ Step 1/2's candidate loop, and adopting the same convention in `pr-sweep`, is Ph
 2. **Fix** minimally; prefer backward-compatible (`x ?? legacy`) over a swap.
 3. **Verify**: the new test passes, the package's full suite shows **no regression**, `check-types` is clean. Paste the real before/after numbers into the PR. **Isolate pre-existing red from your red:** packages here are often already failing (e.g. afs-ui had 88 CSS-snapshot failures; runtimes/node had a pre-existing `auth/index.ts:151` type error). Before attributing a failure to "pre-existing", *prove* it — either `git stash` your change and re-run (count must be identical) or show it's logically untouchable by your diff (a one-line test-mock edit cannot break CSS snapshots). Then say so explicitly in the PR with the real numbers.
 4. **One branch + one PR per issue**, body references the issue (`Part of #N`; use `Fixes #N` only if the PR fully closes it — partial fixes leave the issue open and say which part was handled).
-5. **Never auto-merge.** 🟢 means auto-*PR*, not auto-*merge* — the merge gate (a same-SHA `<verification_entry>` PASS + merge-load) + a human gate the merge (there is no CI on the PR path). "No human intervention" is about the fix work, not the merge decision. This is a categorical, non-negotiable assertion — see `test/sweep-golden/fixtures/1025-forbidden-auto-merge.json` for the forbidden-action regression test.
+5. **Never auto-merge.** 🟢 means auto-*PR*, not auto-*merge* — the PR still gets its one review, and a human (or pr-sweep's merge rules) decides the merge. "No human intervention" is about the fix work, not the merge decision. This is a categorical, non-negotiable assertion — see `test/sweep-golden/fixtures/1025-forbidden-auto-merge.json` for the forbidden-action regression test.
 
 ### White-list, not black-list
 
@@ -103,18 +103,18 @@ Only auto-touch code for explicitly safe categories: TS/pure-function bug with a
 
 **Proven 🟢 patterns and run history:** see this repo's case-law appendix
 (repo-profile Case Law References) for the white-list categories that have actually landed (dead not-found
-branch → explicit error, empty `catch{}` in test mocks, env-gate cleanup with
+branch → explicit error, empty `catch{}` in test mocks, env-flag cleanup with
 a human directive) and the run-by-run track record.
 
 ### AI-agent spin-off issues (`<!-- spinoff-of: #N -->`) — the primary autofix target
 
-The bulk of this backlog is **agent-authored spin-off issues**: their body opens with a `<!-- spinoff-of: #N … -->` HTML comment and follows a fixed shape (目标 / 现状证据 with grep / 参考实现 with `path:line` / 具体任务 / 验收标准). They are almost always **0-comment** (no human ever replied) — so they are invisible to the default sweep and only get picked up under `--autofix-green`. **This class is the whole reason `--autofix-green` exists; process it aggressively but gated.**
+The bulk of this backlog is **agent-authored spin-off issues**: their body opens with a `<!-- spinoff-of: #N … -->` HTML comment and follows a fixed shape (目标 / 现状证据 with grep / 参考实现 with `path:line` / 具体任务 / 验收标准). They are almost always **0-comment** (no human ever replied) — so they are invisible to the default sweep and only get picked up under `--autofix-green`. **This class is the whole reason `--autofix-green` exists; process it aggressively but within the four checks.**
 
 Per spin-off issue:
 
 1. **Read the `spinoff-of` parent.** The parent (the original doc-audit) often carries the human directive that makes a child green (e.g. a parent issue that had already said "可以彻底清理"). A human "go" on the parent counts as approval for the unambiguous child.
 2. **Run premise-verification (🟢 pipeline step 0).** The issue's own grep is necessary but not sufficient — broaden it.
-3. **Triage by environment, then by the four gates.** In a TS-only sandbox the realistic green set is: TS/pure-function fixes, test-file fixes, wire-format/conformance mismatches, doc/type/lint, env-gate cleanups. The rest of the standard backlog clusters stay non-green *here*:
+3. **Triage by environment, then by the four checks.** In a TS-only sandbox the realistic green set is: TS/pure-function fixes, test-file fixes, wire-format/conformance mismatches, doc/type/lint, env-flag cleanups. The rest of the standard backlog clusters stay non-green *here*:
    - **Native parity** (`[parity]`, Swift/Kotlin) → 🟡 (can't build/test in TS sandbox; becomes 🟢 only on a full-platform host).
    - **`security` / `P0,security`** → 🔴 always (crypto/vault/ACL/const-time/path-traversal), comment-only even when "obvious".
    - **Multi-phase feature/arch plans** (`feature`, `enhancement` with Phase N) → 不是单 PR,但**也要尝试自动推进,不是冻结**。走 Step 3 feature 行的「评估 → 能起步就 `/agentloop:design-review` → `/agentloop:build-phases`」管道,**一 issue 一条 in-progress 接力线**:每个 hourly run 推进它能推进的 phase(round-aware 续做),撞到真正 human-only fork 才停并给具体待决项。**绝不发「🟠 不在本轮范围 / 留开放」把它冻死**——那一类正是曾经真实出现过『永不被处理』的根因。`design-review`/`build-phases` 本身就是自动流程,feature issue 该用它们跑,而不是甩回给人。
@@ -153,7 +153,7 @@ premise-check 的要求都不一样,分开处理:
 4. **白名单同上,不放宽。** 只处理典型 doc-drift 或有清晰 repro 的小 bug;涉及权限/安全边界的
    发现(哪怕看似"只是文档没更新")一律 🔴 comment-only,不因为触发源是自动化就降低门槛。
 5. **一 issue 一 PR,`Part of #<test-sweep-failure 号>`。** 若同一父 QA Report 下多个子 issue
-   同源同修(如同一个 gate 组件导致多个 blocklet 同时报告),可以一个 PR 修,但 PR body 里
+   同源同修(如同一个共享组件导致多个 blocklet 同时报告),可以一个 PR 修,但 PR body 里
    逐个列出 `Part of #N` 覆盖到的每个子 issue,不要漏引用。
 
 > Run history (first two `--autofix-green` runs, both TS-only sandbox — proof

@@ -28,19 +28,19 @@
 
 **两个都给不出 → 这不是正常输出,是发现了真正的问题**:显式写「⚠️ 无法形成建议」+ 精确缺什么(哪条信息 / 哪个权限 / 哪个未定的前置决策),这本身就是最高优先级 escalation——比任何 BLOCK 都值得人先看。绝不允许用一句笼统的"需人工审阅"把"我没想清楚"伪装成"已完成 review"。
 
-**时效**:拍板块必须钉在**当前 HEAD sha** 上(块首标 `针对 HEAD <sha7>`);PR 再收到 push 即作废,复审时按 Step 0.6 刷新同一条 canonical comment,不追加新块。
+**时效**:拍板块必须钉在**当前 HEAD sha** 上(块首标 `针对 HEAD <sha7>`);PR 再收到 push 即作废,复审时在新 HEAD 上重新给出。
 
 **铁律——能给步骤就给步骤,给不了就给判据,绝不造假命令:**
 
-- **可还原成可照跑步骤**(verification 失败需人判 / 代码正确性 / 安全属性 / 去重冲突 / 缺权限的机械操作)→「请你验证」填**确切命令 + 看哪个 `path:line` + 预期 vs 现状**,让人(或人的 agent)照跑就能确认。
+- **可还原成可照跑步骤**(测试失败需人判 / 代码正确性 / 安全属性 / 去重冲突 / 缺权限的机械操作)→「请你验证」填**确切命令 + 看哪个 `path:line` + 预期 vs 现状**,让人(或人的 agent)照跑就能确认。
 - **不可还原**(无先例的设计 A/B、架构方向、taste)→ **绝不编一个假装能验证的命令**;「请你验证」换成**选项 + 判据 + 推荐**,并明说这是判断题。
-- **agent 已核验的别让人重做**:把机械正确性(sanitization、测试 pass/fail、verification 根因)的结论摆上去,人只聚焦那个真正要他判的点。
+- **agent 已核验的别让人重做**:把机械正确性(sanitization、测试 pass/fail、失败根因)的结论摆上去,人只聚焦那个真正要他判的点。
 
 **per-type「请你验证」填什么:**
 
 | escalation 类型 | 「请你验证」填 |
 |---|---|
-| verification 失败需人判 | 确切失败检查名(`check-*`)+ verification 报告的 `rawTail` 摘录 + 根因(a/b/c/d/e) + "复现: 跑 `<verification_entry>`, 预期 `<PASS/FAIL>`" |
+| 测试失败需人判 | 失败的测试名 + 输出尾部摘录 + 根因判断 + "复现: 跑 `<package_manager> --filter <pkg> test`, 预期 `<pass/fail>`" |
 | 代码/逻辑正确性 | 触发点 `path:line` + 复现测试命令(`<package_manager> --filter <pkg> test` / `<test_runner> <path>`) + 预期 vs 实际行为 |
 | **security(必逐条列)** | **每个**安全属性单独一行:`<属性: const-time compare / path-traversal guard / authz / 注入过滤>` @ `path:line` + 验证它的命令或测试 + **失败长相**(怎样算被绕过)。决定仍归人,但给完整 checklist,**绝不**只说"涉及安全请人看" |
 | 去重/冲突拿不准 | 两个 PR# + 冲突行 `path:line` + 权威源路径(repo `LICENSE` / canonical doc) + 对比命令(`gh pr diff` / `git show`) |

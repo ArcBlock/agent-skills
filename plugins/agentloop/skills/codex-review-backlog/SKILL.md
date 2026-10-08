@@ -10,16 +10,14 @@ description: >-
 
 > **Why this exists.** Codex is usually **fast** on open PRs (minutes: findings or a
 > single 👍 = no opinions) — that pre-merge path is owned by
-> [`epic-conductor` §6](../epic-conductor/SKILL.md) and
-> [`pr-sweep`](../pr-sweep/SKILL.md): **one `bot-clean.ts` check before merge (at most one ≤10m wait when
-> the last push is fresh and the vendor is still running), never a per-push wait or a multi-hour stall**.
-> Codex can still post **after** merge or after that check. This skill is the
+> [`pr-review`](../pr-review/SKILL.md) (bot comments are review input) — **never a per-push wait or a
+> multi-hour stall**. Codex can still post **after** merge or after that review. This skill is the
 > complementary **post-merge / late lag sweep**: find comments that landed too late
 > for the open-PR loop, triage them on current `main`, and open small fix PRs
 > (never one mega-PR).
 
 > **Repo profile first.** Read `.claude/repo-profile.md` for `repo_slug`,
-> `default_branch`, `verification_entry` / `pre_merge_entry`, `comment_language`.
+> `default_branch`, `package_manager`, `test_runner`, `comment_language`.
 > Arc is the reference implementation.
 
 ## Usage
@@ -83,7 +81,7 @@ For every comment:
 1. Read cited `path` on current tree.
 2. Decide disposition (table above). Prefer **FIXED_LATER** when later commits
    already land the fix (common after a follow-up PR wave).
-3. Accept-path discipline: if the finding is a gate/check, ensure a fix still
+3. Accept-path discipline: if the finding is about a check, ensure a fix still
    has an accept-path test.
 
 **Skip already-merged follow-up PRs that only restate addressed threads** once
@@ -92,7 +90,7 @@ code matches FIXED_LATER (comment on tracking issue, do not re-open).
 ## Step 4 — Act (split PRs by domain)
 
 - **OPEN_EASY**: branch from `main`, TDD when possible, conventional commit,
-  focused tests, `pre-pr` / push, open PR linking source Codex PR + tracking issue.
+  the changed package's tests, push, open PR linking source Codex PR + tracking issue.
   **One domain per PR** (e.g. feeds ≠ security-headers ≠ a11y).
 - **OPEN_HARD**: append to a tracking issue (or open one
   `chore: Codex review backlog — <window>`); do not block the daily run.
@@ -128,7 +126,7 @@ Quiet if:
 Then the daily comment is a one-liner: `Codex backlog quiet — window …, 0 OPEN_EASY`.
 
 **Do not** run a multi-hour (or even 45-minute) poll loop in the open-PR path.
-Pre-merge: one `bot-clean.ts` check, then advance (👍 / findings / silence). Post-merge lag
+Pre-merge: bot comments present at review time are review input; silence is not a blocker. Post-merge lag
 and anything that arrives after you already advanced is **this** skill's job
 (daily cron or manual). Pair with `pr-sweep` / `epic-conductor` for **pre-merge**.
 
@@ -136,10 +134,10 @@ and anything that arrives after you already advanced is **this** skill's job
 
 | Skill | When |
 |---|---|
-| `pr-review` / `pr-sweep` | Open PRs **before** merge; one bot-clean check + handle P1s; 👍 on head = clean |
-| `epic-conductor` §6 | Epic PRs: same check-once contract; never stall waves on bot lag |
+| `pr-review` / `pr-sweep` | Open PRs **before** merge; bot comments are review input |
+| `epic-conductor` | Epic PRs: same; never stall waves on bot lag |
 | **`codex-review-backlog`** | **After** merge lag + optional open late comments |
-| `verification` | Gate every fix PR you open |
+| `land` | Every fix PR you open: package tests + one review |
 
 ## Unattended rules
 

@@ -52,12 +52,12 @@ afs_search /user/memory 关键词:<本轮重点 label / 子系统 / 常见问题
    `graph-scan`:kicks/rollupCandidates 注入候选(无需人类 comment),blocked 确定性
    SKIP;开 spin-off 必写原生边(`link.ts`);无分支兜底的终态动作(rollup)用
    `claim.ts` fencing 互斥。图只增强、不替代 label 扫描。
-7. **`--autofix-green`: verifiability is the gate, never auto-merge.** Auto-fix
-   only issues that pass all four gates (unambiguous + verifiable-in-this-env +
+7. **`--autofix-green`: verifiability is the bar, never auto-merge.** Auto-fix
+   only issues that pass all four checks (unambiguous + verifiable-in-this-env +
    low-blast-radius + non-security); reproduce-first, one PR per issue, white-list
    categories only. Can't run a test that proves it here → 🟡 draft PR + human, not
    green. The set of 🟢 issues grows with the environment (TS-only vs full-platform
-   build). 🟢 = auto-PR, **not** auto-merge — the merge gate (a same-SHA `<verification_entry>` PASS + merge-load) + a human still gate the merge (no CI on the PR path).
+   build). 🟢 = auto-PR, **not** auto-merge — a human (or pr-sweep's merge rules) decides the merge.
 8. **Autonomous = ask on the issue, never block in-session.** This sweep runs
    unattended — no human is babysitting. Any time the per-issue work (including
    `design-review` / `build-phases` escalations) would normally stop and wait for

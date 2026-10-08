@@ -23,16 +23,15 @@ cron/fleet 从**镜像 clone**（`~/.claude/plugins/marketplaces/arcblock-agent-
 
 | Generic —— 属于本插件 | Per-repo —— 属于**消费仓库** |
 |---|---|
-| 机制：report kernel、comment 投递、merge gate、sweep/review 的判断流程、fleet driver | 工具链命令（`pnpm` vs `bun`）、构建/测试/lint 命令 |
-| 跨仓库不变的纪律（round-awareness、dry-run 契约、升级前硬前置） | 仓库路径、face-paths、label 集合、verification check 清单 |
+| 机制：report kernel、comment 投递、merge 脚本、sweep/review 的判断流程、fleet driver | 工具链命令（`pnpm` vs `bun`）、构建/测试/lint 命令 |
+| 跨仓库不变的纪律（round-awareness、dry-run 契约、升级前硬前置） | 仓库路径、face-paths、label 集合 |
 | 配置 **schema**（`driver.ts` 的 `DeploymentConfig`/`RepoEntry`） | deploy 细节、DID Space / 部署目标 |
 
-- 消费仓库的具体值住 **`.claude/repo-profile.md`** + **`.claude/verify/config.ts`**（check 列表）。
-  skill 从 profile 读工具链/label/verification_entry，不硬编码。
+- 消费仓库的具体值住 **`.claude/repo-profile.md`**。skill 从 profile 读工具链/label，不硬编码。
 - **新引用一个 `<profile_key>` 要同步三处**（否则漂移）：① 引用它的 skill；② arc
   `.claude/repo-profile.md`（reference 实现，给真实值）；③ `bootstrap/init-profile.sh`（scaffold
   的 `<FILL>` 占位）——第③处最易漏：漏了，新采用者 repo-setup 出来的 profile 就缺这个键，
-  de-arc 化的 skill 在 face/companion-gated 步骤里撞 dangling `<占位符>`。**skill 引用的键集 ≡
+  de-arc 化的 skill 在依赖 face/companion 的步骤里撞 dangling `<占位符>`。**skill 引用的键集 ≡
   init-profile.sh scaffold 的键集**，两者不能分叉（本条正是补一次这种分叉后立的规矩）。
 - **通用脚本 ship 进插件 `scripts/`，repos 引用不拷贝**：`agent-identity.sh`、`agent-capabilities.sh`、
   `gh-upload-media.sh`（单个媒体:图片/视频）、`gh-upload-dir.sh`（整目录媒体 → `filename\turl` map，内部循环调
@@ -81,7 +80,7 @@ append/addendum 机制；部署用 `promptDir` 覆盖**整份** prompt。所以�
 
 ## 自测纪律：本插件自带的测试必须绿
 
-- `lib/*.test.ts`（report / comment / gate 引擎）+ `skills/issue-sweep/test/sweep-golden/`
+- `lib/*.test.ts`（report / comment / 锁）+ `scripts/*.test.*`（merge / Change Set / 上传）+ `skills/issue-sweep/test/sweep-golden/`
   （marker / round-awareness 金测）+ `fleet/*.test.ts`（driver 规划、setup 生成/对账、runlock
   锁语义）。改引擎或 marker 逻辑**先看 golden**；改 fleet 锁/调度**先看 `runlock.test.ts` +
   `setup.test.ts`**。
@@ -98,8 +97,8 @@ skill 无命名空间，别硬加前缀）。
 
 | 引用对象 | slash command | markdown 相对链接（从插件 skill 出发） |
 |---|---|---|
-| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / verification / issue-graph / impact-check / media-upload …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
-| **消费仓库 project skill**（住 `.claude/skills/`，如 ui-verify / e2e-verify / e2e-gate / deploy / plan-status） | 裸 `/ui-verify` ✅ | `../../../../skills/<skill>/SKILL.md` |
+| **本插件 skill**（issue-sweep / pr-review / design-review / build-phases / land / issue-graph / impact-check / media-upload …） | `/agentloop:build-phases` ✅　裸 `/build-phases` ❌ | `../<skill>/SKILL.md` |
+| **消费仓库 project skill**（住 `.claude/skills/`，如 ui-verify / e2e-verify / deploy / plan-status） | 裸 `/ui-verify` ✅ | `../../../../skills/<skill>/SKILL.md` |
 
 - 反向同理：`.claude/skills/` 下的 project skill 引用**插件 skill** 时，slash command 要 `/agentloop:<skill>`，
   链接要 `../../plugins/agentloop/skills/<skill>/SKILL.md`。
@@ -113,22 +112,15 @@ skill 无命名空间，别硬加前缀）。
 两个方向都要改：
 
 1. **插件内**：其它插件 skill 里引用它的地方（companion 引用）。
-2. **消费仓库**：`.claude/skills/` 里的 project skill、`.claude/verify/`、`planning/`、AGENTS.md
+2. **消费仓库**：`.claude/skills/` 里的 project skill、`planning/`、AGENTS.md
    里引用它的地方。
 
 漏一处的后果是实测过的、不是假设：那处裸 `/<skill>` 会 resolve 到消费仓库残留的**同名 stale
 fork**（arc main 就还带着若干同名旧副本），或直接 `Unknown skill` 挂掉无人值守 routine（且模型
 不自纠）。判据仍是那一句——**这个 skill 现在装在哪**：插件里 = 带前缀。
 
-**这条已经自动化，不再靠人记得跑**：
-
-- **canonical 守卫** = `scripts/lint-skill-namespace.sh`（Rule A：pinned-literal `name: 'x'` 调用；
-  Rule B：任何 SKILL.md 里裸 `/<plugin-skill>` 引用——**同时扫插件 skill 树 + 消费仓库 `.claude/skills/`
-  两棵树**）。自带负向自检（探针匹配不到就 exit 2，绝不用「静默 ✓」骗你）。
-- **已接进 gate**：`.claude/verify/checks/check-skills.ts` shell out 调它，随 `pre-pr` 每次跑
-  （目前 warn-only，和该 check 的既有姿态一致；误报率调稳后翻 blocking）。**别在 check-skills 里
-  重抄一份正则**——单一真相源在 bash 守卫里。
-- **新增一个插件 skill 名**（如将来再沉淀一个）→ 记得把名字加进守卫的 `SKILLS` 列表，否则对它的裸引用抓不到。
+**没有脚本替你守这条**：沉淀或改名一个 skill 后，自己 `git grep` 两棵树（插件 skill 树 + 消费仓库
+`.claude/skills/`）里的裸 `/<skill>` 引用，全部改成 `/agentloop:<skill>`。
 
 ## 合并 main / 迁移窗口期的合并纪律
 

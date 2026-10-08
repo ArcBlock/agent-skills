@@ -64,7 +64,7 @@ authorization to close/merge any issue it names. `#1863` is the live incident th
 against: a one-off 138-issue backlog audit ended with "『建议关闭』一栏本次没有代关，等人扫
 一眼表格后批量关即可" (an explicit human-review caveat, not an executable command) — a later
 unattended sweep consumed that table directly and closed 12 issues with zero human
-confirmation, bypassing the gate the audit issue itself declared. An item named in such a list
+confirmation, bypassing the human review the audit issue itself declared. An item named in such a list
 becomes actionable only when **either** (a) its `agent:hold` — applied per
 [issue-review's 建议关闭-list rule](../../issue-review/SKILL.md) at the moment the list was
 posted — has since been deliberately removed by a human, **or** (b) an independent human
@@ -99,7 +99,7 @@ order IS the rule** (a live arc sweep proved that getting it backwards inverts t
 The executable form of all three predicates lives in `test/sweep-golden/lib.ts` and is
 unit-tested (`golden.test.ts`, incl. each live misclassification above as a regression).
 (Going forward the skill no longer emits these; this clause also unsticks the backlog already
-frozen by old runs.) The suggestion-list gate above has its own executable form —
+frozen by old runs.) The suggestion-list rule above has its own executable form —
 `containsSuggestionList()` / `hasIndependentConfirmation()` / `suggestionListIsActionable()` in
 the same `lib.ts` — exercised by the `#1863` archetype fixture
 (`test/sweep-golden/fixtures/1863-audit-suggestion-list-not-instruction.json`).

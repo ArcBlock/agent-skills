@@ -237,7 +237,7 @@ describe("§7.1 mutation pairs — bidirectional, and on the REASON", () => {
     }
   });
 
-  // M4b's accept arm lives in scenario.ts (`runCheckGuarded`, W1.1a): UNKNOWN is
+  // M4b's accept arm lived in the former scenario runner (`runCheckGuarded`, W1.1a): UNKNOWN is
   // synthesised where there IS no CheckResult, which is unobservable from here.
   test("M4b  UNKNOWN is deliberately absent from the ladder (§5.4)", () => {
     expect(CRITERIA_LADDER.flatMap((r) => r.classes)).not.toContain("UNKNOWN" as FailureClass);
@@ -286,10 +286,10 @@ describe("the reason vocabulary is closed and per-reason actors are exhaustive (
     expect(Object.keys(FAILURE_ACTORS).sort()).toEqual([...declared].sort());
   });
 
-  test("ENV_GAP reasons route to the gate maintainer; BUDGET to the red-holding agent (§2.4)", () => {
-    for (const r of FAILURE_REASONS.ENV_GAP) expect(FAILURE_ACTORS[r]).toBe("gate-maintainer");
+  test("ENV_GAP reasons route to the tooling maintainer; BUDGET to the red-holding agent (§2.4)", () => {
+    for (const r of FAILURE_REASONS.ENV_GAP) expect(FAILURE_ACTORS[r]).toBe("tooling-maintainer");
     expect(FAILURE_ACTORS["budget-exhausted"]).toBe("red-holding-agent");
-    expect(actorFor({ class: "ENV_GAP", reason: "disk-exhausted" })).toBe("gate-maintainer");
+    expect(actorFor({ class: "ENV_GAP", reason: "disk-exhausted" })).toBe("tooling-maintainer");
     expect(actorFor({ class: "UNKNOWN", reason: "no-check-result-produced" })).toBe("human");
   });
 
@@ -319,7 +319,7 @@ describe("deriveRunClass — one run, one next step (§2.5 / W1.2)", () => {
     blocking: true,
     failure: { class: cls, reason: FAILURE_REASONS[cls][0] },
   });
-  /** A red the gate IGNORES — `passed()` tolerates it, so the run can still be green. */
+  /** A red the runner IGNORES — `passed()` tolerates it, so the run can still be green. */
   const warn = (cls: FailureClass, id = `${cls}-warn`): CheckResult => ({
     ...red(cls, id),
     blocking: false,
@@ -349,7 +349,7 @@ describe("deriveRunClass — one run, one next step (§2.5 / W1.2)", () => {
     }
   });
 
-  test("UNKNOWN outranks even CODE: the gate failed to answer, so a human decides", () => {
+  test("UNKNOWN outranks even CODE: the runner failed to answer, so a human decides", () => {
     expect(deriveRunClass([red("CODE", "a"), red("UNKNOWN", "b")])).toBe("UNKNOWN");
   });
 

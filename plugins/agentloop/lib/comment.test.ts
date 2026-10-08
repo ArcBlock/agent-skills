@@ -4,8 +4,6 @@
  * dependency is injected, so no `gh` / network is touched.
  */
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   anchoredMarkerLookupJq,
   attributeShaToPr,
@@ -121,7 +119,7 @@ describe("makeMarker retry trail (#6158)", () => {
     expect(m).toContain("result=PASS");
     expect(m).toContain("attempts=2");
     expect(m).toContain("prev=FAIL");
-    // gate.ts: `markerLine.match(/result=([A-Z]+)/)` — first match must stay PASS.
+    // sticky reader: `markerLine.match(/result=([A-Z]+)/)` — first match must stay PASS.
     // Naming the prior `priorResult=` would collide (`result=FAIL` is a substring).
     expect(m.match(/result=([A-Z]+)/)?.[1]).toBe("PASS");
     expect(m).not.toContain("priorResult=");
@@ -287,7 +285,7 @@ describe("postComment", () => {
       "",
       "## 裁定：MERGE —— 针对 HEAD abcdef1",
       "",
-      '<!-- sweep-trace: {"ver":1,"pr":1514,"gate":"verdict","val":"MERGE"} -->',
+      '<!-- sweep-trace: {"ver":1,"pr":1514,"step":"verdict","val":"MERGE"} -->',
     ].join("\n");
 
     const runJq = (bodies: string[], filter: string): string => {
@@ -344,32 +342,6 @@ describe("postComment", () => {
       expect(jqCmd).toContain('split("\\n")');
       expect(jqCmd).toContain(`test("^${VERDICT_MARKER_PREFIX}")`);
       expect(jqCmd).not.toContain("contains(");
-    });
-  });
-
-  describe("pr-review SKILL.md Step 6 must not hand-write contains() (#6404)", () => {
-    const skill = readFileSync(
-      fileURLToPath(new URL("../skills/pr-review/SKILL.md", import.meta.url)),
-      "utf8",
-    );
-    const step6 = skill.split("### Step 6")[1]?.split("## Autonomy")[0] ?? "";
-
-    it("enumerates Step 6 (empty split must not read as green)", () => {
-      expect(step6.length).toBeGreaterThan(200);
-      expect(step6).toContain("pr-review-verdict");
-    });
-
-    it("REJECT: Step 6 does not show unanchored contains() as the upsert lookup", () => {
-      expect(step6).not.toMatch(/contains\(/);
-    });
-
-    it("ACCEPT: Step 6 wires post-verdict.ts rather than a hand-rolled gh --jq", () => {
-      expect(step6).toMatch(/post-verdict\.ts/);
-      expect(step6).toMatch(/\$\{AGENTLOOP_ROOT:-[^\n]*\}\/scripts\/post-verdict\.ts/);
-    });
-
-    it("REJECT: the invocation does not use the vendored-in-arc relative plugin path", () => {
-      expect(step6).not.toMatch(/bun\s+["']?\.claude\/plugins\/agentloop[^\n]*post-verdict\.ts/);
     });
   });
 
@@ -460,9 +432,9 @@ describe("postComment", () => {
     const tree = "/Users/robmao/.arc-workers/trees/aside-1464";
     const host = "/Users/robmao/work/arcblock/aside/.git";
     const record =
-      "/Users/robmao/work/arcblock/aside/.git/agentloop/verification/f4a7c31/pre-pr/4341d87/by-location/aside-1464-8a33c01eac9f";
+      "/Users/robmao/work/arcblock/aside/.git/agentloop/verification/f4a7c31/nightly/4341d87/by-location/aside-1464-8a33c01eac9f";
     const report =
-      `> 📍 **Produced at** — tree \`${tree}\` · host clone \`${host}\` · scenario \`pre-pr\` · base \`${SHA}\`\n\n` +
+      `> 📍 **Produced at** — tree \`${tree}\` · host clone \`${host}\` · scenario \`nightly\` · base \`${SHA}\`\n\n` +
       `> ℹ **Reused evidence**\n` +
       `> Produced at tree \`${tree}\` · host clone \`${host}\`.\n` +
       `> Shared record: \`${record}\`\n` +
@@ -566,7 +538,7 @@ describe("run history (⏱ per-round durations)", () => {
 
   it("round-trips a series through render → parse", () => {
     const runs = [
-      entry({ at: "2026-08-28T15:14:00.000Z", sha: "80e2981", scenario: "pre-pr" }),
+      entry({ at: "2026-08-28T15:14:00.000Z", sha: "80e2981", scenario: "nightly" }),
       entry(),
     ];
     expect(parseRunHistory(renderRunHistory(runs))).toEqual(runs);
@@ -691,7 +663,7 @@ describe("run history (⏱ per-round durations)", () => {
       entry({
         at: "2026-08-28T15:14:00.000Z",
         sha: "80e2981",
-        scenario: "pre-pr",
+        scenario: "nightly",
         wallMs: 641000,
         checksMs: 630700,
       }),
@@ -722,7 +694,7 @@ describe("run history (⏱ per-round durations)", () => {
     expect(res.posted).toBe(true);
     const history = parseRunHistory(JSON.parse(posted).body as string);
     expect(history).toHaveLength(2);
-    expect(history[0].scenario).toBe("pre-pr");
+    expect(history[0].scenario).toBe("nightly");
     expect(history[0].wallMs).toBe(641000);
     expect(history[1].scenario).toBe("pre-merge");
     expect(history[1].wallMs).toBe(94200);
@@ -747,7 +719,7 @@ describe("run history (⏱ per-round durations)", () => {
     };
     const args: CommentArgs = { post: true, pr: "742", dryRun: false };
     deliverComment(args, "## Report", SHA, RESULT, runner, MARKER_PREFIX, {
-      scenario: "pre-pr",
+      scenario: "nightly",
       wallMs: 1234,
       checksMs: 1000,
     });
@@ -864,7 +836,7 @@ describe("deliverComment", () => {
 
   it("ACCEPT (#6401): dry-run preview redacts /Users/<os-user> the same way a real post does", () => {
     const leaked =
-      "> 📍 **Produced at** — tree `/Users/robmao/.arc-workers/trees/aside-1464` · host clone `/Users/robmao/work/arcblock/aside/.git` · scenario `pre-pr` · base `abc`";
+      "> 📍 **Produced at** — tree `/Users/robmao/.arc-workers/trees/aside-1464` · host clone `/Users/robmao/work/arcblock/aside/.git` · scenario `nightly` · base `abc`";
     const errors: string[] = [];
     const orig = console.error;
     console.error = (...args: unknown[]) => {
@@ -1002,7 +974,7 @@ describe("deliverComment", () => {
     );
     expect(res).toEqual({ posted: true });
     const posted = JSON.parse(bodies.at(-1) as string).body as string;
-    // Marker still owns line 1 — merge-gate.ts finds the sticky by startswith.
+    // Marker still owns line 1 — the merge check finds the sticky by startswith.
     expect(posted.split("\n")[0].startsWith(MARKER_PREFIX)).toBe(true);
     expect(posted).toContain("NOT THE PR HEAD");
     expect(posted).toContain(report);

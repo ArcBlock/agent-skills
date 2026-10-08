@@ -7,7 +7,7 @@
  * fails at its task both arrive as `status=failed`. Two different states, one
  * colour — and the consequence is identical: the work is dropped unless a human
  * happens to be watching. Measured twice in one epic-conductor run: one agent
- * had already committed its fix and died queued behind a gate; another died
+ * had already committed its fix and died queued behind a check; another died
  * mid-edit holding +319/-113 uncommitted. Both were recovered by hand.
  *
  * ## Why fail-closed
@@ -31,7 +31,7 @@
  * just a better error message; a ledger without a waker is just a list.
  *
  * NOT the same domain as `./failure-class.ts`, which classifies TEST failures
- * inside a verification gate. This one classifies AGENT PROCESS deaths. Do not
+ * inside a verification run. This one classifies AGENT PROCESS deaths. Do not
  * merge them.
  */
 
@@ -79,9 +79,9 @@ export interface AgentDeath {
  *
  * That sentence was false, and it was falsified by a ONE-WORD edit of the very
  * fixture it cited. The shipped reject fixture ends "…the agent was terminated
- * **after** the gate timed out."; change one word and the summary flips:
+ * **after** the check timed out."; change one word and the summary flips:
  *
- *     reject     "…the agent was terminated after the gate timed out."
+ *     reject     "…the agent was terminated after the check timed out."
  *     RETRYABLE  "…the agent was terminated early, so the remaining 429
  *                 assertions never ran."
  *
