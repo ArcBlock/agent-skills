@@ -16,11 +16,13 @@
 
 ### 人 / AI 的边界(按"后果可逆性"划,不按"是不是 outward")
 
-agent 要**有判断力、自己动手**,不要事事请示。可逆的、可追溯的操作直接做;只有大动作 / 不可逆才停下来等人。
+agent 要**有判断力、自己动手**,不要事事请示。可逆的、可追溯的操作直接做;只有 R2 决定才停下来等人([R2 准入](../../../reference/r2-admission.md))。
 
 - **自动做,不问**(有判断力地做):发/改 comment、打/调 label、指派 assignee、判定并标 `status`、维护"活的 crystal"草稿;以及**该单独开 issue 的就直接开**——review 中发现的、明显独立于本文档的问题(安全漏洞、未接线的死代码、明确的 bug),**自动开新 issue**(挂好 label/milestone/assignee + 双向回链),**不征求用户意见**。
-- **需人确认(只有大动作 / 不可逆)**:删除内容或文件、搬目录、PR merge、**close issue**、改架构方向的拍板。这些挂 `needs-human-confirm` 等人——理由:这是后果的承担点,AI 没有后果。
-- **铁律**:产出始终带证据;**绝不**自动 merge / close issue / 删文件 / 改文档 frontmatter。**close 的唯一显式例外 = ★父级 rollup**(孩子全关 + fencing 互斥 + 验收核对全覆盖,close 可逆)与 `issue-sweep` 的「PR merged 未自动关」清理。
+- **可逆,附证据直接做**:close issue(可 reopen)、删除内容或文件(git 可恢复,走 PR)。评论写明证据和 reopen 条件(出现什么情况应当重开)。
+- **不做**:搬目录(断 issue↔路径 key 和 git history,见铁律 9)。改架构方向是技术分歧,交评判团。
+- **只有 R2 挂 `needs-human-confirm`**,评论首行写 `R2: <category>`。
+- **铁律**:产出始终带证据;不自动 merge PR;frontmatter 改动走 PR。
 
 ## Doc-audit 流程(审计存量老文档)
 
@@ -31,17 +33,17 @@ agent 要**有判断力、自己动手**,不要事事请示。可逆的、可追
 | `status:` | 含义 | issue 去向 |
 |---|---|---|
 | `planned` | 有价值,还没实现 | **open**(tracker;创建前先 dedup 现有 issue/roadmap) |
-| `partial` | 实现了,但不完整(**「待分诊」信号**) | **open**;gap 有 `path:line` 坐实 → **自动拆成独立自足 spin-off** 后**摘掉本 label**、换残留状态(剩漂移→`drifted`;无残留→`current`+待人 close);仍推测/未定的 gap 留 comment 给人确认。见「partial → 拆分剩余工作」 |
+| `partial` | 实现了,但不完整(**「待分诊」信号**) | **open**;gap 有 `path:line` 坐实 → **自动拆成独立自足 spin-off** 后**摘掉本 label**、换残留状态(剩漂移→`drifted`;无残留→`current`+附证据 close);仍推测/未定的 gap 按安全默认处理或交评判团。见「partial → 拆分剩余工作」 |
 | `drifted` | 实现了,但文档漂移(描述的接口面 ≠ shipped 面) | **按文档类别分流**(2026-07-17 Robert 拍板,#187 批): **`planning/`/`intent/` → 归档**,不修正文——ship 后它们是历史文物,真相源已转移到代码+living docs,修了必再漂(反例:#243 修一轮漂一轮)。归档 = 顶部打 historical tombstone banner(见下「historical 归档」),有价值的设计 rationale 先抽进 `docs/guides/`/README 再归档;tombstone PR merge 时 close issue。**`docs/` living guide → 修文档** → 转 `current` |
 | `current` | 实现了,文档准确 | **closed** + 审计记录 |
-| `deprecated` | 废弃 | **closed**;内容先存 issue → 人确认 → 单独 PR 删文件 |
+| `deprecated` | 废弃 | **closed**;内容先存 issue → 单独 PR 删文件(PR 照常 review;删除可从 git 恢复,不等人) |
 
 (在途新设计用 `draft`,不属审计 5 类。)
 
 ### 命名 / 归类约定
 
 - **Milestone = 目录批次**:命名与归类跟随 repo profile 的 **Milestone Conventions**(arc 默认:`Doc Audit: intent/` / `Doc Audit: planning/` / `Doc Audit: docs/`),一个个清,防 issue 爆炸。
-- **Label**:`doc-audit`(meta,全挂)+ `status:<x>`(本轮结论挂)+ `needs-human-confirm`(给了建议、待人确认 close/delete)。
+- **Label**:`doc-audit`(meta,全挂)+ `status:<x>`(本轮结论挂)(close/delete 附证据直接做,不挂 `needs-human-confirm`)。
 - **标题**:`[<area>] <doc-name> — doc audit`,如 `[intent] session-protocol — doc audit`。
 - **幂等 key**:issue body 首行 `<!-- doc-audit-key: <doc-path> -->`;创建前先 `gh issue list --search` 搜它防重复建。
 - **Assignee(让对的人来 review)**:把 issue 指派给两类人——
@@ -77,7 +79,7 @@ tombstone 保住反向引用的链接(反例:#253 想删 context-builder,结果 
 
 ### 生命周期
 
-`create(一篇=一 issue,挂 milestone+doc-key)` → `review(冷启动:对照代码+跑测试,见下)` → `human 给意见(comment)` → `resolve(热启动:按 human 意见起草修复/crystal)` → `人确认 → close`。
+`create(一篇=一 issue,挂 milestone+doc-key)` → `review(冷启动:对照代码+跑测试,见下)` → `human 给意见(comment)` → `resolve(热启动:按 human 意见起草修复/crystal)` → `附证据 close(写 reopen 条件)`。
 
 ### 批量建 issue(精简;review 时补全)
 
@@ -92,7 +94,7 @@ tombstone 保住反向引用的链接(反例:#253 想删 context-builder,结果 
 
 几十~几百篇一起跑时,**skill 之外的编排层**有四条经验,务必守:
 
-1. **Model 选最合适的,别默认继承 Opus。** doc-audit 是**有界任务**(读 1 篇 + skill + KB + grep 代码 + 可能 1 个测试 + 归 5 类 + 写 comment)→ **用 Sonnet**;**不用 Opus、不用 1M context**(单 agent 上下文远不到 200k)。`needs-human-confirm` 兜底,Sonnet 偶尔偏差人会接住。**Opus 只按需留给少数难/有争议的篇**(如安全 spin-off 复核)单独重跑。成本差 ~5×。
+1. **Model 选最合适的,别默认继承 Opus。** doc-audit 是**有界任务**(读 1 篇 + skill + KB + grep 代码 + 可能 1 个测试 + 归 5 类 + 写 comment)→ **用 Sonnet**;**不用 Opus、不用 1M context**(单 agent 上下文远不到 200k)。偶尔的偏差由 7 天复判和后续 review 接住(close 可 reopen)。**Opus 只按需留给少数难/有争议的篇**(如安全 spin-off 复核)单独重跑。成本差 ~5×。
 2. **限速:GitHub「内容创建」是硬约束(≤500/h、≤80/min)。** 批量 POST 大头是 comment,所以:
    - **每 agent 只发 1 条 verdict comment**;
    - **大批量时 agent 不各自发 KB comment**(否则 POST 翻倍)——新拓扑事实写进 agent 返回行,**KB 由单点(主控)集中折叠**;
@@ -137,6 +139,6 @@ review/audit 中常会撞到**独立于本文档 status 的真问题**(安全漏
 5. **双向回链 + 原生边**:spin-off body 首行 `<!-- spinoff-of: #N ... -->` + Optional research 引 #N;原 issue 落一条 comment 列出拆出的 #X/#Y(表格:范围 + 独立性)+ 剩余 resolve 动作。**每个拆出的 spin-off 同时 `link.ts --parent <N> --child <#X>` 写原生边**(写边纪律,close-kick/rollup 依赖它)。
 6. **拆完立即摘掉 `status:partial`,换成残留真实状态(否则误导 human review)。** `status:partial` 是**「待分诊」信号**;`path:line` 坐实的 gap 一旦全部 routed 到 tracking issue,它就会让 human 误判本 issue 还有未处理的实现缺口。摘 label / 换 label 可逆 → **自动做**:
    - **本 issue 还有残留**(典型:文档漂移——「已完成但文档没更新」)→ 换 `status:drifted`(open;resolve 按 status 表分流:`planning`/`intent` → historical 归档,`docs/` → 修文档转 `current`;均由人签名 PR 落地 → close)。
-   - **完全无残留**(gap 全 track + 无漂移)→ 换 `status:current`(或无 status)+ 保留 `needs-human-confirm`,作「审计完成,待人最终 close」信号。
+   - **完全无残留**(gap 全 track + 无漂移)→ 换 `status:current`(或无 status),附证据直接 close,评论写明 reopen 条件。
    - **拆分≠完成,但「本 issue 的 partial 工作已分诊完毕」= 完成**——区别在于:剩余实现工作的家已搬到 spin-off,本 issue 只剩 doc resolve(或无)。
-   - **仍绝不自动 close / 改 frontmatter**(那是人的不可逆动作);最终 resolve(写 frontmatter + 修 doc + close)由人签名 PR。label 归 AI(可逆)、frontmatter 归人(签名)。
+   - **frontmatter 和修 doc 走 PR**;label 和 close 归 AI(可逆,附证据 + reopen 条件)。

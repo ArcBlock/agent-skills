@@ -22,6 +22,6 @@ The fixer fixes every still-valid P0–P2 finding of the round (review + bot + h
 
 ## Wording-only findings
 
-A finding that only asks to reword prose or a code comment rides along with the next substantive fix batch, or becomes a follow-up. Never a standalone push for it alone.
+A finding that only asks to reword prose or a code comment rides along with the next substantive fix batch, or is noted, not filed. Never a standalone push for it alone.
 
 Re-review if the fix was substantial or security-relevant — incrementally, on the fix delta only. A security fix deserves a second independent agent that runs the original exploit against the patched code.

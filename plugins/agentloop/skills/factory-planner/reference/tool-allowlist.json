@@ -1,0 +1,53 @@
+{
+  "$comment": [
+    "The ONLY tools and Bash commands a factory-planner round may use (#9589 W-01). The runner passes",
+    "them as the session's --allowedTools; in `claude -p` any other tool call or Bash command is refused,",
+    "so shell wrappers, interpreters, alternate spellings and option-first forms are refused by default.",
+    "Each `bash` entry is a command prefix (rule `Bash(<prefix>:*)`). `<cli>` is the factory CLI the",
+    "prompt names, `<arc_home>` the factory instance home. Every command SKILL.md and its references",
+    "show must be here (scripts/test/factory-planner-tool-deny.test.ts): a skill edit that needs a new",
+    "command adds it here.",
+    "Checks go through `plan-check`, which has no write path; command text cannot tell a",
+    "`plan-submit --check` from a submit (repeated or dotted flags, `--`), so dry-run gets no",
+    "`plan-submit` in any form.",
+    "No git command: git can run external programs through its options and config (pager, diff",
+    "drivers, textconv, -c), so code is read with Read / Grep / Glob. An entry must not take an option",
+    "that runs a program, writes a file or opens a browser (gh --web is denied)."
+  ],
+  "tools": ["Read", "Glob", "Grep", "Skill"],
+  "writeRoots": ["<arc_home>/planner"],
+  "bash": {
+    "any": [
+      "<cli> work wake",
+      "<cli> work status",
+      "<cli> work capacity",
+      "<cli> work occupancy",
+      "<cli> work progress",
+      "<cli> work portfolio-list",
+      "<cli> work plan-check",
+      "<cli> afs read",
+      "<cli> afs cat",
+      "<cli> afs list",
+      "<cli> afs ls",
+      "<cli> afs stat",
+      "<cli> afs explain",
+      "<cli> afs search",
+      "gh issue view",
+      "gh issue list",
+      "gh pr view",
+      "gh pr list",
+      "date",
+      "ls",
+      "jq",
+      "head",
+      "tail",
+      "wc"
+    ],
+    "live": [
+      "<cli> work judge",
+      "<cli> work attention",
+      "<cli> work decide",
+      "<cli> work plan-submit"
+    ]
+  }
+}

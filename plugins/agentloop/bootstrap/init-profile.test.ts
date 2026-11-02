@@ -61,6 +61,14 @@ const KEYS_READ_BY_SKILLS = [
   "change_set_record_entry",
   "pr_sweep_freeze_ttl_days",
   "pr_sweep_stale_escalation_days",
+  "factory_planner_instance",
+  "factory_planner_deny_paths",
+  "factory_planner_approver_engine",
+  "factory_planner_wip",
+  "factory_planner_wip_max",
+  "factory_planner_design_root",
+  "factory_planner_clock",
+  "lesson_ledger_dir",
 ] as const;
 
 describe("profile scaffold 的键集（#5697 review P2）", () => {

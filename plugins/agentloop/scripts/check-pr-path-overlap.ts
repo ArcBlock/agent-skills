@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { posix } from "node:path";
 
+const GH_REST = new URL("../../../vendor/arc/scripts/gh-rest/gh.ts", import.meta.url).pathname;
+
 export interface OpenPrPathSet {
   number: number;
   title: string;
@@ -104,7 +106,8 @@ export function checkPrPathOverlap(runArgsJson: string, cwd?: string): Result {
 
   const listed = spawn(
     [
-      "gh",
+      "bun",
+      GH_REST,
       "pr",
       "list",
       "--state",

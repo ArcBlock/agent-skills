@@ -12,7 +12,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import type { Adapter } from "./adapter.ts";
+import { type Adapter, BUN_VITEST_DIALECT, type Dialect } from "./adapter.ts";
 import { scanDiffFile } from "./diff.ts";
 import { draftIssues, publishIssues } from "./issues.ts";
 import { type Finding, parse, scanFile } from "./rules.ts";
@@ -59,9 +59,12 @@ export async function loadAdapter(root: string, configPath?: string): Promise<Ad
   const abs = isAbsolute(rel) ? rel : join(root, rel);
   if (!existsSync(abs)) throw new Error(`test-audit: no adapter config at ${abs}`);
   const mod = await import(abs);
-  const adapter = (mod.default ?? mod.adapter) as Adapter;
-  if (!adapter) throw new Error(`test-audit: ${abs} has no default export`);
-  return { ...adapter, root };
+  const raw = (mod.default ?? mod.adapter) as
+    | (Omit<Adapter, "dialect"> & { dialect?: Dialect | "bun-vitest" })
+    | undefined;
+  if (!raw) throw new Error(`test-audit: ${abs} has no default export`);
+  const dialect = !raw.dialect || raw.dialect === "bun-vitest" ? BUN_VITEST_DIALECT : raw.dialect;
+  return { ...raw, dialect, root };
 }
 
 /**

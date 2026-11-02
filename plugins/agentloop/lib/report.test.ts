@@ -6,7 +6,8 @@
  * `.claude/verify/identity.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -518,6 +519,111 @@ describe("run() timeoutMs (#2054 — a stuck subprocess must not hang a caller f
     expect(stripJobControlNoise("[1]+ Done  { echo payload; }\npayload\n").trim()).toBe("payload");
     expect(stripJobControlNoise("plain\n")).toBe("plain\n");
   });
+
+  // #7703 A1 — under `set -m` bash calls setpgid(child, child) from both sides;
+  // when the child's own call loses it prints this line to the wrapper's stderr
+  // (the group is set anyway). It trailed a JSON report and broke JSON.parse.
+  test("stripJobControlNoise drops bash's `child setpgid` diagnostic (#7703 A1)", () => {
+    const leaked = '{"ok":true}\nbash: child setpgid (92549 to 92549): Operation not permitted\n';
+    const cleaned = stripJobControlNoise(leaked);
+    expect(cleaned.trim()).toBe('{"ok":true}');
+    expect(JSON.parse(cleaned)).toEqual({ ok: true });
+    // argv0 `/bin/bash` and the non-interactive `line N:` prolog are the same diagnostic.
+    expect(
+      stripJobControlNoise("x\n/bin/bash: child setpgid (1 to 1): Operation not permitted\n"),
+    ).toBe("x\n");
+    expect(
+      stripJobControlNoise("x\nbash: line 3: child setpgid (7 to 7): Operation not permitted\n"),
+    ).toBe("x\n");
+    // Last line without a trailing newline.
+    expect(stripJobControlNoise("x\nbash: child setpgid (2 to 2): Operation not permitted")).toBe(
+      "x\n",
+    );
+  });
+
+  // #7703 A2 — accept twin: only bash's own whole-line diagnostic goes; a
+  // command's output that mentions setpgid is payload and survives verbatim.
+  test("stripJobControlNoise keeps a command's own output that mentions setpgid (#7703 A2)", () => {
+    for (const keep of [
+      "note: child setpgid (1 to 1) is fine\n",
+      "mytool: child setpgid (1 to 1): x\n",
+      "see bash: child setpgid (1 to 1): Operation not permitted\n",
+      "bash: child setpgid failed for some other reason\n",
+    ]) {
+      expect(stripJobControlNoise(keep)).toBe(keep);
+    }
+  });
+
+  // #7703 A3/A4 — deterministic end-to-end repro: an LD_PRELOAD shim makes the
+  // CHILD's own setpgid return EPERM after doing the real call (the parent's
+  // call "won"), which is exactly the path where bash prints the diagnostic.
+  // Linux + a C compiler only: macOS SIP strips DYLD_INSERT_LIBRARIES from the
+  // system bash, so there A1/A2 (the pure function) carry the coverage.
+  const cc = Bun.which("cc");
+  const shimUnavailable = process.platform !== "linux" || !cc;
+  const buildShim = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "agentloop-setpgid-shim-"));
+    writeFileSync(
+      join(dir, "shim.c"),
+      `#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+int setpgid(pid_t pid, pid_t pgid) {
+  static int (*real)(pid_t, pid_t);
+  if (!real) real = dlsym(RTLD_NEXT, "setpgid");
+  if (getenv("SHIM_EPERM") && pid == getpid()) { real(pid, pgid); errno = EPERM; return -1; }
+  return real(pid, pgid);
+}
+`,
+    );
+    const so = join(dir, "shim.so");
+    const r = spawnSync(cc as string, ["-shared", "-fPIC", "-o", so, join(dir, "shim.c"), "-ldl"]);
+    if (r.status !== 0) throw new Error(`shim build failed: ${r.stderr}`);
+    return so;
+  };
+
+  test.skipIf(shimUnavailable)(
+    "the wrapper's `child setpgid` leak never reaches run()'s output (#7703 A3, Linux)",
+    () => {
+      const env = { LD_PRELOAD: buildShim(), SHIM_EPERM: "1" };
+      const r = run(`echo '{"ok":true}'`, env, undefined, 5000);
+      expect(r.code).toBe(0);
+      expect(r.out).toBe('{"ok":true}\n');
+      const w = run(`echo '{"ok":true}'`, env, undefined, 5000, { noOutputTimeoutMs: 3000 });
+      expect(w.code).toBe(0);
+      expect(w.out).toBe('{"ok":true}\n');
+    },
+  );
+
+  test.skipIf(shimUnavailable)(
+    "with the child's setpgid losing, the timeout still reaps the whole group (#7703 A4, Linux)",
+    () => {
+      const env = { LD_PRELOAD: buildShim(), SHIM_EPERM: "1" };
+      const pidFile = join(tmpdir(), `agentloop-setpgid-orphan-${process.pid}`);
+      rmSync(pidFile, { force: true });
+      const r = run(`bash -c 'echo $$ > ${pidFile}; sleep 60' & wait`, env, undefined, 1500);
+      expect(r.timedOut).toBe(true);
+      expect(r.out).not.toContain("setpgid");
+      const grandchild = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+      rmSync(pidFile, { force: true });
+      expect(Number.isFinite(grandchild)).toBe(true);
+      const gone = () => {
+        try {
+          process.kill(grandchild, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      const deadline = Date.now() + 5000;
+      while (!gone() && Date.now() < deadline) Bun.sleepSync(50);
+      const alive = !gone();
+      if (alive) process.kill(grandchild, "SIGKILL");
+      expect(alive).toBe(false);
+    },
+  );
 
   test("the no-output watchdog reaps only its own silent group and preserves its output", () => {
     const start = Date.now();

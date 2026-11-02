@@ -510,16 +510,25 @@ function whichDir(cmd: string): string | undefined {
  *  every dir the driver + its children need. CRITICAL: probe node/pnpm/git/claude with
  *  `command -v` (not just standard dirs) — nvm/fnm put `node` under a version-manager dir,
  *  and a hardcoded list would drop it, so `pnpm install` (the driver's setupCommand) would
- *  die with "node: command not found" on every repo. Mirrors /setup-routines Step 3c. */
-function detectCronPath(bunPath: string): string {
+ *  die with "node: command not found" on every repo. Mirrors /setup-routines Step 3c.
+ *
+ *  `~/.local/bin` is NOT put first (agent-factory#20): a host's global `arc` lives there and
+ *  may be another build (arc#10371). It appears only when a probed tool lives there, and then
+ *  last, after the system dirs. Factory call sites never resolve `arc` from PATH anyway. */
+export function detectCronPath(
+  bunPath: string,
+  probe: { home?: string; whichDir?: (cmd: string) => string | undefined } = {},
+): string {
+  const home = probe.home ?? homedir();
+  const which = probe.whichDir ?? whichDir;
+  const localBin = `${home}/.local/bin`;
   const dirs = [
-    `${homedir()}/.local/bin`,
-    `${homedir()}/Library/pnpm`,
+    `${home}/Library/pnpm`,
     bunPath.slice(0, bunPath.lastIndexOf("/")),
-    whichDir("node"),
-    whichDir("pnpm"),
-    whichDir("git"),
-    whichDir("claude"),
+    which("node"),
+    which("pnpm"),
+    which("git"),
+    which("claude"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
@@ -527,7 +536,11 @@ function detectCronPath(bunPath: string): string {
     "/usr/sbin",
     "/sbin",
   ].filter((d): d is string => Boolean(d));
-  return [...new Set(dirs)].join(":");
+  const unique = [...new Set(dirs)];
+  const ordered = unique.includes(localBin)
+    ? [...unique.filter((d) => d !== localBin), localBin]
+    : unique;
+  return ordered.join(":");
 }
 
 /** Parse a compact --repos spec: "slug=skill,skill@cadence;slug=skill@cadence".

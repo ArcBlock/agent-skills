@@ -83,10 +83,12 @@ the host. Either way the turn was wasted.
 Outside a Factory run (an attended session with a person who will send the next turn), backgrounding
 is a scheduling choice, not this defect, and this file does not apply.
 
-## Merge authority is human (arc#7662)
+## Merge authority: the host merger (arc#7662, arc#8182)
 
-A Factory run takes the work up to **ready to merge** and stops. The merge is a person's decision,
-whatever `--merge` mode or single/batch default the skill would otherwise use.
+A Factory run takes the work up to **ready to merge** and stops. The merge is the factory host
+merger's (#8182, `packages/aos-factory/src/work-factory-merge.ts`): an executor other than the coder, after
+the approval drain's cross-engine review and the factory merge check. Not the run's, whatever
+`--merge` mode or single/batch default the skill would otherwise use, and not a person's.
 
 1. Do everything up to the merge: the changed package's tests, the one clean-context review (read-only
    in the run's own tree, **no new worktree**), one batched fix, the PR, the Change Set record. After
@@ -94,20 +96,21 @@ whatever `--merge` mode or single/batch default the skill would otherwise use.
    `arc work review`), see [land/reference/factory-run-review.md](../skills/land/reference/factory-run-review.md)
    (arc#7707). The factory's merge check (independent approve on the latest round, producer
    path-compliant at the PR head) is the product's (aos `checkFactoryMerge`, CLI `arc work
-   merge-check`); the person's `merge-verified-pr.sh` runs it through the repo profile.
-2. **Never merge**: not `merge-verified-pr.sh`, not `gh pr merge`.
-3. Tell the person on GitHub: one PR comment (identity line) with the ready-to-merge checklist (head
-   sha, test command + counts, review outcome, the host cross-engine review still to come — with the
-   `arc work review` command when no drain will run it), and the `needs-human-confirm` label.
-4. Report the PR as **"ready to merge, human decision"**. The run's exit is a success; this is the
-   intended end state. **Never wait for the human merge** (it is not a child run; waiting only burns
-   the run).
+   merge-check`); the host merger runs it before merging.
+2. **Never merge**: do not run `merge-verified-pr.sh` or merge the PR yourself.
+3. Leave one PR comment via `bun scripts/gh-rest/gh.ts pr comment <PR#> --body-file <path>` (identity line) with the ready-to-merge checklist (head sha, test command +
+   counts, review outcome, the host cross-engine review still to come — with the `arc work review`
+   command when no drain will run it). **No `needs-human-confirm`**: ready to merge is not an R2
+   decision ([r2-admission.md](r2-admission.md)).
+4. Report the PR as **"ready to merge — host merger"**. The run's exit is a success; this is the
+   intended end state. **Never wait for the merge** (it is not a child run; waiting only burns the run).
 5. **An epic conductor in a run** dispatches only members whose dependencies are already merged on
    the default branch. When every remaining wave needs a member that is still unmerged, report all
-   ready-to-merge PRs and end the run; the next run picks up after the person merges.
+   ready-to-merge PRs and end the run; the next run picks up after the host merger merges them.
 
 Why: a single target defaults to `--merge=auto`, so one land run merged its own PR while another
-stopped only by accident (an `agent:hold` label). The incident and the decision are arc#7662.
+stopped only by accident (an `agent:hold` label), arc#7662. The coder must not be the merger; since
+#8182 the host merger is that other executor, so a ready PR no longer waits for a person.
 
 **The guardrail.** `merge-verified-pr.sh` refuses with exit 3 when `ARC_CODE_AGENT_RUN_ID` is set,
 before any GitHub call. Exit 3 means "stop at ready to merge", not "retry another way". It is not an

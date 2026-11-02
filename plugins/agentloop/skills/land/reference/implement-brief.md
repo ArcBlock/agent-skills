@@ -35,3 +35,8 @@ for everything wider.
 `record-change-set.sh` hands the repo's ledger command the pushed head, the PR base and the changed
 files. The same head again is a replay; a new push is round + 1. A non-zero exit means not recorded:
 never swallow it with `|| true`.
+
+## Root cause before fix (#4323) and approved lessons (#4328)
+
+- After 2 failed fix attempts on the same failure, stop patching — trace the failure to its root cause (input → state → failure site) and state the root-cause hypothesis in 1 line before trying fix #3.
+- When `<lesson_ledger_dir>/absorbed.yaml` exists, include matching `status: absorbed` / `promoted` entries (`id` + `rule_home` + 1-line trap) in the implementer brief (`candidates/pending/` is never grounding; if an entry conflicts with shipped code, shipped code wins — flag `ledger stale: <id>`).

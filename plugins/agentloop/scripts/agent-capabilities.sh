@@ -25,8 +25,10 @@
 set -uo pipefail
 
 # native-ios: swift toolchain + can actually invoke `swift test` (not just `xcode-select -p`,
-# which can point at a stale/incomplete install).
-if command -v swift >/dev/null 2>&1 && swift --version >/dev/null 2>&1; then
+# which can point at a stale/incomplete install) + an iOS SDK. A Linux swift compiler alone
+# can't build the repo's UIKit/SwiftUI targets, so it is not native-ios.
+if command -v swift >/dev/null 2>&1 && swift --version >/dev/null 2>&1 &&
+  xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then
   echo "native-ios"
 fi
 
@@ -42,7 +44,15 @@ fi
 if [ -z "${android_home}" ] && [ -d "/opt/homebrew/share/android-commandlinetools" ]; then
   android_home="/opt/homebrew/share/android-commandlinetools"
 fi
-if [ -n "${android_home}" ] && [ -d "${android_home}" ] && command -v java >/dev/null 2>&1; then
+# An SDK dir with no platform installed can't build, and AGP needs Java 17+.
+java_major() {
+  local v
+  v=$(java -version 2>&1 | sed -nE 's/.*version "([0-9]+)(\.([0-9]+))?.*/\1 \3/p' | head -1)
+  set -- $v
+  if [ "${1:-0}" = "1" ]; then echo "${2:-0}"; else echo "${1:-0}"; fi
+}
+if [ -n "${android_home}" ] && compgen -G "${android_home}/platforms/android-*" >/dev/null &&
+  command -v java >/dev/null 2>&1 && [ "$(java_major)" -ge 17 ]; then
   echo "native-android"
 fi
 

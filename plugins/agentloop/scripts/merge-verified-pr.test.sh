@@ -305,6 +305,15 @@ if [ "${TEST_CHECK:-ok}" = oldhelp ]; then
   if [ "$1" = --help ]; then printf 'arc <command>\n\nCommands:\n  arc factory work merge-check  Check a PR\n'; exit 0; fi
   printf 'arc <command>\n\nUnknown command: "-i"\n'; exit 5
 fi
+# When `work merge-check` is served by the factory blocklet (#9638 / #9639),
+# `--help` only lists `[operands..]` (not `--base-sha`). The script must call
+# `merge-check` directly rather than grepping `--help`.
+if [ "${TEST_CHECK:-ok}" = blocklet ]; then
+  if [ "$1" = --help ]; then printf 'arc work merge-check [operands..]\n'; exit 0; fi
+  printf '%s\n' "$*" >> "$TEST_PATCH_DIR/.check-args"
+  echo '{"kind":"ok","reason":"approved by blocklet"}'
+  exit 0
+fi
 # A current arc's subcommand help names every flag the call passes.
 [ "$1" = --help ] && { printf 'Options:\n  --pr\n  --head\n  --head-ref\n  --base-sha\n  --json\n'; exit 0; }
 printf '%s\n' "$*" >> "$TEST_PATCH_DIR/.check-args"
@@ -312,6 +321,8 @@ case "${TEST_CHECK:-ok}" in
   noinstance) echo 'ERROR: no instance named "factory"'; exit 1 ;;
   ok) echo '{"kind":"ok","reason":"approved"}' ;;
   not-factory) echo '{"kind":"not-factory","reason":"no Change Set"}' ;;
+  logged-not-factory) echo '{"ts":"2026-11-01T04:20:32.260Z","level":"warn","service":"arc-node","message":"deprecated: old mount format"}'; echo '{"kind":"not-factory","reason":"no Change Set"}' ;;
+  logged-refused) echo '{"ts":"2026-11-01T04:20:32.260Z","level":"warn","service":"arc-node","message":"deprecated: old mount format"}'; echo 'ERROR: {"kind":"refused","code":"path-policy","reason":"x"}'; exit 5 ;;
   refused) echo 'ERROR: {"kind":"refused","code":"path-policy","reason":"agent-1 is violated: .claude/settings.json"} trailing'; exit 5 ;;
   broken) echo 'ERROR: index exploded {not json'; exit 5 ;;
   down) echo 'ERROR: No AFS daemon is running for instance "factory".'; exit 6 ;;
@@ -332,6 +343,18 @@ grep -F -- "--pr https://github.com/owner/repo/pull/42 --head $head40 --head-ref
 rm -f "$TEST_LOG"
 TEST_CHECK=not-factory "$root/merge-verified-pr.sh" 42 --repo owner/repo
 grep -F 'api --method PUT' "$TEST_LOG"
+# ACCEPT: a runtime log line (JSON without a kind) ahead of the verdict is skipped.
+rm -f "$TEST_LOG"
+TEST_CHECK=logged-not-factory "$root/merge-verified-pr.sh" 42 --repo owner/repo
+grep -F 'api --method PUT' "$TEST_LOG"
+# A refusal behind a log line still refuses.
+rm -f "$TEST_LOG"
+TEST_CHECK=logged-refused fails "log line + refused" "$root/merge-verified-pr.sh" 42 --repo owner/repo
+# ACCEPT: blocklet-served merge-check (whose --help lists only [operands..]) merges.
+rm -f "$TEST_LOG" "$TEST_PATCH_DIR/.check-args"
+TEST_CHECK=blocklet TEST_SHA=$head40 "$root/merge-verified-pr.sh" 42 --repo owner/repo
+grep -F 'api --method PUT repos/owner/repo/pulls/42/merge' "$TEST_LOG"
+grep -F -- "--pr https://github.com/owner/repo/pull/42 --head $head40 --head-ref fix/x --base-sha base0 --json" "$TEST_PATCH_DIR/.check-args"
 # A refusal stops the merge, and --not-factory does not lift it.
 TEST_CHECK=refused fails "factory check refused" "$root/merge-verified-pr.sh" 42 --repo owner/repo
 TEST_CHECK=refused fails "refused + --not-factory" "$root/merge-verified-pr.sh" 42 --repo owner/repo --not-factory "cloud runner"
@@ -368,4 +391,44 @@ printf '%s' "$out" | grep -F 'no factory_merge_check_entry' >/dev/null || { echo
 fails "--not-factory needs a reason" "$root/merge-verified-pr.sh" 42 --repo owner/repo --not-factory ""
 export AGENTLOOP_REPO_PROFILE="$tmp/no-profile.md"
 echo "factory merge check: ok"
+
+# ── #9427 evidence: the factory check runs the factory's `arc` with the DEFAULT
+# BRANCH's profile — never code from the checkout the script runs in (a PR's
+# worktree). The checkout's HEAD repoints the profile at, and replaces the
+# CLI's source and build with, traps; none of them runs.
+co="$tmp/pr-checkout"; mkdir -p "$co/.claude" "$co/runtimes/node/dist" "$co/runtimes/node/src"
+g() { git -C "$co" -c user.email=t@t -c user.name=t "$@"; }
+g init -q -b main
+printf '| `factory_merge_check_entry` | `arc -i factory work merge-check` — main |\n' > "$co/.claude/repo-profile.md"
+g add -A; g commit -q -m main; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -b pr
+printf '| `factory_merge_check_entry` | `%s` — the PR head |\n' "$co/runtimes/node/dist/cli.mjs" > "$co/.claude/repo-profile.md"
+for f in runtimes/node/dist/cli.mjs runtimes/node/src/cli.ts; do
+  printf '#!/usr/bin/env bash\ntouch "%s"\necho {\"kind\":\"ok\"}\n' "$tmp/pr-code-ran" > "$co/$f"; chmod +x "$co/$f"
+done
+g add -A; g commit -q -m pr
+# agent-factory#20: the factory shim ($HOME/.arc-factory/bin/arc, the
+# factory's slot built from main) answers the check; PATH's arc is a stub
+# that must never run.
+mkdir -p "$tmp/pathbin" "$tmp/home/.arc-factory/bin"
+printf '#!/bin/sh\ntouch "%s"\nexit 99\n' "$tmp/path-arc-ran" > "$tmp/pathbin/arc"; chmod +x "$tmp/pathbin/arc"
+cat > "$tmp/home/.arc-factory/bin/arc" <<'ARC'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = --help ] && { printf 'Options:\n  --base-sha\n'; exit 0; }; done
+printf '%s\n' "$*" >> "$TEST_PATCH_DIR/.check-args"
+echo '{"kind":"ok","reason":"approved"}'
+ARC
+chmod +x "$tmp/home/.arc-factory/bin/arc"
+rm -f "$TEST_LOG" "$TEST_PATCH_DIR/.check-args" "$tmp/pr-code-ran"
+(cd "$co" && env -u AGENTLOOP_REPO_PROFILE -u ARC_CLI HOME="$tmp/home" PATH="$tmp/pathbin:$PATH" "$root/merge-verified-pr.sh" 42 --repo owner/repo >/dev/null)
+grep -qF -- '-i factory work merge-check --pr https://github.com/owner/repo/pull/42' "$TEST_PATCH_DIR/.check-args" ||
+  { echo "#9427: the factory shim did not answer the factory check" >&2; exit 1; }
+[ ! -e "$tmp/path-arc-ran" ] || { echo "#20: PATH's arc ran the factory check" >&2; exit 1; }
+[ ! -e "$tmp/pr-code-ran" ] || { echo "#9427: the checkout's code ran in the factory check" >&2; exit 1; }
+grep -qF 'api --method PUT' "$TEST_LOG"
+# Positive control: the trap fires when the PR head's profile is the one read.
+git -C "$co" show pr:.claude/repo-profile.md > "$tmp/pr-profile.md"
+(cd "$co" && AGENTLOOP_REPO_PROFILE="$tmp/pr-profile.md" "$root/merge-verified-pr.sh" 42 --repo owner/repo >/dev/null 2>&1) || true
+[ -e "$tmp/pr-code-ran" ] || { echo "#9427: positive control: the trap never fires" >&2; exit 1; }
+echo "#9427 checkout code: not run"
 echo ok

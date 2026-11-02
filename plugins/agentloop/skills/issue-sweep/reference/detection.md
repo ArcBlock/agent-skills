@@ -88,7 +88,8 @@ order IS the rule** (a live arc sweep proved that getting it backwards inverts t
    inside a code block matched `in-progress`.
 2. **TERMINAL WINS.** If the comment carries a real unlock condition (`PR #…` / closed /
    `needs-human-confirm` / `needs-design` / `security-sensitive` / `not-verifiable-here`)
-   → terminal → **skip**, even if some other word looks deferral-ish. A live sweep
+   → terminal → **skip**, even if some other word looks deferral-ish. Exception (R2 admission
+   §5): an issue whose `needs-human-confirm` is due for re-judge (`nhcNeedsRejudge()`) is kept. A live sweep
    re-picked a *terminal security escalation* because its prose ("不在本轮自动修") tripped
    the deferral regex, which used to be evaluated first.
 3. Only then: a last agent comment matching `排队中|本轮未做|留开放|不在.{0,8}范围|非单 PR|多.?phase.*(留开放|不在)|candidate-queued|queued|in-progress|稍后|will do|TODO`

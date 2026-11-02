@@ -20,6 +20,7 @@ import {
   coveredRepos,
   coveredSkills,
   detectCodexPluginRoot,
+  detectCronPath,
   parseProbedPath,
   parseReposSpec,
   paths,
@@ -826,5 +827,29 @@ describe("buildCatalog — clone mode needs a cloneUrl the compact spec cannot c
     ];
     const [r] = buildCatalog(parseReposSpec("ArcBlock/arc=issue-sweep"), existing);
     expect(r.cloneUrl).toBe("git@github.com:ArcBlock/arc.git");
+  });
+});
+
+describe("detectCronPath — no global ~/.local/bin first (agent-factory#20)", () => {
+  // A host's ~/.local/bin/arc may point at another CLI (arc#10371); cron must not
+  // hand it the front of PATH.
+  const home = "/home/alice";
+  const bun = "/home/alice/.bun/bin/bun";
+
+  test("not hard-coded: absent unless a probed tool lives there", () => {
+    const p = detectCronPath(bun, { home, whichDir: () => undefined }).split(":");
+    expect(p).not.toContain(`${home}/.local/bin`);
+    expect(p[0]).toBe(`${home}/Library/pnpm`);
+    expect(p).toContain("/usr/bin");
+  });
+
+  test("accept: a tool found only in ~/.local/bin (e.g. claude) keeps it, but last", () => {
+    const p = detectCronPath(bun, {
+      home,
+      whichDir: (cmd) => (cmd === "claude" ? `${home}/.local/bin` : undefined),
+    }).split(":");
+    expect(p).toContain(`${home}/.local/bin`);
+    expect(p.at(-1)).toBe(`${home}/.local/bin`);
+    expect(p.indexOf("/usr/bin")).toBeLessThan(p.indexOf(`${home}/.local/bin`));
   });
 });

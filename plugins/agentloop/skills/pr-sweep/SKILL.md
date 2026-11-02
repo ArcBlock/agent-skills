@@ -53,7 +53,7 @@ actions. Nothing actionable at all → exit early.
 
 Disposition labels (controlled set): `pr-sweep:needs-fix` (the sweep fixes it; after 3 of its own
 fix pushes still red → `awaiting-direction` with a per-round summary) · `pr-sweep:awaiting-glance`
-(verified, a human confirms) · `pr-sweep:awaiting-direction` (an A/B call) ·
+(verified, a human confirms) · `pr-sweep:awaiting-direction` (an R2 call; a technical A/B goes to the review jury) ·
 `pr-sweep:awaiting-judgment` (a concrete uncertain risk) · `pr-sweep:awaiting-caution` (security /
 breaking / irreversible) · `pr-sweep:blocked-deps`. A human change request is not an approval:
 implement it, post evidence, set `awaiting-glance`, wait for explicit approval words.
@@ -75,7 +75,7 @@ pr-review comment per head; never re-post an unchanged conclusion.
 
 For a same-issue cluster: pick the keeper (more complete > more correct against the authoritative
 source > tested > newer base > first). A second, independent fresh-context agent picks too and
-returns `{keep, reason}`; they disagree → close nothing, `awaiting-direction` on each. Contradicting
+returns `{keep, reason}`; they disagree → close nothing, the review jury picks. Contradicting
 claims → check the authoritative source first. Close each twin with an identity-headed comment
 naming the keeper (`gh pr close <twin> --comment "superseded by #<keeper>"`) and note the closed
 twins on the keeper. Any PR with `agent:hold` takes no part. Unsure → keep both, `COMMENT`.
@@ -87,8 +87,8 @@ All of these, re-checked right before each merge:
 - pr-review verdict at the **current head** is `MERGE` or a non-blocking `COMMENT`, its test run
   of the changed package passed, and no P0–P2 finding (review, bot or human) is open;
 - no human reviewer's latest `CHANGES_REQUESTED` that their own `APPROVED` has not superseded;
-- not a factory-run PR: no `needs-human-confirm` label, no ready-to-merge checklist from a run,
-  no Change Set produced by a run. Those are a person's merge (#7662), never the sweep's.
+- not a factory-run PR: no ready-to-merge checklist from a run, no Change Set produced by a run.
+  Those are the host merger's (#8182), never the sweep's. No `needs-human-confirm` with an `R2:` line.
   Mechanically: `merge-verified-pr.sh` runs the factory merge check, which refuses a factory PR
   that is not approved and path-compliant. The sweep never passes `--not-factory`, so on a runner
   with no factory daemon (cloud, another machine) every merge refuses there: the sweep reports

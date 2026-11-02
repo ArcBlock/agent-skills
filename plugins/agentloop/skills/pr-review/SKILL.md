@@ -36,30 +36,36 @@ property) against the code. A crashed or silent reviewer is uncertain, never a p
 | `BLOCK` | a real defect (P0–P2), failing tests caused by this PR, or an unresolved conflict |
 | `CLOSE` | stale, already superseded by merged work, no longer needed |
 
-Severity: **P0–P2 block** and are fixed in one batch by the author; **P3 → a follow-up issue**.
+Severity: **P0–P2 block** and are fixed in one batch by the author; **P3 → noted, not filed**
+(`COMMENT`, listed for the PR body, never an issue, never a block). Only findings in the PR's own
+diff (`merge-base..head`) count ([issue closure](../../../../../docs/architecture/issue-closure-discipline.md)).
 
 ## Steps
 
 **0. Read the PR** — all three surfaces, each with an output even when empty:
 
 ```bash
-gh pr view <n> --json title,body,author,headRefName,baseRefName,headRefOid,mergeable,files,labels
-gh pr view <n> --comments
-gh api repos/{owner}/{repo}/pulls/<n>/comments --paginate --jq '.[]|{user:.user.login,path,line,body}'
-gh api repos/{owner}/{repo}/pulls/<n>/reviews --paginate --jq '.[]|select(.body!="")|{user:.user.login,state,body}'
+bun scripts/gh-rest/gh.ts pr view <n> --json title,body,author,headRefName,baseRefName,headRefOid,mergeable,files,labels
+bun scripts/gh-rest/gh.ts pr view <n> --comments
+bun scripts/gh-rest/gh.ts api repos/{owner}/{repo}/pulls/<n>/comments --paginate --jq '.[]|{user:.user.login,path,line,body}'
+bun scripts/gh-rest/gh.ts api repos/{owner}/{repo}/pulls/<n>/reviews --paginate --jq '.[]|select(.body!="")|{user:.user.login,state,body}'
 ```
 
 Record each review `state`. Read the linked issue (`Fixes #N`). Bot inline comments (Codex,
 Cursor, …) are review input: verify each, keep the real ones as findings. A failed fetch is not
 "no comments". MCP equivalents and the rebase rule: [reference/steps-detail.md](reference/steps-detail.md).
 
-**1. Diff + current code.** `gh pr diff <n>`, then read the touched files on the current
+**1. Diff + current code.** `bun scripts/gh-rest/gh.ts pr diff <n>`, then read the touched files on the current
 `<default_branch>`, not only inside the diff. To run the PR's code use a worktree under
 `$AGENTLOOP_WORKTREE_BASE/pr-<n>.$$` (never the shared checkout, never a hardcoded `/tmp`) and remove it after.
 
 **2. Verify every claim.** Each claim → `path:line` or NOT FOUND. Bug fix: does the diff fix it and
 is there a test? Test-only: do the assertions fail when the code breaks? Docs: does each statement
-match shipped code? Feature: scope, correctness, shared config touched.
+match shipped code? Feature: scope, correctness, shared config touched. If `<lesson_ledger_dir>` in
+`.claude/repo-profile.md` is not `none` and `<lesson_ledger_dir>/absorbed.yaml` exists, check
+`status: absorbed` / `promoted` entries for the touched surface and read their `rule_home`
+(`candidates/pending/` is not grounding; if an entry conflicts with shipped code, shipped code wins —
+flag `ledger stale: <id>`).
 
 **2.5 Cross-cutting.** Reverse references ([`impact-check`](../impact-check/SKILL.md)),
 cross-package parity, end-to-end use, performance on request/init paths, test coverage, test quality
@@ -69,7 +75,8 @@ cleanup of what the PR replaces. Each dimension: evidence or "n/a". Table: [refe
 **3. Run the changed package's tests** on the PR head (`<package_manager> --filter <pkg> test`,
 or `<test_runner> <files>`); record the exact command and counts. A red caused by this PR →
 `BLOCK` with the failing test and output tail. A red that is not this PR's → root-cause it (bisect),
-never re-run until green; say so in the verdict and link or open an issue.
+never re-run until green; say so in the verdict and link the open issue for that test (open one
+only when none exists).
 
 **4. Sibling PRs.** Same issue (`Fixes|Part of #N`, issue number in the branch) → exact duplicate or
 contradiction; keep the more complete > more correct > tested > newer base > first, the other is
@@ -87,7 +94,7 @@ readers find the review by it), then the identity line, `HEAD <40-char sha>`, `V
 
 ```bash
 hdr=$(bash <agent_identity_script> --header "PR Review" --skill pr-review)
-gh pr comment <n> --body-file draft.md
+bun scripts/gh-rest/gh.ts pr comment <n> --body-file draft.md
 ```
 
 Review the same head once; a new head or a new human comment is a new review (of the delta when the
@@ -98,5 +105,6 @@ earlier review still holds).
 A deterministic defect is fixed, not just reported, when four doors hold: evidence is solid, the
 fix is unambiguous, it is not security, it needs no direction call. Introduced by this PR → fix on
 the PR branch (`--post`) or give the exact patch (read-only). Pre-existing on main and bounded →
-tracking issue + its own fix PR. Any door fails → comment + `needs-human-confirm`. Detail:
+tracking issue + its own fix PR. Security door fails → the panel; direction / size / semantic dispute → the
+review jury; `needs-human-confirm` only for an R2 decision ([r2-admission.md](../../reference/r2-admission.md)). Detail:
 [reference/fix-now.md](reference/fix-now.md).

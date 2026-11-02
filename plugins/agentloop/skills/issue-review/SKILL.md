@@ -77,7 +77,7 @@ When the issue is a research issue (外部系统 × 本系统结合点调研;流
 
 ## ★ Idea(想法类 issue)——先 clarify,open 评估,不当指令
 
-想法类 issue:先 clarify,open 评估,**不当指令**;回应人类时收尾写「下一轮我会做 X,除非你说不」(ratchet),`needs-human-confirm` 只留给互斥且不可逆的真分叉。
+想法类 issue:先 clarify,open 评估,**不当指令**;回应人类时收尾写「下一轮我会做 X,除非你说不」(ratchet),`needs-human-confirm` 只留给 R2 决定。
 
 When the issue is an idea issue (完整流程与铁律): Read [reference/idea.md](reference/idea.md).
 
@@ -124,8 +124,8 @@ status 只用受控 5 类(见 reference);存量审计只改 frontmatter `status`
 │ 5.5 能给安全默认就别升级(needs-human-confirm 硬前置)         │
 │ 5.7 沉默规则:agent 自发 + 无动作无新信息 → 本条不发,只记账    │
 │                                                             │
-│  6. 落 comment(中文),挂 status(+ 真分叉才挂                │
-│     needs-human-confirm);不 close、不删文件、不改 frontmatter│
+│  6. 落 comment(中文),挂 status(+ R2 才挂                   │
+│     needs-human-confirm);close/删文件附证据 + reopen 条件    │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -181,7 +181,7 @@ ls intent/<topic>/ ; sed -n '1,80p' intent/<topic>/INTENT.md
 
 ### Step 5.5 — needs-human-confirm 硬前置(issue #1860)
 
-打 `needs-human-confirm` 标之前先问一遍:**我能不能说出一个安全默认动作?** 能 → 禁止升级,当场按 ratchet(默认放行,出问题再收紧,同 [`pr-review` Step 5.5](../pr-review/SKILL.md))执行该动作并留 trace;不能,才是真判断题,才配打 `needs-human-confirm` 走 Step 6 的结构化拍板块。这条硬前置在**打标动作之前**过,不是打完标再补。
+打 `needs-human-confirm` 标之前先问一遍:**我能不能说出一个安全默认动作?** 能 → 禁止升级,当场按 ratchet(默认放行,出问题再收紧,同 [`pr-review` Step 5.5](../pr-review/SKILL.md))执行该动作并留 trace;不能,先分流:技术分歧交评判团,价值和优先级交 portfolio;只有 R2 决定才配打 `needs-human-confirm`,评论身份行后第一行写 `R2: <category>`,再走 Step 6 的结构化拍板块([R2 准入](../../reference/r2-admission.md))。这条硬前置在**打标动作之前**过,不是打完标再补。
 
 ### ★ Step 5.7 — 沉默规则:没有状态变化就不要发言(硬前置,在 Step 6 之前过)
 
@@ -211,8 +211,8 @@ gh issue edit <n> --add-label "status:<x>"                  # needs-human-confir
 ```
 
 - **`needs-human-confirm` 不是默认搭配。** 上面的命令刻意只加 `status:<x>`——这个标要过 Step 5.5
-  硬前置(说得出安全默认就禁止升级),★Research/★Idea 另有铁律 7 收紧到「只贴真分叉(互斥且不可逆)」。
-  确属真分叉时单独加:`gh issue edit <n> --add-label needs-human-confirm`。
+  硬前置(说得出安全默认就禁止升级),★Research/★Idea 铁律 7 同样「只贴 R2」。
+  确属 R2 时单独加:`gh issue edit <n> --add-label needs-human-confirm`。
 - **新发现 = 新 comment;更新既有结论(翻译、补证据、回应 human)= 原地编辑那条 comment**,别堆重复 comment。
 - **截图证据的两道硬验收**(破图事故的防复发规则,issue #3010 扩了第三条):① 上传**只走**
   `<ui_upload_script>`(`agent_identity_script` 同节的 Agent Tooling,arc 默认 `<ui_upload_script>`;
@@ -234,7 +234,7 @@ gh issue edit <n> --add-label "status:<x>"                  # needs-human-confir
 
 ## Key Principles
 
-1. 先判轮次 + 按价值分档。2. human comment 是方向不是圣旨:没 cover 的真问题仍指出,多人冲突摆出来让人定。3. 产物落 issue,不落会话。4. 每条发现带可复现证据(`path:line` / 真实测试输出),无证据不写。5. 对照已落地实现第一优先,doc-audit 必须真跑测试。6. 价值在独立发现。7. 按后果可逆性划自主边界:comment/label/开 issue 自动做;删文件、搬目录、merge/close、改架构方向挂 `needs-human-confirm`;**绝不**自动 merge/close/删文件/改 frontmatter(唯一例外 = 父级 rollup)。8. 不另起炉灶,增量叠在已有真相源上。9. 不搬目录。10. 共享 KB 热启动。11. partial 剩余工作要拆,拆完即摘 label。12. 开工 acquire 锁,收尾 release。13. 验收点名的验证是契约:改动包的测试真跑,点名 e2e 走 `/e2e-verify`;「跑不动」要贴确切报错先证明,不拿 unit test 顶替、不手填数字。15. 沉默规则 + ratchet 收尾。16. 产出方案时 grounding 同样严:现状断言 `path:line`、数字要么实测要么标注未验证、区分 as-is/proposed;post 前过 `/agentloop:design-review`。
+1. 先判轮次 + 按价值分档。2. human comment 是方向不是圣旨:没 cover 的真问题仍指出,多人冲突摆出来让人定。3. 产物落 issue,不落会话。4. 每条发现带可复现证据(`path:line` / 真实测试输出),无证据不写。5. 对照已落地实现第一优先,doc-audit 必须真跑测试。6. 价值在独立发现。7. 按后果可逆性划自主边界:comment/label/开 issue 自动做;close issue、删文件都可逆,附证据做,评论写明 reopen 条件;只有 R2 才挂 `needs-human-confirm`;不自动 merge PR,frontmatter 改动走 PR。8. 不另起炉灶,增量叠在已有真相源上。9. 不搬目录。10. 共享 KB 热启动。11. partial 剩余工作要拆,拆完即摘 label。12. 开工 acquire 锁,收尾 release。13. 验收点名的验证是契约:改动包的测试真跑,点名 e2e 走 `/e2e-verify`;「跑不动」要贴确切报错先证明,不拿 unit test 顶替、不手填数字。15. 沉默规则 + ratchet 收尾。16. 产出方案时 grounding 同样严:现状断言 `path:line`、数字要么实测要么标注未验证、区分 as-is/proposed;post 前过 `/agentloop:design-review`。
 
 每条的原因与事故来源: Read [reference/principles.md](reference/principles.md).
 

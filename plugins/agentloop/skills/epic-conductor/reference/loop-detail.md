@@ -16,3 +16,8 @@ This repo may have `issue-sweep`/`pr-sweep` cron runners that will otherwise gra
 - Create both labels up front (`gh label create`). Optionally also open a **milestone** per epic and assign the sub-issues to it — purely for the GitHub UI's native progress bar (X/Y closed); the machine mechanism is the labels, not the milestone.
 - Keep `agent:hold` on each opened PR too as belt-and-suspenders (and as the human-facing "reserved" signal), and remove it at merge time — but `epic-managed` is the primary fence. `agent:processing` becomes optional (only meaningful if two *conductors* could run the same repo); the standing exclusion, not the TTL lock, is what keeps the fleet out.
 - Keep the label list / epic number in a file a small background refresher reads; the refresher re-asserts labels periodically and exits when you clear the list at closeout. At closeout, remove `epic-managed` (and `agent:hold`) as each item reaches terminal state; the `epic:<n>` label stays as a permanent grouping record.
+
+### Mental model
+
+Decompose → fence → { worker → package tests → one review → one fix batch → PR → merge } →
+nightly → closeout. Pin a scope comment (this wave / deferred / handled); never package decomposable work as a menu.

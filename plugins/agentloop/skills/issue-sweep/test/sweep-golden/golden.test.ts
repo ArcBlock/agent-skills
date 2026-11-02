@@ -11,6 +11,7 @@ import { describe, expect, it } from "bun:test";
  *   ArcBlock/arc#1211 — L0/L1/L2/L3 framework discussion
  *   .claude/plugins/agentloop/skills/issue-sweep/SKILL.md Step 2
  */
+import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -24,6 +25,10 @@ import {
   isTerminalAiComment,
   isTestSweepFinding,
   labelStance,
+  NHC_REJUDGE_DAYS,
+  nhcNeedsRejudge,
+  R2_CATEGORIES,
+  r2Category,
   shouldProcess,
   suggestionListIsActionable,
 } from "./lib.ts";
@@ -777,5 +782,147 @@ describe("live-sweep regressions", () => {
   it("a real human comment is still kept (no false agent-marker)", () => {
     expect(isAiAgentComment("这个我看了,按方案 B 来吧。")).toBe(false);
     expect(shouldProcess({ number: 2, comments: [{ body: "按方案 B 来吧。" }] })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2 admission (nhc audit 2026-10-25, R-7 / R-11): `needs-human-confirm` is valid only for an
+// R2 decision whose comment names its category; a label older than 7 days is re-judged.
+// Rule text: .claude/plugins/agentloop/reference/r2-admission.md.
+// ---------------------------------------------------------------------------
+describe("r2Category (the `R2: <category>` line)", () => {
+  const ID =
+    "> 🤖 AI Agent nhc @ host · runner:x · agentloop@0 · skill:issue-review · engine:claude";
+  it("ACCEPT: the first line after the identity line names a category", () => {
+    expect(r2Category(`${ID}\nR2: permission — 给工厂建独立 PAT\n\n选项…`)).toBe("permission");
+    expect(r2Category(`${ID}\n\nR2: spend\n…`)).toBe("spend");
+    expect(r2Category(`${ID}\nR2: r2-list — 往 R2 清单加一类`)).toBe("r2-list");
+  });
+  it("ACCEPT: a human comment (no identity line) — the first non-empty line", () => {
+    expect(r2Category("\nR2: release — 这周发不发 stable?")).toBe("release");
+  });
+  it("REJECT: no line, a line further down, or a category outside the vocabulary", () => {
+    expect(r2Category(`${ID}\nneeds-human-confirm: 需要 A-vs-B 决策。`)).toBeUndefined();
+    expect(r2Category(`${ID}\n结论如下\nR2: permission`)).toBeUndefined();
+    expect(r2Category(`${ID}\nR2: direction — A 还是 B`)).toBeUndefined();
+    expect(r2Category("")).toBeUndefined();
+  });
+});
+
+describe("nhcNeedsRejudge (7-day re-judge; an NHC without an R2 line is re-judged now)", () => {
+  const now = new Date("2026-10-25T00:00:00Z");
+  const TRACE =
+    '\n<!-- sweep-trace: {"ver":1,"issue":1,"step":"disposition","val":"needs-human-confirm"} -->';
+  const labelled = (at: string) => [
+    { label: "needs-human-confirm", action: "labeled" as const, at },
+  ];
+  const issue = (body: string, at: string) => ({
+    number: 1,
+    labels: ["needs-human-confirm"],
+    labelEvents: labelled(at),
+    comments: [{ body, created_at: at }],
+  });
+
+  it("positive control: the window is 7 days; the vocabulary is the rule file's", () => {
+    expect(NHC_REJUDGE_DAYS).toBe(7);
+    const rule = readFileSync(
+      join(import.meta.dir, "../../../../reference/r2-admission.md"),
+      "utf8",
+    );
+    const tokens = [...rule.matchAll(/^\| `([a-z0-9-]+)` \|/gm)].map((m) => m[1]);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect([...R2_CATEGORIES].sort()).toEqual([...tokens].sort());
+  });
+  it("ACCEPT (stays): an agent NHC with an R2 line, labelled 2 days ago", () => {
+    expect(
+      nhcNeedsRejudge(
+        issue(`> 🤖 AI Agent\nR2: permission — PAT${TRACE}`, "2026-10-23T00:00:00Z"),
+        now,
+      ),
+    ).toBe(false);
+  });
+  it("ACCEPT (stays): a human-written NHC without an R2 line, 2 days ago (a person's question is not re-judged early)", () => {
+    expect(
+      nhcNeedsRejudge(issue("我想等 wangshijun 看过登录延迟再说", "2026-10-23T00:00:00Z"), now),
+    ).toBe(false);
+  });
+  it("REJECT (re-judge): an agent NHC without an R2 line, even 1 hour old", () => {
+    expect(
+      nhcNeedsRejudge(
+        issue(`> 🤖 AI Agent\n仍需人拍板 A/B。needs-human-confirm${TRACE}`, "2026-10-24T23:00:00Z"),
+        now,
+      ),
+    ).toBe(true);
+  });
+  it("REJECT (re-judge): a valid R2 NHC older than 7 days", () => {
+    expect(
+      nhcNeedsRejudge(
+        issue(`> 🤖 AI Agent\nR2: spend — 买 runner${TRACE}`, "2026-10-17T00:00:00Z"),
+        now,
+      ),
+    ).toBe(true);
+  });
+  it("no label → nothing to re-judge; an unlabeled label is gone", () => {
+    expect(nhcNeedsRejudge({ number: 1, labels: [], comments: [] }, now)).toBe(false);
+    expect(
+      nhcNeedsRejudge(
+        {
+          number: 1,
+          labels: [],
+          labelEvents: [
+            ...labelled("2026-09-01T00:00:00Z"),
+            { label: "needs-human-confirm", action: "unlabeled", at: "2026-09-02T00:00:00Z" },
+          ],
+          comments: [],
+        },
+        now,
+      ),
+    ).toBe(false);
+  });
+  it("ACCEPT (stays): label >7 days old, but a re-judge rewrote it as an R2 question 1 hour ago (no loop)", () => {
+    const rewritten = {
+      number: 1,
+      labels: ["needs-human-confirm"],
+      labelEvents: labelled("2026-10-01T00:00:00Z"),
+      comments: [
+        { body: `> 🤖 AI Agent\n仍需人拍板${TRACE}`, created_at: "2026-10-01T00:00:00Z" },
+        {
+          body: `> 🤖 AI Agent\nR2: permission — 拆 PAT?${TRACE}`,
+          created_at: "2026-10-24T23:00:00Z",
+        },
+      ],
+    };
+    expect(nhcNeedsRejudge(rewritten, now)).toBe(false);
+  });
+  it("REJECT (re-judge): the agent posts its no-R2 comment a few seconds AFTER labelling", () => {
+    const later = {
+      number: 1,
+      labels: ["needs-human-confirm"],
+      labelEvents: labelled("2026-10-24T10:00:00Z"),
+      comments: [
+        { body: "人的一条普通评论", created_at: "2026-10-24T09:00:00Z" },
+        { body: `> 🤖 AI Agent\n需要人拍板 A/B${TRACE}`, created_at: "2026-10-24T10:00:05Z" },
+      ],
+    };
+    expect(nhcNeedsRejudge(later, now)).toBe(true);
+  });
+  it("REJECT (re-judge): label present, timeline empty — the no-R2-line check still runs", () => {
+    const noEvents = {
+      number: 1,
+      labels: ["needs-human-confirm"],
+      labelEvents: [],
+      comments: [{ body: `> 🤖 AI Agent\n需要人拍板${TRACE}` }],
+    };
+    expect(nhcNeedsRejudge(noEvents, now)).toBe(true);
+  });
+  it("shouldProcess keeps an NHC issue due for re-judge even when its last comment is a terminal verdict", () => {
+    const stale = issue(
+      `> 🤖 AI Agent\nneeds-human-confirm: 需要 A-vs-B 决策。${TRACE}`,
+      "2026-07-01T00:00:00Z",
+    );
+    expect(isTerminalAiComment(stale.comments[0]?.body ?? "")).toBe(true);
+    expect(shouldProcess(stale, now)).toBe(true);
+    const fresh = issue(`> 🤖 AI Agent\nR2: market — 做不做 B 端${TRACE}`, "2026-10-24T00:00:00Z");
+    expect(shouldProcess(fresh, now)).toBe(false);
   });
 });

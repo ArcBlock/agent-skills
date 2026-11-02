@@ -54,6 +54,29 @@ reference implementation to copy patterns from.
 | \`pr_sweep_freeze_ttl_days\` | \`14\` — an \`awaiting-*\` PR untouched this long stops costing a round anything (pr-sweep freeze set); \`updatedAt\` moving unfreezes it |
 | \`pr_sweep_stale_escalation_days\` | \`30\` — past this the frozen PR is named in the run report summary, never re-nagged on the PR |
 
+## Factory planner
+
+| Field | Value |
+|---|---|
+| \`factory_planner_instance\` | <FILL: the instance whose work ledger factory-planner imports into (arc: \`factory\`); remove the section if no factory> |
+| \`factory_planner_deny_paths\` | <FILL: path to a file with one exact path or \`dir/**\` per line (plus \`basename:NAME\`) — process docs, factory core, gates, auth/secrets> |
+| \`factory_planner_approver_engine\` | <FILL: the approve agent's engine; must differ from the proposer's> |
+| \`factory_planner_wip\` | \`design=2 build=3 accept=2\` — tracks in progress per stage; downstream fills first. \`auto\` = each round reads \`arc work capacity --json\` (fails the round if it cannot) |
+| \`factory_planner_wip_max\` | \`design=2 build=3 accept=2\` — per-stage ceiling when \`factory_planner_wip\` is \`auto\` |
+| \`factory_planner_design_root\` | <FILL: directory for \`<slug>/design.md\` and \`<slug>/acceptance.md\`, e.g. \`planning\`> |
+| \`factory_planner_clock\` | \`round=1h max_sleep=30d audit_every=24 stage_stall=7d stale_claim=3d\` |
+| \`factory_planner_surface_companions\` | <FILL: pattern → files the target surface must also carry, applied on every design skip (arc: AUP page → catalog; a11y → SSR primitive; readRole → resolver + seed); leave empty if none> |
+
+## Factory portfolio
+
+Read by \`factory-portfolio\` (the planning layer above factory-planner). Remove the section if no factory.
+
+| Field | Value |
+|---|---|
+| \`factory_portfolio_clock\` | \`round=1d full=weekly:Mon max_sleep=30d\` — \`max_sleep\` ≤ the wake evaluator's 30-day ceiling |
+| \`factory_portfolio_direction_sources\` | <FILL: where product intent and the owner's direction / writing style live (docs, a skill)> |
+| \`factory_portfolio_cap\` | \`lookahead=7d max_epics=3\` — new build-ready members per round follow the factory's throughput |
+
 ## Toolchain
 
 | Field | Value |
@@ -69,6 +92,12 @@ reference implementation to copy patterns from.
 | Field | Value |
 |---|---|
 | \`kb_issue\` | <FILL: a pinned repo-map issue #, or remove if none> |
+
+## Lesson Ledger
+
+| Field | Value |
+|---|---|
+| \`lesson_ledger_dir\` | \`none\` — directory holding \`absorbed.yaml\` (e.g. \`agent-ops/lesson-ledger/\`); \`none\` if the repo has no lesson ledger |
 
 ## Comment / Writing Conventions
 

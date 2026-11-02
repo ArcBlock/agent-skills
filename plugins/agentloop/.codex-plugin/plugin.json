@@ -1,6 +1,6 @@
 {
   "name": "agentloop",
-  "version": "0.44.0",
+  "version": "0.47.2",
   "description": "Repo-agnostic engineering loop: land / epic / sweep / review skill contracts (package tests, one clean-context review, merge), the fleet driver, and shared GitHub tooling. Repo specifics live in each repo's .claude/repo-profile.md, not here.",
   "author": {
     "name": "ArcBlock Team",

@@ -4,7 +4,7 @@
 # EVERY push to the PR branch (fixes, rebases, merges of main).
 #
 #   bash <plugin_root>/scripts/record-change-set.sh --entry "<change_set_record_entry>" \
-#     [--pr <url>] [--work <member work DID>]
+#     [--pr <url>] [--work <member work DID>] [--acceptance-from <receipts.json>]
 #
 # Generic by construction: the ledger command comes from the repo profile key
 # `change_set_record_entry` (arc: `arc work changeset record --skip-outside-run`).
@@ -21,6 +21,10 @@
 #            over as a temp file (`--files-from <path>`: a separated `--files-from -`
 #            is read by yargs as a stray positional, found on #7072).
 #   --work   passed through: an epic run names the member work it serves.
+#   --acceptance-from  passed through (arc#9214): a JSON file with one receipt
+#            per acceptance item of the work — {"item":N,"status":"done","evidence":…}
+#            or {"item":N,"status":"blocked","reason":…,"needs":…}. The factory
+#            counts a run as delivered only when every item has one.
 #
 # A failing ledger entry is retried a bounded number of times (transient store
 # refusals, e.g. arc#6982), then exits non-zero with a STOP line on stderr: the
@@ -96,16 +100,17 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --entry \"<change_set_record_entry>\" [--pr <PR URL>] [--work <member work DID>]" >&2
+  echo "usage: $0 --entry \"<change_set_record_entry>\" [--pr <PR URL>] [--work <member work DID>] [--acceptance-from <receipts.json>]" >&2
   exit 64
 }
 
-entry=""; pr=""; work=""
+entry=""; pr=""; work=""; acceptance=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --entry) entry="${2:-}"; shift 2 ;;
     --pr) pr="${2:-}"; shift 2 ;;
     --work) work="${2:-}"; shift 2 ;;
+    --acceptance-from) acceptance="${2:-}"; [ -n "$acceptance" ] || usage; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -117,7 +122,57 @@ case "$entry" in
     exit 0 ;;
 esac
 
+if [ -n "$acceptance" ] && { [ ! -f "$acceptance" ] || [ ! -r "$acceptance" ]; }; then
+  echo "CHANGE SET NOT RECORDED: --acceptance-from $acceptance is not a readable file — stop" >&2
+  exit 1
+fi
+
 read -r -a entry_cmd <<<"$entry"
+
+# Host-declared CLI (arc#9181): a host that launched this run may name ITS
+# OWN build of the entry's binary as `<NAME>_CLI` (the binary's name
+# upper-cased, non-alphanumerics as `_`; e.g. `arc` → `$ARC_CLI`). That beats
+# PATH, which on a worker host may hold nothing or another build. Only a bare
+# binary name is replaced, and only by an executable absolute path; a declared
+# value that is not one is refused (agent-factory#20), never replaced by PATH.
+#
+# `arc` is never taken from PATH for a run (agent-factory#20: a host's global
+# `~/.local/bin/arc` may be another build, arc#10371). With `$ARC_CLI` unset,
+# a run uses its own home's shim `<home>/bin/arc` (home from
+# `ARC_CODE_AGENT_STATE_DIR=<home>/.afs/code-agents`); no shim → STOP. Outside
+# a run there is nothing to record for an entry that says
+# `--skip-outside-run`: an explicit N/A, still without PATH's arc.
+in_run=0
+if [ -n "${ARC_CODE_AGENT_RUN_ID+set}" ] || [ -n "${ARC_CODE_AGENT_STATE_DIR:-}" ]; then in_run=1; fi
+if [[ "${entry_cmd[0]:-}" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
+  cli_var="$(printf '%s' "${entry_cmd[0]}" | tr '[:lower:]-' '[:upper:]_')_CLI"
+  cli_path="${!cli_var:-}"
+  if [ -n "$cli_path" ]; then
+    if [[ "$cli_path" = /* ]] && [ -x "$cli_path" ]; then
+      entry_cmd[0]="$cli_path"
+    else
+      echo "CHANGE SET NOT RECORDED: \$$cli_var=$cli_path is not an executable absolute path — stop (it is not replaced by ${entry_cmd[0]} from PATH)" >&2
+      exit 1
+    fi
+  elif [ "${entry_cmd[0]}" = arc ]; then
+    run_shim=""
+    if [[ "${ARC_CODE_AGENT_STATE_DIR:-}" == */.afs/code-agents ]]; then
+      run_shim="${ARC_CODE_AGENT_STATE_DIR%/.afs/code-agents}/bin/arc"
+    fi
+    if [ -n "$run_shim" ] && [ -f "$run_shim" ] && [ -x "$run_shim" ]; then
+      entry_cmd[0]="$run_shim"
+    elif [ "$in_run" -eq 1 ]; then
+      echo "CHANGE SET NOT RECORDED: no explicit arc CLI for this run — \$ARC_CLI is unset and there is no run shim${run_shim:+ at $run_shim}; PATH's arc is not used (agent-factory#20) — stop" >&2
+      exit 1
+    elif [[ " $entry " == *" --skip-outside-run "* ]]; then
+      echo "Change Set: not recorded (N/A: not inside a code-agents run, and no explicit arc CLI — \$ARC_CLI unset; PATH's arc is not used, agent-factory#20)"
+      exit 0
+    else
+      echo "CHANGE SET NOT RECORDED: no explicit arc CLI — set \$ARC_CLI to an executable absolute path; PATH's arc is not used (agent-factory#20) — stop" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # Preflight (arc#7081): does the installed binary's own subcommand tree
 # recognize the entry's path, before we do any GitHub work?
@@ -130,10 +185,15 @@ read -r -a entry_cmd <<<"$entry"
 ARC_GLOBAL_BOOL_OPTS=(--standalone --json)
 ARC_GLOBAL_VALUE_OPTS=(-i --instance --home --view)
 positional=()
+leading_opts=()
+has_instance_or_home=0
 i=0
 n_tok="${#entry_cmd[@]}"
 while [ "$i" -lt "$n_tok" ]; do
   tok="${entry_cmd[$i]}"
+  case "$tok" in
+    -i|--instance|--instance=*|--home|--home=*) has_instance_or_home=1 ;;
+  esac
   case "$tok" in
     -*)
       # The binary name itself is always positional[0] (collected before we
@@ -143,15 +203,21 @@ while [ "$i" -lt "$n_tok" ]; do
       if [ "${#positional[@]}" -eq 1 ]; then
         matched=0
         for b in "${ARC_GLOBAL_BOOL_OPTS[@]}"; do
-          [ "$tok" = "$b" ] && { matched=1; break; }
+          [ "$tok" = "$b" ] && { matched=1; leading_opts+=("$tok"); break; }
         done
         if [ "$matched" -eq 1 ]; then i=$((i + 1)); continue; fi
         for v in "${ARC_GLOBAL_VALUE_OPTS[@]}"; do
-          [ "$tok" = "$v" ] && { matched=1; i=$((i + 2)); break; }
+          if [ "$tok" = "$v" ]; then
+            matched=1
+            leading_opts+=("$tok")
+            [ $((i + 1)) -lt "$n_tok" ] && leading_opts+=("${entry_cmd[$((i + 1))]}")
+            i=$((i + 2))
+            break
+          fi
           # arc#7081 F4: the --opt=value form (verified against the real
           # binary) is ONE token — consume just it, not a second one.
           case "$tok" in
-            "$v"=*) matched=1; i=$((i + 1)); break ;;
+            "$v"=*) matched=1; leading_opts+=("$tok"); i=$((i + 1)); break ;;
           esac
         done
         if [ "$matched" -eq 1 ]; then continue; fi
@@ -161,9 +227,16 @@ while [ "$i" -lt "$n_tok" ]; do
     *) positional+=("$tok"); i=$((i + 1)) ;;
   esac
 done
+if [ "$has_instance_or_home" -eq 0 ] && [ "${positional[1]:-}" = "work" ] && [[ "${ARC_CODE_AGENT_STATE_DIR:-}" == */.afs/code-agents ]]; then
+  agent_home="${ARC_CODE_AGENT_STATE_DIR%/.afs/code-agents}"
+  if [ -n "$agent_home" ]; then
+    leading_opts+=("--home" "$agent_home")
+    entry_cmd=("${entry_cmd[0]}" "--home" "$agent_home" "${entry_cmd[@]:1}")
+  fi
+fi
 if [ "${#positional[@]}" -ge 3 ]; then
   bin="${positional[0]}"
-  verb_path=("${positional[@]:0:$((${#positional[@]} - 1))}")
+  verb_path=("$bin" ${leading_opts[@]+"${leading_opts[@]}"} "${positional[@]:1:$((${#positional[@]} - 2))}")
   set +e
   probe_out="$("${verb_path[@]}" 2>&1)"
   probe_rc=$?
@@ -176,7 +249,7 @@ if [ "${#positional[@]}" -ge 3 ]; then
     if [ "$version_rc" -ne 0 ] || [ -z "$version" ]; then
       version="unknown version"
     fi
-    subcmd="${verb_path[*]:1}"
+    subcmd="${positional[*]:1:$((${#positional[@]} - 2))}"
     echo "Change Set: not recorded (N/A: $bin $version lacks $subcmd)"
     exit 0
   fi
@@ -186,9 +259,21 @@ wait_s="${RECORD_CS_HEAD_WAIT_S:-30}"
 poll_s="${RECORD_CS_POLL_S:-3}"
 attempts="${RECORD_CS_ATTEMPTS:-3}"
 retry_sleep="${RECORD_CS_RETRY_SLEEP_S:-5}"
+export PATH="$PATH:${HOME:-}/.bun/bin:/opt/homebrew/bin:/usr/local/bin"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GH_REST="$SCRIPT_DIR/../../../../scripts/gh-rest/gh.ts"
+for candidate in \
+  "$SCRIPT_DIR/../../../scripts/gh-rest/gh.ts" \
+  "$SCRIPT_DIR/../../../vendor/arc/scripts/gh-rest/gh.ts" \
+  "$SCRIPT_DIR/../../../../scripts/gh-rest/gh.ts"; do
+  if [ -f "$candidate" ]; then
+    GH_REST="$candidate"
+    break
+  fi
+done
 
 if [ -z "$pr" ]; then
-  pr="$(gh pr view --json url -q .url)"
+  pr="$(bun "$GH_REST" pr view --json url -q .url)"
 fi
 [ -n "$pr" ] || { echo "record-change-set: no PR for the current branch; pass --pr" >&2; exit 1; }
 
@@ -196,7 +281,7 @@ head="$(git rev-parse HEAD)"
 # GitHub can report the previous head for a few seconds after a push.
 deadline=$(( $(date +%s) + ${wait_s%.*} ))
 while :; do
-  pr_head="$(gh pr view "$pr" --json headRefOid -q .headRefOid)"
+  pr_head="$(bun "$GH_REST" pr view "$pr" --json headRefOid -q .headRefOid)"
   [ "$pr_head" = "$head" ] && break
   if [ "$(date +%s)" -ge "$deadline" ]; then
     echo "record-change-set: local HEAD $head is not the PR head $pr_head on GitHub (waited ${wait_s}s) — push first, then record" >&2
@@ -205,10 +290,10 @@ while :; do
   sleep "$poll_s"
 done
 
-base="$(gh pr view "$pr" --json baseRefOid -q .baseRefOid)"
+base="$(bun "$GH_REST" pr view "$pr" --json baseRefOid -q .baseRefOid)"
 [ -n "$base" ] || { echo "record-change-set: gh reported no baseRefOid for $pr" >&2; exit 1; }
 if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-  base_ref="$(gh pr view "$pr" --json baseRefName -q .baseRefName)"
+  base_ref="$(bun "$GH_REST" pr view "$pr" --json baseRefName -q .baseRefName)"
   git fetch -q origin "$base_ref" 2>/dev/null || true
   if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
     echo "CHANGE SET NOT RECORDED: cannot fetch the PR base $base (origin/$base_ref) — stop" >&2
@@ -225,6 +310,7 @@ fi
 
 extra=()
 [ -n "$work" ] && extra=(--work "$work")
+[ -n "$acceptance" ] && extra+=(--acceptance-from "$acceptance")
 rc=0
 for ((i = 1; i <= attempts; i++)); do
   set +e

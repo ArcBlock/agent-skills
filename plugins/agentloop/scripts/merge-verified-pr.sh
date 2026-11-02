@@ -8,14 +8,17 @@
 # branch is the catch-net. What this script still owns is the factory-run contract below.
 #
 # Factory runs (arc#7662): inside a code-agents run (`ARC_CODE_AGENT_RUN_ID`
-# set) merge authority is HUMAN. land / epic-conductor stop at ready-to-merge,
-# and this script refuses (exit 3, before any GitHub call), so the skills'
+# set) the coder never merges its own PR: land stops at ready-to-merge and the
+# merger is the host merger (#8182). Outside factory runs, a conductor merges
+# its epic's PRs (epic-conductor).
+# This script refuses (exit 3, before any GitHub call), so the skills'
 # entry does not rest on the model reading the rule. Operator override:
 # `ARC_FACTORY_ALLOW_SELF_MERGE=1` (exactly `1`, default off) in the run's
 # environment.
 #
 # Factory merge check (arc#7729): when the repo profile declares
-# `factory_merge_check_entry` (arc: `arc -i factory work merge-check`), it runs
+# `factory_merge_check_entry` (arc: `arc -i factory work merge-check`; a bare
+# `arc` runs as `$ARC_CLI` or the factory shim, never PATH's), it runs
 # before the merge with `--pr <url> --head <sha> --json`. A factory PR merges
 # only when its latest Change Set round is independently approved and its
 # producer run is path-compliant at that head (the factory's Gates 6 and 7);
@@ -107,27 +110,30 @@ if [ -z "$check_entry" ]; then
   echo "note: no factory_merge_check_entry in the default branch's repo profile; no factory merge check for PR #$pr"
 else
   read -r -a check_cmd <<<"$check_entry"
-  # "No factory to ask" is: no arc (127), an arc too old to have the check,
-  # no factory instance on this machine, or no daemon (6). "Too old" is a
-  # --help that fails OR does not name --base-sha, the newest flag the call
-  # passes: an old arc answers the subcommand's --help with its top-level
-  # help, exit 0 (arc#7775), and its real call's usage error would otherwise
-  # read as a final refusal. Captured, not piped: no SIGPIPE under pipefail.
+  # "No factory to ask" is: no arc (127), an arc/instance that does not have
+  # the `work merge-check` command or `--base-sha` flag (yargs `Unknown
+  # command:` / `Unknown argument:` with no JSON verdict), no factory instance
+  # on this machine, or no daemon (6). Call `merge-check` directly rather than
+  # grepping `--help`: when `merge-check` is served by the factory blocklet
+  # (#9638 / #9639), `--help` lists `[operands..]` rather than subcommand flags.
   no_factory=0
+  # A bare `arc` is never PATH's (agent-factory#20: a host's global arc may be
+  # another build): `$ARC_CLI` (executable absolute path), else the factory
+  # shim. Neither → "no factory to ask" (127), which still refuses by default.
+  arc_unresolved=""
+  if [ "${check_cmd[0]}" = arc ]; then
+    if [[ "${ARC_CLI:-}" = /* ]] && [ -f "$ARC_CLI" ] && [ -x "$ARC_CLI" ]; then check_cmd[0]="$ARC_CLI"
+    elif [ -f "${HOME:-}/.arc-factory/bin/arc" ] && [ -x "${HOME:-}/.arc-factory/bin/arc" ]; then check_cmd[0]="$HOME/.arc-factory/bin/arc"
+    else arc_unresolved="no explicit arc CLI: \$ARC_CLI=${ARC_CLI:-<unset>} is not an executable absolute path and there is no factory shim at ${HOME:-~}/.arc-factory/bin/arc; PATH's arc is not used (agent-factory#20)"
+    fi
+  fi
   set +e
-  check_help="$("${check_cmd[@]}" --help 2>&1)"
-  check_help_rc=$?
-  if [ "$check_help_rc" -ne 0 ] || [[ "$check_help" != *--base-sha* ]]; then
-    no_factory=1; check_rc=127
-    check_out="this machine's arc cannot run: ${check_entry} (missing, too old to have it, or its help lacks --base-sha)"
-  else
-    check_out="$("${check_cmd[@]}" --pr "$pr_url" --head "$sha" --head-ref "$head_ref" --base-sha "$base_sha" --json 2>&1)"
-    check_rc=$?
-    if [ "$check_rc" -eq 6 ] || [ "$check_rc" -eq 127 ]; then no_factory=1; fi
-    if [ "$check_rc" -eq 1 ] && printf '%s' "$check_out" | grep -q 'no instance named'; then no_factory=1; fi
+  if [ -n "$arc_unresolved" ]; then check_out="$arc_unresolved"; check_rc=127
+  else check_out="$("${check_cmd[@]}" --pr "$pr_url" --head "$sha" --head-ref "$head_ref" --base-sha "$base_sha" --json 2>&1)"; check_rc=$?
   fi
   set -e
-  # The first JSON object anywhere in the output, decoded exactly.
+  # The first JSON object carrying a "kind", decoded exactly. Runtime log lines
+  # (JSON objects without one, e.g. a deprecation warn) ahead of it are skipped.
   check_kind="$(printf '%s' "$check_out" | python3 -c '
 import json, sys
 text = sys.stdin.read()
@@ -135,12 +141,19 @@ dec = json.JSONDecoder()
 i = text.find("{")
 while i >= 0:
     try:
-        obj, _ = dec.raw_decode(text, i)
-        print(obj.get("kind", "") if isinstance(obj, dict) else "")
-        break
+        obj, end = dec.raw_decode(text, i)
     except ValueError:
         i = text.find("{", i + 1)
+        continue
+    if isinstance(obj, dict) and "kind" in obj:
+        print(obj["kind"])
+        break
+    i = text.find("{", end)
 ')"
+  if [ "$check_rc" -eq 6 ] || [ "$check_rc" -eq 127 ]; then no_factory=1; fi
+  if [ -z "$check_kind" ] && printf '%s' "$check_out" | grep -qE 'no instance named|Unknown command:|Unknown argument:|Not enough non-option arguments'; then
+    no_factory=1
+  fi
   if [ "$check_rc" -eq 0 ] && { [ "$check_kind" = ok ] || [ "$check_kind" = not-factory ]; }; then
     echo "factory merge check: $check_kind"
   elif [ "$no_factory" -eq 0 ]; then

@@ -11,7 +11,9 @@ Launch an Agent (`isolation: "worktree"`, model by weight). Every brief includes
   comments on `sourceUrl`. Also pass the epic's scope comment.
 - **Invariants**: strict TDD; the repo's I/O and architecture rules; reuse existing primitives (name
   them and their files); no new error classes unless the repo lacks one; the accept-path law (a
-  check that rejects bad input also has a test that admits good input).
+  check that rejects bad input also has a test that admits good input); when `<lesson_ledger_dir>/absorbed.yaml`
+  has matching `status: absorbed` / `promoted` entries, include `id` + `rule_home` + 1-line trap
+  (`candidates/pending/` is never grounding; if an entry conflicts with shipped code, code wins — flag `ledger stale: <id>`).
 - **Order**: implement → run the changed package's tests → hand back (branch + worktree). The
   review comes before the PR. Never `--no-verify`.
 - **Report back**: work DID, head sha, test command + counts, decisions, deviations and concerns.

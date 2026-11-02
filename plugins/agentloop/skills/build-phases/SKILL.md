@@ -114,6 +114,7 @@ Hard stops. Stop, report, and wait. Do not guess around them.
 
 | Condition | When |
 |---|---|
+| **Stuck (2 failures)** | After 2 failed fix attempts on the same phase or test, stop patching — trace the failure to its root cause (input → state → failure site) and state the root-cause hypothesis in 1 line before trying fix #3 |
 | **3 failures** | The same test/build/verify fails three times |
 | **E2E log won't write** | After one Layer 2 attempt the log is missing, empty, or has no JSON. Do not forge it |
 | **Spec ambiguity** | Two readings that change later phases |

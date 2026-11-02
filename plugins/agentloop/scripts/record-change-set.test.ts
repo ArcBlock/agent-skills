@@ -181,11 +181,14 @@ fi
 # subcommand path, both space-separated and --opt=value (verified against the
 # real binary, arc#7081 Codex finding 2 + F4). Mirror both forms here so a
 # test can declare an entry with a leading global option.
-if [ "\${1:-}" = "--instance" ]; then shift 2; fi
-if [ "\${1:-}" = "--standalone" ]; then shift 1; fi
-case "\${1:-}" in
-  --instance=*|--home=*|--view=*) shift 1 ;;
-esac
+while [ $# -gt 0 ]; do
+  case "\${1:-}" in
+    -i|--instance|--home|--view) shift 2 ;;
+    --standalone|--json) shift 1 ;;
+    --instance=*|--home=*|--view=*) shift 1 ;;
+    *) break ;;
+  esac
+done
 if [ "\${FAKE_ARC_BETA48:-0}" = "1" ]; then
   is_help=0
   for a in "$@"; do [ "$a" = "--help" ] && is_help=1; done
@@ -258,10 +261,12 @@ function run(w: World, args: string[], env: Record<string, string> = {}) {
     env: {
       ...process.env,
       PATH: `${w.bin}:${process.env.PATH}`,
+      GH_REST_ACCESS: "full",
       FAKE_PR_HEAD: w.head,
       FAKE_BASE_OID: w.baseOid,
       RECORD_CS_POLL_S: "0.05",
       RECORD_CS_RETRY_SLEEP_S: "0",
+      ARC_CODE_AGENT_STATE_DIR: "",
       ...env,
     },
     stdout: "pipe",
@@ -380,6 +385,25 @@ describe("record-change-set.sh — REJECT (loud, named)", () => {
     expect(r.code).not.toBe(0);
     expect(r.err).toContain("cannot fetch the PR base");
     expect(entryLog(w)).toBe("");
+  });
+
+  // arc#9214 — the round carries one receipt per acceptance item of the work.
+  test("#9214 --acceptance-from is handed to the entry as given (accept)", () => {
+    const w = world();
+    const receipts = join(w.root, "receipts-9214.json");
+    writeFileSync(receipts, JSON.stringify([{ item: 1, status: "done", evidence: "test A" }]));
+    const r = run(w, ["--entry", "fake-ledger", "--acceptance-from", receipts]);
+    expect(r.code).toBe(0);
+    expect(argvLines(w)[0]).toContain(`[--acceptance-from] [${receipts}]`);
+  });
+
+  test("#9214 a missing --acceptance-from file → a named failure, entry never called", () => {
+    const w = world();
+    const missing = join(w.root, "no-receipts-9214.json");
+    const r = run(w, ["--entry", "fake-ledger", "--acceptance-from", missing]);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain(`--acceptance-from ${missing} is not a readable file`);
+    expect(existsSync(w.log) ? argvLines(w) : []).toEqual([]);
   });
 
   test("an unknown flag → usage error", () => {
@@ -649,7 +673,7 @@ export function unrecordedPushSites(skill: string): string[] {
 export function changeSetStepProblem(skill: string): string | undefined {
   const at = skill.indexOf(STEP);
   if (at < 0) return "no record-change-set step";
-  const created = skill.indexOf("gh pr create");
+  const created = skill.search(/(?:gh|gh\.ts)\s+pr\s+create/);
   if (created < 0 || created > at) return "record-change-set step is not after gh pr create";
   for (const line of skill.split("\n")) {
     if (line.includes("record-change-set.sh") && /\|\|\s*(true|:)\b|;\s*true\b/.test(line)) {
@@ -728,5 +752,108 @@ describe("PR-opening skills record the Change Set at every push (positive contro
     const text = readFileSync(join(PLUGIN, "skills/epic-conductor/SKILL.md"), "utf8");
     const at = text.indexOf(STEP);
     expect(text.slice(at, at + 200)).toContain("--work <member work DID>");
+  });
+});
+
+describe("record-change-set.sh — a host-declared CLI beats PATH (arc#9181)", () => {
+  // The entry names `arc`; nothing called `arc` is on this PATH (the fake is
+  // `fake-arc`), exactly a worker host whose daemon's CLI is not installed.
+  const BARE_ENTRY = "arc work changeset record --skip-outside-run";
+
+  test("accept: `$ARC_CLI` (absolute, executable) runs the entry with arc absent from PATH", () => {
+    const w = world();
+    const r = run(w, ["--entry", BARE_ENTRY], {
+      ARC_CLI: join(w.bin, "fake-arc"),
+      FAKE_ARC_SUPPORTS_CHANGESET: "1",
+      PATH: `${w.bin}:/usr/bin:/bin`,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("fake-arc: recorded");
+    expect(arcLog(w)).toContain("ARGV");
+  });
+
+  test("reject: a relative `$ARC_CLI` is not trusted — said, and the run stops (never PATH, agent-factory#20)", () => {
+    const w = world();
+    const r = run(w, ["--entry", BARE_ENTRY], {
+      ARC_CLI: "bin/fake-arc",
+      FAKE_ARC_SUPPORTS_CHANGESET: "1",
+      PATH: `${w.bin}:/usr/bin:/bin`,
+    });
+    expect(r.err).toContain("$ARC_CLI=bin/fake-arc is not an executable absolute path");
+    expect(r.code).not.toBe(0);
+    expect(arcLog(w)).not.toContain("ARGV");
+  });
+
+  test("injects `--home <home>` when `ARC_CODE_AGENT_STATE_DIR` ends with `/.afs/code-agents` and no explicit instance/home is passed", () => {
+    const w = world();
+    const customArc = join(w.bin, "custom-home-arc");
+    writeFileSync(
+      customArc,
+      `#!/usr/bin/env bash
+set -eu
+echo "INVOKED $*" >> "${w.arcLog}"
+if [ "\${1:-}" = "--home" ] && [ "\${2:-}" = "/tmp/worker-home" ] && [ "\${3:-}" = "work" ] && [ "\${4:-}" = "changeset" ] && [ -z "\${5:-}" ]; then
+  echo "ERROR: Not enough non-option arguments: got 0, need at least 1" >&2
+  exit 5
+fi
+if [ "\${1:-}" = "--home" ] && [ "\${2:-}" = "/tmp/worker-home" ] && [ "\${3:-}" = "work" ] && [ "\${4:-}" = "changeset" ] && [ "\${5:-}" = "record" ]; then
+  echo "custom-home-arc: recorded"
+  exit 0
+fi
+echo "custom-home-arc: missing expected --home /tmp/worker-home: $*" >&2
+exit 2
+`,
+    );
+    chmodSync(customArc, 0o755);
+    const r = run(w, ["--entry", BARE_ENTRY], {
+      ARC_CLI: customArc,
+      ARC_CODE_AGENT_STATE_DIR: "/tmp/worker-home/.afs/code-agents",
+      PATH: `${w.bin}:/usr/bin:/bin`,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("custom-home-arc: recorded");
+    expect(arcLog(w)).toContain("INVOKED --home /tmp/worker-home work changeset");
+    expect(arcLog(w)).toContain("INVOKED --home /tmp/worker-home work changeset record");
+  });
+});
+
+describe("record-change-set.sh — #9207 B2 rest-only GitHub worker", () => {
+  test("T1: GH_REST_ACCESS=rest-only resolves PR url, headRefOid, and baseRefOid via gh api when pr view exits 2", () => {
+    const w = world();
+    sh(w.repo, ["git", "remote", "set-url", "origin", "https://github.com/acme/widget.git"]);
+    writeFileSync(
+      join(w.bin, "gh"),
+      `#!/usr/bin/env bash
+set -eu
+if [ "$1 $2" = "pr view" ]; then
+  echo "fake gh: GraphQL is not enabled for this session" >&2
+  exit 2
+fi
+[ "$1" = "api" ] || { echo "fake gh: unexpected $*" >&2; exit 2; }
+case "$*" in
+  *"repos/acme/widget/pulls?"*)
+    printf '%s\\n' '[{"number":42,"title":"feat","body":"","state":"open","draft":false,"mergeable":true,"html_url":"https://github.com/acme/widget/pull/42","user":{"login":"bot"},"head":{"ref":"feat/x","sha":"'"\${FAKE_PR_HEAD}"'","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","sha":"'"\${FAKE_BASE_OID}"'"},"labels":[]}]'
+    ;;
+  *"repos/acme/widget/pulls/42"*)
+    printf '%s\\n' '{"number":42,"title":"feat","body":"","state":"open","draft":false,"mergeable":true,"html_url":"https://github.com/acme/widget/pull/42","user":{"login":"bot"},"head":{"ref":"feat/x","sha":"'"\${FAKE_PR_HEAD}"'","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","sha":"'"\${FAKE_BASE_OID}"'"},"labels":[]}'
+    ;;
+  *)
+    echo "fake gh: unexpected api $*" >&2
+    exit 2
+    ;;
+esac
+`,
+    );
+    chmodSync(join(w.bin, "gh"), 0o755);
+
+    const r = run(w, ["--entry", "fake-ledger --skip-outside-run"], {
+      GH_REST_ACCESS: "rest-only",
+    });
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("fake-ledger: recorded");
+    expect(argvLines(w)).toEqual([
+      `ARGV [--skip-outside-run] [--pr] [https://github.com/acme/widget/pull/42] [--head] [${w.head}] [--base] [${w.baseOid}] [--files-from] [<FILE>]`,
+    ]);
   });
 });

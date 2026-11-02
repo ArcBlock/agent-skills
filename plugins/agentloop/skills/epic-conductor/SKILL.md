@@ -21,20 +21,19 @@ Why independent review is the point: [reference/background.md](reference/backgro
 
 - **Resident, serial-inline.** React to completions; no nested Workflow, no plan mode; decisions
   live in issue/PR comments.
-- **Live hired children.** Hired factory/worker children still `status=running` (pid alive) make
-  it **forbidden** to `end_turn` / close the session. Allowed: true closeout after each hire has
-  GitHub evidence (PR URL or skip-comment) **or** the child was explicitly `stop`ped. Before
-  treating yourself as done:
+- **Live hired children.** Hired children still `status=running` (pid alive) make
+  it **forbidden** to `end_turn` / close the session until each hire has GitHub evidence (PR URL or
+  skip-comment) or was explicitly `stop`ped. Exit 0 = none live:
   ```bash
   bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/plugins/agentloop}/skills/epic-conductor/scripts/assert-no-live-children.ts" \
     --runs-dir "$(arc service status --print home 2>/dev/null || printf '%s' "$HOME")/.afs/code-agents/runs" \
     --ids <hired-id>,<hired-id>
   ```
-  Exit 0 only when none is live. A ghost (`running`, dead pid) does not block; factory cockpit rows
-  are `pid=-1` and the watchdog must fail-closed on them (live, not ghost).
+  Cockpit `pid=-1` rows fail-closed (live, not ghost):
+  [reference/live-children.md](reference/live-children.md).
 - **Factory run** (`ARC_CODE_AGENT_RUN_ID` set): one turn; tests in the foreground; block-poll child
-  runs. **Merge authority is human**: stop at ready to merge, report "ready to merge, human
-  decision", end the run; dispatch only members whose dependencies are already merged
+  runs. **The host merger merges** (#8182): stop, report "ready to merge — host merger",
+  end the run; dispatch only members whose dependencies are already merged
   ([headless-factory-run.md](../../reference/headless-factory-run.md)).
 - **Workers ~3**, each `isolation: "worktree"`. Workers never merge. Model by weight: runtime /
   security / data-model → opus; docs / mechanical → sonnet.
@@ -47,9 +46,10 @@ Why independent review is the point: [reference/background.md](reference/backgro
 
 **1. Decompose** into dependency-ordered, PR-sized sub-issues, in waves; one GitHub issue each
 (spec, accept-path acceptance criteria, constraints, file pointers, dependencies, "one PR; do not
-merge"). Human decisions not yet recorded → `/agentloop:design-review <path> --max-rounds 2` first.
-Pin a scope comment (this wave / deferred / handled). Safe-default ratchet: "proceeding with X,
-object if wrong"; ask only on a real fork; never package decomposable work as a menu.
+merge"). If `<lesson_ledger_dir>/absorbed.yaml` exists, read matching `absorbed` / `promoted` entries
+(`id` + `rule_home`) and pass them in worker briefs (`candidates/pending/` is not grounding; code wins
+on conflict → `ledger stale: <id>`). Human decisions not yet recorded → `/agentloop:design-review <path> --max-rounds 2` first.
+Pin a scope comment; safe-default ratchet ("proceeding with X, object if wrong"); ask only on a real fork.
 
 **2. Fence off.** `epic-managed` + `epic:<epic#>` on the epic, every sub-issue and every PR;
 `agent:hold` until merge (sweeps skip them). Detail: [reference/loop-detail.md](reference/loop-detail.md).
@@ -71,7 +71,9 @@ bun "${AGENTLOOP_ROOT:-$HOME/.claude/plugins/marketplaces/arcblock-agent-skills/
 ```
 The fixer (the worker, or a fixer on its worktree): every still-valid **P0–P2** in one batch, the
 package tests; once the PR exists, one push, then `record-change-set.sh --work <member DID>` for the
-new head; **P3 → a follow-up issue**. Re-review only a substantive or security fix delta.
+new head; **P3 → noted, not filed** (PR body, never an issue). Re-review only a substantive or
+security fix delta. A member closes only when its outcome holds; never close it and file tails
+([issue closure](../../../../../docs/architecture/issue-closure-discipline.md)).
 Detail: [reference/fixer.md](reference/fixer.md).
 
 **6. PR.** Push; `gh pr create` with `--label epic-managed --label "epic:<epic#>" --label agent:hold`
@@ -103,8 +105,3 @@ this PR's, provider capacity (429): [reference/hazards.md](reference/hazards.md)
 issue, not cohesive yet). Drive the epic's thesis end to end on real infrastructure; say
 user-reachable vs mechanism-level. UI → screenshots of every real surface in one walkthrough
 comment. Close the issues, clear the labels, report URLs. Detail: [reference/closeout.md](reference/closeout.md).
-
-## Mental model
-
-Decompose → fence → { worker → package tests → one review → one fix batch → PR → merge } →
-nightly → closeout.

@@ -32,6 +32,9 @@
  * 做不到就**不要声明**，fail-closed，别退化成「假装下推」。
  */
 
+import { resolveFactoryArcCli } from "../../../lib/arc-cli";
+import { type LabelEvidence, labelEvidenceFromTimeline } from "./nhc-admission";
+
 /** Same codes as `@aigne/afs` — local copies so the plugin does not import that package. */
 export class AFSNotFoundError extends Error {
   readonly code = "AFS_NOT_FOUND";
@@ -176,6 +179,11 @@ export interface WorkItemSource {
    * 写路径的调用点在 sweep-batch.ts。
    */
   writeClassification?(id: string, patch: WorkClassification): Promise<void>;
+  /**
+   * nhc 审计 R-5 放大器 / R-11：某个 label 的贴标时间和评论（判 needs-human-confirm
+   * 是否仍有效，见 nhc-admission.ts）。不实现 = 不能核验 → 该项照旧挡住，但单独成桶。
+   */
+  labelEvidence?(id: string, label: string): Promise<LabelEvidence>;
 }
 
 export function capabilitiesOf(s: WorkItemSource): SourceCapabilities {
@@ -271,6 +279,14 @@ interface GhIssue {
 }
 
 export class GitHubIssueSource implements WorkItemSource {
+  /** nhc 审计 — the label's last `labeled` event and the comments, from the issue timeline. */
+  async labelEvidence(id: string, label: string): Promise<LabelEvidence> {
+    const pages = JSON.parse(
+      gh(["api", "--paginate", "--slurp", `repos/${this.repo}/issues/${id}/timeline`]),
+    ) as unknown[][];
+    return labelEvidenceFromTimeline(pages.flat(), label);
+  }
+
   lastReadCount = 0;
   /**
    * pushdown=false 是**诚实的自述**，不是待办。
@@ -1160,7 +1176,11 @@ export function isArcAfsNotFound(msg: string): boolean {
 }
 
 function arcAfs(args: string[]): string {
-  const p = Bun.spawnSync(["arc", "--json", "afs", ...args], {
+  // agent-factory#20: the factory's explicit CLI (ARC_BIN → $ARC_CLI → factory
+  // shim), never PATH's arc. None → throw (fail closed, like a non-zero exit).
+  const cli = resolveFactoryArcCli();
+  if (!cli.argv) throw new Error(`arc afs ${args[0]}: ${cli.reason}`);
+  const p = Bun.spawnSync([...cli.argv, "--json", "afs", ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });

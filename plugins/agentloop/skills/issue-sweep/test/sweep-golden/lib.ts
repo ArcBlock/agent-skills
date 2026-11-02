@@ -19,6 +19,8 @@ export interface Issue {
   labels?: string[];
   body?: string;
   comments: Comment[];
+  /** The issue's label timeline, oldest first (GitHub `labeled` / `unlabeled` events). */
+  labelEvents?: LabelEvent[];
 }
 
 /**
@@ -194,8 +196,12 @@ export function isTestSweepFinding(issue: Issue): boolean {
  * - Zero comments AND the issue is a test-sweep finding (#2271 archetype — an automated QA
  *   report, not a human directive; belongs to the Step 3b autofix-green track instead)
  */
-export function shouldProcess(issue: Issue): boolean {
+export function shouldProcess(issue: Issue, now: Date = new Date()): boolean {
   const comments = issue.comments;
+
+  // R2 admission (nhc audit R-11): an NHC due for re-judgement is processed whatever its last
+  // comment says — a terminal-looking "needs a human" verdict is exactly what is re-judged.
+  if (nhcNeedsRejudge(issue, now)) return true;
 
   // No comments — check if body itself has an AI agent response
   if (comments.length === 0) {
@@ -331,4 +337,89 @@ export function extractSweepTraces(body: string): Array<{
     }
   }
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// R2 admission (nhc audit 2026-10-25, R-7 / R-11). Rule text, the one home:
+// .claude/plugins/agentloop/reference/r2-admission.md
+// ---------------------------------------------------------------------------
+
+/** The closed vocabulary of the `R2: <category>` line. */
+// One source for the R2 vocabulary (pinned to reference/r2-admission.md's table).
+export { R2_CATEGORIES, type R2Category } from "../../../../lib/r2-categories";
+
+import { R2_CATEGORIES, type R2Category } from "../../../../lib/r2-categories";
+
+/** A `needs-human-confirm` label older than this is re-judged by the jury / portfolio. */
+export const NHC_REJUDGE_DAYS = 7;
+
+const NHC = "needs-human-confirm";
+const IDENTITY_LINE = /^>\s*🤖/;
+const R2_LINE = /^R2:\s*([a-z0-9-]+)(?=$|[\s—–:,，])/;
+
+/**
+ * The R2 category a comment names, or undefined. The line must be the first line after the
+ * identity line (`> 🤖 AI Agent …`), or the first non-empty line of a comment without one.
+ */
+export function r2Category(body: string): R2Category | undefined {
+  const lines = decodeMarkerEntities(body)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const first = lines[0] && IDENTITY_LINE.test(lines[0]) ? lines[1] : lines[0];
+  const m = first ? R2_LINE.exec(first) : null;
+  const c = m?.[1];
+  return c && (R2_CATEGORIES as readonly string[]).includes(c) ? (c as R2Category) : undefined;
+}
+
+/** When the NHC label currently on the issue was applied (undefined: not applied / unknown). */
+function nhcAppliedAt(events: LabelEvent[] | undefined): string | undefined {
+  let t: string | undefined;
+  for (const e of events ?? []) {
+    if (e.label !== NHC) continue;
+    t = e.action === "labeled" ? e.at : undefined;
+  }
+  return t;
+}
+
+/** An explaining comment posted this soon after the labelling belongs to it. */
+const EXPLAINER_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * True when the issue's `needs-human-confirm` must be re-judged now (R2 admission §5):
+ *   - the label is older than {@link NHC_REJUDGE_DAYS}, counted from the later of the
+ *     labelling and the newest comment naming an R2 category (a re-judge that rewrites the
+ *     question as a new R2 comment restarts the window, so it does not loop), or
+ *   - no comment names an R2 category AND the comment that explains the label is an agent's:
+ *     the first comment posted within {@link EXPLAINER_WINDOW_MS} after the labelling, else the
+ *     last one before it. A person's own question without the line is not re-judged early:
+ *     only the 7-day window applies to it.
+ * An issue whose label was removed has nothing to re-judge. Without a label timeline the age is
+ * unknown: only the R2-line check runs.
+ */
+export function nhcNeedsRejudge(issue: Issue, now: Date): boolean {
+  const events = issue.labelEvents ?? [];
+  const known = events.some((e) => e.label === NHC);
+  const labelled = known ? nhcAppliedAt(events) : undefined;
+  if (known && labelled === undefined) return false; // removed since
+  if (!known && !(issue.labels ?? []).includes(NHC)) return false;
+
+  const r2Times = issue.comments
+    .filter((c) => r2Category(c.body) !== undefined)
+    .map((c) => (c.created_at ? Date.parse(c.created_at) : Number.NaN));
+  if (labelled) {
+    const anchor = Math.max(Date.parse(labelled), ...r2Times.filter((t) => !Number.isNaN(t)));
+    if (now.getTime() - anchor > NHC_REJUDGE_DAYS * 24 * 60 * 60 * 1000) return true;
+  }
+  if (r2Times.length > 0) return false;
+
+  const at = labelled ? Date.parse(labelled) : undefined;
+  const time = (c: Comment) => (c.created_at ? Date.parse(c.created_at) : Number.NaN);
+  const explainer =
+    at === undefined
+      ? issue.comments[issue.comments.length - 1]
+      : (issue.comments.find((c) => time(c) >= at && time(c) <= at + EXPLAINER_WINDOW_MS) ??
+        [...issue.comments].reverse().find((c) => !(time(c) > at)));
+  if (!explainer) return false;
+  return isAiAgentComment(explainer.body);
 }

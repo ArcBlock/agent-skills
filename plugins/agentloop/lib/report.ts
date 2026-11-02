@@ -300,12 +300,22 @@ export function stripAnsi(s: string): string {
  * `[1] Done { echo hi; }` into the combined stream, which then fails
  * callers that assert exact stdout (`echo hi` → `"hi"`). The wrapper must
  * be invisible; stripping here is that contract, not a test-side filter.
+ *
+ * arc#7703: under monitor mode bash calls `setpgid(child, child)` from both
+ * the parent and the child. When the child's own call loses (EPERM) bash
+ * writes `bash: child setpgid (N to N): Operation not permitted` to the
+ * wrapper's stderr, before the job's redirection applies. The group was
+ * already set by the parent, so the line is pure noise. Anchored to the whole
+ * line and bash's own prefix, so a command's output that merely mentions
+ * setpgid survives.
  */
 export function stripJobControlNoise(s: string): string {
-  return s.replace(
-    /^\s*\[\d+\][+-]?\s+(Done|Exit|Running|Stopped|Terminated|Killed)\b.*(?:\r?\n|$)/gm,
-    "",
-  );
+  return s
+    .replace(
+      /^\s*\[\d+\][+-]?\s+(Done|Exit|Running|Stopped|Terminated|Killed)\b.*(?:\r?\n|$)/gm,
+      "",
+    )
+    .replace(/^(?:\S*\/)?bash: (?:line \d+: )?child setpgid \(\d+ to \d+\): .*(?:\r?\n|$)/gm, "");
 }
 
 /**

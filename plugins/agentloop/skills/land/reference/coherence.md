@@ -45,13 +45,13 @@
 - **`unclear`** → **不要开工**。说清楚缺哪一条判据。
 
 **无人值守时**（`AskUserQuestion` 被禁用）：`multiple` / `unclear` 一律**不派工**，
-把枚举结果作为报告输出；若有对应 issue/PR 就落成 comment 并挂 `needs-human-confirm`。
-**绝不因为「看起来只有一件」就代替人拍板。**
+把枚举结果作为报告输出；若有对应 issue/PR 就落成 comment，拆分和排序交 planner（工厂内）或
+portfolio。这不是 R2，不挂 `needs-human-confirm`。**绝不因为「看起来只有一件」就硬做成一件。**
 
 ### 显式引用为什么豁免
 
 给了 `5649` 就是用户已经指认了目标——**判据 C 由用户的输入直接满足**，无需重新枚举。
-但 D 仍然要做：开工前用 `gh` 核对它当前的 state、label、是否已有 PR 在推进
+但 D 仍然要做：开工前用 `bun scripts/gh-rest/gh.ts issue view <N> --repo <repo_slug> --json state,labels` 与 `bun scripts/gh-rest/gh.ts pr list --repo <repo_slug> --json number,body,headRefName` 核对它当前的 state、label、是否已有 PR 在推进
 （有 `agent:processing` 或已关联 PR 时，先说出来，不要撞车）。
 
 ### 2b. 是 epic？
@@ -60,9 +60,9 @@
 
 ```bash
 # ① 自身带 epic 标签，或带指向**自己**的 epic:<N>（N == 自己的编号）
-gh issue view <N> -R <repo_slug> --json labels --jq '.labels|map(.name)|join(",")'
+bun scripts/gh-rest/gh.ts issue view <N> --repo <repo_slug> --json labels --jq '.labels|map(.name)|join(",")'
 # ② 有成员挂在它下面
-gh issue list -R <repo_slug> --label "epic:<N>" --limit 1 --json number
+bun scripts/gh-rest/gh.ts issue list --repo <repo_slug> --label "epic:<N>" --limit 1 --json number
 # ③ 正文是一张 ≥3 条 #编号 的清单
 ```
 
@@ -84,11 +84,11 @@ durable 记录，不只活在某个 session 的上下文里。issue 正文写清
 ```bash
 bash <agent_identity_script> --header "" --skill land > /tmp/body.md   # 身份行，脚本生成
 # …把发现写进 /tmp/body.md：现象 / 根因 / 证据 / 已知的错误修法…
-gh issue create -R <repo_slug> --title "<Conventional Commits 风格标题>" --body-file /tmp/body.md
+bun scripts/gh-rest/gh.ts issue create --repo <repo_slug> --title "<Conventional Commits 风格标题>" --body-file /tmp/body.md
 ```
 
 **开单前先查同类**：这一轮已经开过同一个形状（同文件、同症状）的单，就扩大那条，不再开新的。
 
-**开完必须复核正文长度非空**——`gh issue create` 在 body 为空时照样返回 URL 和 exit 0，
+**开完必须复核正文长度非空**——`bun scripts/gh-rest/gh.ts issue create` 在 body 为空时照样返回 URL 和 exit 0，
 「开成功了」和「开出了一个空壳」在终端上同色。
 **用 `--body-file`，不要用 `--body @path`**（后者会把路径本身当正文发出去，且被 hook 硬 deny）。

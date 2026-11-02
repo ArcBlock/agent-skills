@@ -68,12 +68,12 @@ add work-type labels or post triage comments on epic-managed issues.
 `idea:`/提案语气 → `idea`;带 spec/验收标准 → `feature`;报错/复现步骤 → `bug`),
 **先补上对应 label**(可逆 triage,自动做——这样它下轮起进入正常 label 扫描,且
 Step 3 的分派行有了正确的 work-type),再并入本轮候选集走 Step 2/3。**判不出类型
-的也不静默跳过**:挂 `needs-human-confirm` + 留一条 triage comment 列出你的猜测让
-人一键确认——静默跳过 = 这条 issue 对自动化永久不可见,这正是本通道要消灭的状态。
+的也不静默跳过**:默认挂 `research` + 留一条 triage comment 列出你的猜测(下一轮按
+research 处理;分诊是 agent 自己的事,不是 R2,不挂 `needs-human-confirm`)——静默跳过 = 这条 issue 对自动化永久不可见,这正是本通道要消灭的状态。
 
 **Then drop the reserved/locked ones (并发协调,见 [`issue-review` ★并发锁](../../issue-review/SKILL.md)):**
 
-- **`agent:hold`** — 人类保留 = **终态冻结,不是处理冻结**("没我反馈别做不可逆动作",不是"别理它")。hold 期间**绝不 close / 绝不代表它做终态处置**,直到人摘掉 label;但**人类新评论照常进 Step 2 候选**——人专门在 hold 的条目上说话,恰是最高优先级输入,必须读并响应(回 comment / 按人类明确要求干活)。无人类新输入的 hold 条目才跳过。可执行的拦截是 hook `deny-guarded-issue-close.ts`（#5426）；散文不是检查。
+- **`agent:hold`** — 人类保留 = **终态冻结,不是处理冻结**("没我反馈别做不可逆动作",不是"别理它")。hold 期间**绝不 close / 绝不代表它做终态处置**,直到人摘掉 label;但**人类新评论照常进 Step 2 候选**——人专门在 hold 的条目上说话,恰是最高优先级输入,必须读并响应(回 comment / 按人类明确要求干活)。无人类新输入的 hold 条目才跳过。原来的 hook `deny-guarded-issue-close.ts`（#5426）已随 #7729 删除，现在没有机械拦截，只靠本条纪律。
 - **`agent:processing`(新鲜)** — 正被另一个 run 处理。每候选读它有没有这个 label;有就查锁龄(见下),**TTL 30min 内 → SKIP**(别人在做),**过期 → 不跳**(上一个 runner 崩了,Step 3 会重新 acquire 抢锁)。锁龄取该 label 最后一次 `labeled` 事件时间:
   ```bash
   gh api --paginate repos/{owner}/{repo}/issues/<N>/timeline \

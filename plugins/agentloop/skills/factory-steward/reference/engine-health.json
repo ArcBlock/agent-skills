@@ -1,0 +1,4 @@
+{
+  "rule": "engine-unparsable-streak",
+  "disableAfter": 3
+}

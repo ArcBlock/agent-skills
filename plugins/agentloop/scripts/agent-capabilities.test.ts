@@ -7,7 +7,7 @@
  * is the gap, not a separate "gap" tag.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -293,3 +293,57 @@ function identityFromScriptWithArgs(script: string, args: string[]): string {
   expect(result.exitCode).toBe(0);
   return result.stdout.toString().trim();
 }
+
+describe("native-ios probe needs an Apple SDK, not just a swift compiler", () => {
+  /** fake `swift` (works) and `xcrun` (exit code given) ahead of the real PATH */
+  function fakeSwiftXcrun(xcrunExit: number): NodeJS.ProcessEnv {
+    const dir = mkdtempSync(join(tmpdir(), "caps-swift-"));
+    tmpDirs.push(dir);
+    for (const [name, code] of [
+      ["swift", 0],
+      ["xcrun", xcrunExit],
+    ] as const) {
+      writeFileSync(join(dir, name), `#!/usr/bin/env bash\nexit ${code}\n`);
+      chmodSync(join(dir, name), 0o755);
+    }
+    return { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` };
+  }
+
+  test("swift on Linux (no iOS SDK via xcrun) is not native-ios", () => {
+    expect(runCaps(fakeSwiftXcrun(1)).tags).not.toContain("native-ios");
+  });
+
+  test("swift plus an iOS simulator SDK is native-ios (accept path)", () => {
+    expect(runCaps(fakeSwiftXcrun(0)).tags).toContain("native-ios");
+  });
+});
+
+describe("native-android probe needs an installed platform and Java 17+", () => {
+  /** an ANDROID_HOME (with or without platforms/android-34) and a fake `java` reporting `version` */
+  function androidEnv(withPlatform: boolean, javaVersion: string): NodeJS.ProcessEnv {
+    const home = mkdtempSync(join(tmpdir(), "caps-sdk-"));
+    const bin = mkdtempSync(join(tmpdir(), "caps-java-"));
+    tmpDirs.push(home, bin);
+    if (withPlatform) mkdirSync(join(home, "platforms", "android-34"), { recursive: true });
+    writeFileSync(
+      join(bin, "java"),
+      `#!/usr/bin/env bash\necho 'openjdk version "${javaVersion}" 2024-01-16' >&2\n`,
+    );
+    chmodSync(join(bin, "java"), 0o755);
+    return { ...process.env, ANDROID_HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}` };
+  }
+
+  test("an SDK dir with no platform installed is not native-android", () => {
+    expect(runCaps(androidEnv(false, "21.0.2")).tags).not.toContain("native-android");
+  });
+
+  test("Java older than 17 is not native-android", () => {
+    expect(runCaps(androidEnv(true, "11.0.20")).tags).not.toContain("native-android");
+    expect(runCaps(androidEnv(true, "1.8.0_392")).tags).not.toContain("native-android");
+  });
+
+  test("a platform plus Java 17+ is native-android (accept path)", () => {
+    expect(runCaps(androidEnv(true, "17.0.9")).tags).toContain("native-android");
+    expect(runCaps(androidEnv(true, "21.0.2")).tags).toContain("native-android");
+  });
+});

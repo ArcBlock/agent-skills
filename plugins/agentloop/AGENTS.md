@@ -140,3 +140,12 @@ skills 已从旧 `.claude/skills/**` 迁到本插件，但 main 仍可能改**�
 消费仓库根 AGENTS.md 的「所有 I/O 走 AFS」（AFS-Only I/O）是给**运行时 / provider 代码**的。本插件是**开发期工具**
 （shell 出 `gh`/`git`/`bun`、读写本地 checkout），不是 AFS provider，直接用 `Bun.spawn` / `node:fs`
 是对的，别硬套 AFS 抽象。
+
+## 写 skill 前先看违规
+
+给 `skills/*/SKILL.md` 加铁律或改门禁前，先找一条真实违规（历史 run transcript / PR 事故，或跑一次不带新规则的 subagent 基线），记下模型当时拿什么话替自己开脱。
+
+1. **先有具体失败再加规则**：没有真实违规案例或 subagent 基线复现，不凭空往 `SKILL.md` 塞「注意 / 务必」——每多一行都在挤同文件的其它硬规则。
+2. **直接封死借口原文**：新规则点名堵住模型实际用过的合理化借口（如「只是小改」「先过类型检查」「顺手把整文件 cat 进来」），并在 [`lib/skill-rigor.golden.test.ts`](./lib/skill-rigor.golden.test.ts) 加正反断言。
+3. **`description` 只写触发条件**：frontmatter 的 `description:` 只写什么时候调这个 skill（触发词与输入形态），**不**把步骤摘要写进 `description`（模型看到摘要就会跳过读 `SKILL.md` 正文）。
+4. **不在循环里无上限读未知大小文件**：skill 或 prompt 让 subagent 遍历文件/日志时，禁止在循环里裸 `cat` / 全量 `Read` 未知大小文件；必须先按字节或行数设上限（如 `head -c` / `sed -n '1,120p'` / `wc -c`），防止单次读爆上下文窗口。

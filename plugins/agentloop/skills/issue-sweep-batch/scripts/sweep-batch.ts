@@ -67,6 +67,7 @@ import {
   type PathSurface,
   pathSurface,
 } from "./lib";
+import { humanBlockOf, NHC_LABEL } from "./nhc-admission";
 import {
   capabilitiesOf,
   createSweepSource,
@@ -204,7 +205,11 @@ function makeSource(): { src: WorkItemSource; label: string } {
 
 /* ===== 候选集 ===== */
 
-const HUMAN_BLOCKED = ["needs-human-confirm", "needs-decision", "agent:hold"];
+// nhc 审计 R-5 放大器：needs-human-confirm 不再永久排除——只有首行写明 R2 类别、且不超过 7 天
+// 的标签才挡住；失效的标签照常进候选，并记一笔交评判团 / portfolio 复判（nhc-admission.ts）。
+// needs-decision / agent:hold 不变。
+const NOW = new Date();
+const nhcStale: string[] = [];
 
 const FACTORY_TREE =
   /^(\.claude\/|scripts\/|tools\/|providers\/runtime\/code-agents\/|blocklets\/code-agents)/;
@@ -243,10 +248,22 @@ for (const i of all) {
     rejected[`类型不在 --types（${t}）`] = [...(rejected[`类型不在 --types（${t}）`] ?? []), i.id];
     continue;
   }
-  if (HUMAN_BLOCKED.some((x) => L.has(x))) {
-    rejected["卡在人身上"].push(i.id);
+  const block = await humanBlockOf(
+    i.labels,
+    async () => {
+      if (!src.labelEvidence) throw new Error("该源不提供贴标证据");
+      return src.labelEvidence(i.id, NHC_LABEL);
+    },
+    NOW,
+  );
+  if (block.blocked) {
+    const bucket = block.reason.startsWith(`${NHC_LABEL} 未能核验`)
+      ? `${NHC_LABEL} 未能核验`
+      : "卡在人身上";
+    rejected[bucket] = [...(rejected[bucket] ?? []), i.id];
     continue;
   }
+  if (block.note) nhcStale.push(i.id);
   if (MODE === "new" && isInEpic(i.id, i.labels, epicMembers, MEMBERSHIP)) {
     rejected["已在 epic（--mode new 跳过）"] = [
       ...(rejected["已在 epic（--mode new 跳过）"] ?? []),
@@ -376,6 +393,11 @@ console.log(`  ledger ${existsSync(LEDGER) ? `${ledger.length} 条` : "（不存
 console.log(`\n${B("排除")}`);
 for (const [k, v] of Object.entries(rejected))
   if (v.length) console.log(`  ${k.padEnd(16)} ${v.length}`);
+if (nhcStale.length) {
+  console.log(
+    `  ${NHC_LABEL} 已失效、照常入选 ${nhcStale.length}（交评判团 / portfolio 复判）：${nhcStale.map((x) => `#${x}`).join(" ")}`,
+  );
+}
 
 // scope 已在候选集上生效，这里不再重复过滤。
 const measured = selected.filter((i) => surf.get(i.id)!.state === "measured");

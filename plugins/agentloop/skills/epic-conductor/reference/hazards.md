@@ -21,12 +21,15 @@ order in the PR body.
 
 ## Out-of-scope findings
 
-Open a follow-up issue. Never fold it in silently, never drop it.
+Inside the member's own scope → fix it here, or `Refs` (not `Fixes`) and leave the member's issue
+open with the remainder. Outside the scope → one issue only for P0–P2 with a concrete failure and no
+open duplicate (≤1 per PR); P3 → **Noted, not filed** in the PR body. Never fold it in silently,
+never drop it. See [issue closure](../../../../../../docs/architecture/issue-closure-discipline.md).
 
 ## A red that is not this PR's
 
-Root-cause it: bisect to the smallest red set and fix that, or open an issue with the evidence and
-link it from the PR. "Flaky", "load" or "env" is not a cause; never re-run until green and never
+Root-cause it: bisect to the smallest red set and fix that, or add the evidence to the open issue
+for that test (a new issue only when none exists) and link it from the PR. "Flaky", "load" or "env" is not a cause; never re-run until green and never
 raise a timeout to make it green.
 
 ## Bot review silence

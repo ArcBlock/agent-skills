@@ -45,9 +45,11 @@ a comment on the source issue** and the run paused there. If the review loop hit
 an unrecoverable point — a genuine design fork, an `AskUserQuestion`-worthy
 ambiguity, a needed architecture change, or an AFS-principle conflict (see the
 ESCALATION list under "Step 5: Fix Issues") — do **not** sit waiting for an
-inline answer. Post a clear, self-contained question comment on the issue (state
-the options, your recommendation, and what's blocked), then stop that work item.
-The human answers asynchronously on the issue; the next sweep picks it up. Only
+inline answer. A technical fork goes to the review jury (two clean-context reviewers
+of other engines, tallied; [r2-admission.md](../../reference/r2-admission.md)) and the
+work continues on its result. Only an R2 decision is posted as a self-contained
+question comment (first line after the identity line `R2: <category>`, then options,
+recommendation, what's blocked) for a person; stop that item until it is answered. Only
 fall back to inline `AskUserQuestion` when a human is demonstrably present and
 interacting in this session.
 
@@ -100,7 +102,7 @@ For each round from 1 to maxRounds, launch a **clean-context, read-only** subage
 **Hard requirements (a miss is NOT APPROVED regardless of score):**
 
 - **Implementation plan:** every phase covers 6 test categories (happy path, bad input, security, data loss, data damage, data leak). Missing any category is a must-fix; missing 2 or more → NOT APPROVED. Every phase has a concrete `### E2E Verification (mandatory)` section (named session, real `afs_*` calls, expected JSON, one negative case) — missing or "tests passed" with no call → NOT APPROVED.
-- **Implementation plan and design/architecture:** every current-state claim is grounded at `path:line` (**code wins** over planning docs; mark the doc stale) and every number is measured (command + output) or explicitly an unverified estimate. An ungrounded claim or an invented number → NOT APPROVED.
+- **Implementation plan and design/architecture:** every current-state claim is grounded at `path:line` (**code wins** over planning docs; mark the doc stale) and every number is measured (command + output) or explicitly an unverified estimate. An ungrounded claim or an invented number → NOT APPROVED. If `<lesson_ledger_dir>` in `.claude/repo-profile.md` is not `none` and `<lesson_ledger_dir>/absorbed.yaml` exists, scan its `status: absorbed` / `promoted` entries matching the problem area and read each matching `rule_home` (`candidates/pending/` is not grounding; if an entry conflicts with shipped code, shipped code wins — flag `ledger stale: <id>`).
 - **Design/architecture:** an AFS-Only I/O, abstraction-reuse, or provider-boundary violation → CRITICAL → NOT APPROVED. Test coverage is a recommendation, not a requirement.
 - **Post-mortem:** a factual error (commit, path, signature, behavior) → NOT APPROVED. AFS compliance is informational.
 
@@ -129,7 +131,7 @@ Fix documentation accuracy and completeness only. Do **not** change architecture
 - The fix would rewrite a section's design, not a sentence.
 - The design seems to require bypassing AFS. Ask — there is almost always another way.
 
-**Do not make the architecture decision yourself.** How you ask depends on mode. Interactive: `AskUserQuestion`. Issue-native: do **not** block in-session — post the question as an issue comment (options, your recommendation, what is blocked) and stop that item. See **Autonomous escalation** above.
+**Do not make the architecture decision alone.** Interactive: `AskUserQuestion`. Issue-native: do **not** block in-session — the review jury decides a technical fork; only an R2 decision is posted for a person. See **Autonomous escalation** above.
 
 After the fix, commit, so the next round's subagent sees the files.
 
@@ -142,6 +144,7 @@ After the fix, commit, so the next round's subagent sees the files.
 **Type:** {document type}
 **Rounds:** {roundsUsed} / {maxRounds}
 **Score progression:** {round1}% → … → {final}%
+**Lessons read:** <id → rule_home, or none>
 **Status:** APPROVED ✓ / NOT APPROVED (best: {score}%)
 ```
 
