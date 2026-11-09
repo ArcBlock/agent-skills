@@ -31,13 +31,13 @@ property) against the code. A crashed or silent reviewer is uncertain, never a p
 | verdict | meaning |
 |---|---|
 | `MERGE` | claims verified, tests of the changed package pass, no open P0–P2, no unresolved conflict |
-| `COMMENT` | mergeable with notes (P3s, a missing edge test), or the keeper of a duplicate pair |
+| `COMMENT` | mergeable with notes (a missing edge test), or the keeper of a duplicate pair |
 | `SUPERSEDE` | the weaker side of a duplicate / contradicting pair → points at the keeper |
 | `BLOCK` | a real defect (P0–P2), failing tests caused by this PR, or an unresolved conflict |
 | `CLOSE` | stale, already superseded by merged work, no longer needed |
 
 Severity: **P0–P2 block** and are fixed in one batch by the author; **P3 → noted, not filed**
-(`COMMENT`, listed for the PR body, never an issue, never a block). Only findings in the PR's own
+(`MERGE` + notes, listed for the PR body, never an issue, never a block). Only findings in the PR's own
 diff (`merge-base..head`) count ([issue closure](../../../../../docs/architecture/issue-closure-discipline.md)).
 
 ## Steps
@@ -88,17 +88,19 @@ severity, the verdict. Escalate to a person only for security, breaking change, 
 architecture A/B, or an explicit human objection — and first ask whether a safe default exists (if
 so, take it). An escalation carries the human-confirm block: [reference/escalation.md](reference/escalation.md).
 
-**6. Post (`--post`).** One PR comment. Line 1 is the marker `<!-- pr-review-verdict -->` (status
-readers find the review by it), then the identity line, `HEAD <40-char sha>`, `Verdict: <VERDICT>`
-(`MERGE (held)` while `agent:hold` is on), then the evidence:
+**6. Post (`--post`).** A **new** comment per round, never a PATCH (an edited verdict is ignored),
+rendered by `lib/verdict.ts`: `<!-- pr-review-verdict -->`, identity, canonical `v1`
+line, `HEAD <sha>`, `Verdict: <VERDICT>`, evidence ([detail](reference/verdict-comment.md)):
 
 ```bash
 hdr=$(bash <agent_identity_script> --header "PR Review" --skill pr-review)
-bun scripts/gh-rest/gh.ts pr comment <n> --body-file draft.md
+bun <plugin_root>/lib/verdict.ts --head <headRefOid> --verdict <V> --identity "$hdr" --body-file ev.md >d.md
+bun scripts/gh-rest/gh.ts pr comment <n> --body-file d.md
 ```
 
-Review the same head once; a new head or a new human comment is a new review (of the delta when the
-earlier review still holds).
+`--lens security` for the security reviewer (own comment); `--held` under `agent:hold`. Nothing
+after a MERGE: a later comment stales it. One review per head; a new head or human comment is a
+new review (delta-only if the last still holds).
 
 ## Fix now
 

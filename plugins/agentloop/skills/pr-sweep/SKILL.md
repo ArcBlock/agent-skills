@@ -47,7 +47,9 @@ In this order, from this one call:
 
 A PR **needs review** when: no pr-review comment yet; its head sha differs from the `HEAD <sha>`
 of the last `<!-- pr-review-verdict -->` comment; a human commented (conversation, inline, or review) after the last
-agent comment; a bot left new inline findings; it went Draft → Ready. An agent comment is one with
+agent comment; a bot left new inline findings; it went Draft → Ready; a writer's non-bot comment
+(agent too) is at or after the latest canonical MERGE of any relied-on lens at the head ([per
+lens](../pr-review/reference/verdict-comment.md)). An agent comment has
 a Bot author or the identity header of `skill:pr-review` / `skill:pr-sweep`. Nothing new → zero
 actions. Nothing actionable at all → exit early.
 
@@ -69,7 +71,8 @@ peers.
 
 Each actionable PR goes to [`pr-review`](../pr-review/SKILL.md) in a clean context with its peer
 list (`--post` unless `--dry-run`). pr-review runs the changed package's tests on the PR head. One
-pr-review comment per head; never re-post an unchanged conclusion.
+pr-review comment per head, always new, never edited; never re-post an unchanged conclusion, except
+a stale MERGE: review the newer comment; if it still holds, re-post the MERGE of each stale lens.
 
 ## Step 4 — Dedup-close
 
@@ -78,7 +81,7 @@ source > tested > newer base > first). A second, independent fresh-context agent
 returns `{keep, reason}`; they disagree → close nothing, the review jury picks. Contradicting
 claims → check the authoritative source first. Close each twin with an identity-headed comment
 naming the keeper (`gh pr close <twin> --comment "superseded by #<keeper>"`) and note the closed
-twins on the keeper. Any PR with `agent:hold` takes no part. Unsure → keep both, `COMMENT`.
+twins on the keeper before the keeper's verdict (else re-post it). Any PR with `agent:hold` takes no part. Unsure → keep both, `COMMENT`.
 
 ## Step 5 — Merge (`--merge` only)
 
@@ -89,10 +92,10 @@ All of these, re-checked right before each merge:
 - no human reviewer's latest `CHANGES_REQUESTED` that their own `APPROVED` has not superseded;
 - not a factory-run PR: no ready-to-merge checklist from a run, no Change Set produced by a run.
   Those are the host merger's (#8182), never the sweep's. No `needs-human-confirm` with an `R2:` line.
-  Mechanically: `merge-verified-pr.sh` runs the factory merge check, which refuses a factory PR
-  that is not approved and path-compliant. The sweep never passes `--not-factory`, so on a runner
-  with no factory daemon (cloud, another machine) every merge refuses there: the sweep reports
-  "needs a runner with the factory" and leaves the PR, it does not merge around the check;
+  `merge-verified-pr.sh` runs the factory merge check (refuses an unapproved or path-noncompliant
+  factory PR). The sweep never passes `--not-factory`, so on a runner with no factory daemon every
+  merge refuses there: the sweep reports
+  "needs a runner with the factory" in its run summary (no PR comment) and leaves the PR unmerged;
 - no `agent:hold`, no `epic-managed`, `mergeable == MERGEABLE` (rebase only on `CONFLICTING`), no
   unresolved same-issue or same-file conflict;
 - risk tier, recomputed now: 🟢 docs / tests / release PRs and 🟡 tested fixes, non-breaking
@@ -107,14 +110,14 @@ bash "<plugin_root>/scripts/merge-verified-pr.sh" <n> --method squash
 ```
 
 Small fixes are made on the PR branch by the sweep itself (then its tests again), never handed to a
-human as an action item. A red is root-caused, never re-run until green.
+human. A red is root-caused, never re-run until green.
 
 ## Limits and idempotence
 
-~10–14 reviews per round; GitHub content creation ≤500/h, ≤80/min; on a secondary rate limit back
-off (≤3 tries), then mark `RATE-LIMITED` and leave it to the next run. Labels plus one comment per
-head make a rerun safe. Duplicate PRs are prevented at the source by issue-sweep's deterministic
-branch `claude/issue-<N>` and its claim check; a new cluster from a non-deterministic branch name is
+~10–14 reviews a round; GitHub content creation ≤500/h, ≤80/min; on a secondary rate limit back
+off (≤3 tries), then mark `RATE-LIMITED` and leave it to the next run. Labels plus the verdict rules
+make a rerun safe. Duplicate PRs are prevented at the source by issue-sweep's deterministic
+branch `claude/issue-<N>` and its claim check; a cluster from another branch name is
 noted in the summary.
 
 ## Output

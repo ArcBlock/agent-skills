@@ -32,15 +32,11 @@ describe("parseR2Line", () => {
   test("ACCEPT: every category of the closed list parses", () => {
     expect(R2_CATEGORIES).toEqual([
       "breaking",
-      "release",
       "external-commitment",
       "market",
       "permission",
       "spend",
-      "deploy-prod",
       "data-delete",
-      "r2-list",
-      "merge-criteria",
     ]);
     for (const c of R2_CATEGORIES) expect(parseR2Line(`${ID}\nR2: ${c}`)?.category).toBe(c);
   });
@@ -64,11 +60,11 @@ describe("judgeNhcLabel", () => {
     const j = judgeNhcLabel(
       {
         labeledAt: hoursAgo(2),
-        comments: [{ body: `${ID}\nR2: release — 发布节奏`, createdAt: hoursAgo(2.01) }],
+        comments: [{ body: `${ID}\nR2: spend — 花钱`, createdAt: hoursAgo(2.01) }],
       },
       NOW,
     );
-    expect(j).toEqual({ valid: true, category: "release" });
+    expect(j).toEqual({ valid: true, category: "spend" });
   });
 
   test("REJECT: older than 7 days, even with the R2 line → stale (re-judged, never excluded forever)", () => {
@@ -216,10 +212,20 @@ describe("humanBlockOf — the candidate gate of sweep-batch", () => {
 });
 
 describe("R2 categories added by PR-L review", () => {
-  test("ACCEPT: deploy-prod and data-delete parse; REJECT TWIN: deploy (not prod) does not", () => {
-    expect(parseR2Line(`${ID}\nR2: deploy-prod — 上生产`)?.category).toBe("deploy-prod");
+  test("ACCEPT: data-delete parses; REJECT TWIN: deploy does not", () => {
     expect(parseR2Line("R2: data-delete")?.category).toBe("data-delete");
     expect(parseR2Line("R2: deploy")).toBeUndefined();
+  });
+});
+
+describe("agent-factory#24 — four categories left the list (review and the jury, not a person)", () => {
+  for (const gone of ["release", "deploy-prod", "r2-list", "merge-criteria"]) {
+    test(`REJECT: \`R2: ${gone}\` is no longer a person's question → none (re-judged, §5)`, () => {
+      expect(parseR2Line(`${ID}\nR2: ${gone} — 等人`)).toBeUndefined();
+    });
+  }
+  test("ACCEPT TWIN: permission (widening) is still a person's", () => {
+    expect(parseR2Line(`${ID}\nR2: permission — 放宽`)?.category).toBe("permission");
   });
 });
 
@@ -244,12 +250,12 @@ describe("panel P3 — any R2 comment in the window counts, preferring one at/af
         labeledAt: hoursAgo(2),
         comments: [
           { body: "R2: market", createdAt: hoursAgo(2.01) },
-          { body: "R2: release", createdAt: hoursAgo(1.9) },
+          { body: "R2: spend", createdAt: hoursAgo(1.9) },
         ],
       },
       NOW,
     );
-    expect(j).toEqual({ valid: true, category: "release" });
+    expect(j).toEqual({ valid: true, category: "spend" });
   });
 
   test("REJECT TWIN: an R2 comment outside the window still does not count", () => {

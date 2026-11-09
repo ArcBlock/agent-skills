@@ -8,9 +8,9 @@ import { R2_CATEGORIES, R2_RULE_FILE, r2CategoriesFromTable } from "./r2-categor
 const rule = readFileSync(join(import.meta.dir, "..", R2_RULE_FILE), "utf8");
 
 describe("R2 categories — one source, pinned to the rule file's table", () => {
-  test("the table is parsed (positive control: at least 10 tokens, the header row excluded)", () => {
+  test("the table is parsed (positive control: at least 6 tokens, the header row excluded)", () => {
     const table = r2CategoriesFromTable(rule);
-    expect(table.length).toBeGreaterThanOrEqual(10);
+    expect(table.length).toBeGreaterThanOrEqual(6);
     expect(table).not.toContain("R2: <category>");
   });
 

@@ -98,6 +98,13 @@ export const RIGOR: Record<string, Rule[]> = {
     { id: "findings-in-own-diff", all: [/`merge-base\.\.head`/] },
     { id: "crashed-reviewer-not-a-pass", all: [/never a pass/] },
     { id: "verdict-marker-first-line", all: [/`<!-- pr-review-verdict -->`/, /`Verdict: /] },
+    // agent-factory#157: the host merger reads only a never-edited canonical v1 MERGE, and any
+    // later writer comment stales it.
+    {
+      id: "verdict-new-comment-not-patch",
+      all: [/new\*\* comment per round, never a PATCH/, /lib\/verdict\.ts/],
+    },
+    { id: "nothing-after-merge", all: [/after a MERGE: a later comment stales it/] },
   ],
   "pr-sweep": [
     { id: "hold-never-merges", all: [/`agent:hold` never merges/] },
@@ -105,6 +112,20 @@ export const RIGOR: Record<string, Rule[]> = {
     { id: "red-tier-never-auto-merge", all: [/never auto-merge/] },
     { id: "change-request-is-not-approval", all: [/change request is not an approval/] },
     { id: "factory-pr-never-auto-merged", all: [/not a factory-run PR/, /host merger/] },
+    // agent-factory#157: a writer comment after the canonical MERGE stales it; the sweep must
+    // notice and re-post, or the MERGE is dead forever, silently.
+    // #174 follow-up: the merger measures staleness from the OLDEST relied-on lens's MERGE
+    // (judgeAdhocVerdicts `since = min(...)`), so the sweep must check each lens.
+    {
+      id: "stale-merge-is-needs-review-per-lens",
+      all: [/at or after the latest canonical MERGE of any relied-on lens/],
+    },
+    { id: "stale-merge-reposted-per-lens", all: [/re-post the MERGE of each stale lens/] },
+    { id: "keeper-notes-before-verdict", all: [/before the keeper's verdict/] },
+    {
+      id: "no-factory-runner-to-summary",
+      all: [/needs a runner with the factory"[^.]*run summary/],
+    },
   ],
   "issue-review": [
     { id: "lock-acquire-release", all: [/`agent:processing`/, /acquire/, /release/] },
@@ -180,6 +201,25 @@ describe("rigor golden: executable rules stay in SKILL.md (#7105, #7729)", () =>
         links: true,
       });
     }
+  });
+
+  test("REJECT (#174 follow-up): pr-sweep no longer measures staleness from the LAST MERGE only", () => {
+    // security MERGE -> writer note -> correctness MERGE: nothing is newer than the last MERGE,
+    // yet the merger reads verdict-stale from the security MERGE. The last-MERGE wording misses it.
+    expect(skill("pr-sweep")).not.toMatch(/newer than the last canonical MERGE/);
+    const ref = readFileSync(join(SKILLS, "pr-review", "reference", "verdict-comment.md"), "utf8");
+    expect(ref).toMatch(/security MERGE → writer note → correctness MERGE/);
+    expect(ref).not.toMatch(/newer\s+than the last canonical MERGE/);
+  });
+
+  test("pr-review verdict reference (agent-factory#157): Step 6 links it, and it carries the lens and liveness rules", () => {
+    expect(skill("pr-review")).toMatch(/\(reference\/verdict-comment\.md\)/);
+    const ref = readFileSync(join(SKILLS, "pr-review", "reference", "verdict-comment.md"), "utf8");
+    // a correctness MERGE never goes up over a non-MERGE security verdict on the same head
+    expect(ref).toMatch(/non-MERGE `lens=security` verdict at the same head/);
+    expect(ref).toMatch(/do not post a correctness MERGE/);
+    // P3-only findings are a MERGE with the notes in its evidence (only MERGE arms the merger)
+    expect(ref).toMatch(/P3-only[^\n]*`MERGE`/);
   });
 
   test("REJECT: deleting the lines that state a rule from the real SKILL.md is seen (mutation)", () => {

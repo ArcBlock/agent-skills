@@ -338,10 +338,77 @@ describe("postComment", () => {
       expect(res).toEqual({ ok: true, out: "created" });
       expect(cmds.some((c) => c.includes("-X POST"))).toBe(true);
       expect(cmds.some((c) => c.includes("-X PATCH"))).toBe(false);
-      const jqCmd = cmds.find((c) => c.includes("--jq"));
-      expect(jqCmd).toContain('split("\\n")');
-      expect(jqCmd).toContain(`test("^${VERDICT_MARKER_PREFIX}")`);
-      expect(jqCmd).not.toContain("contains(");
+      // Verdicts are append-only (agent-factory#157): no upsert lookup is made at
+      // all, so no unanchored contains() can pick a target either.
+      expect(cmds.some((c) => c.includes("--jq"))).toBe(false);
+    });
+
+    /**
+     * agent-factory#157: the host merger ignores a canonical MERGE whose comment was
+     * ever edited (createdAt != updatedAt). A verdict upsert that PATCHes the last
+     * verdict comment therefore silently disarms the merge. Verdicts are append-only:
+     * even when the lookup WOULD find a comment, nothing is PATCHed.
+     */
+    it("verdicts are append-only: postOnce with VERDICT_MARKER_PREFIX POSTs even when a prior verdict exists", () => {
+      const cmds: string[] = [];
+      const res = postOnce(
+        "157",
+        realVerdict,
+        (cmd) => {
+          cmds.push(cmd);
+          if (cmd.includes("--jq")) return ok("5628844029");
+          return ok("created");
+        },
+        VERDICT_MARKER_PREFIX,
+      );
+      expect(res).toEqual({ ok: true, out: "created" });
+      expect(cmds.some((c) => c.includes("-X POST"))).toBe(true);
+      expect(cmds.some((c) => c.includes("-X PATCH"))).toBe(false);
+    });
+
+    it("append-only also holds for the full legacy marker and any prefix that would match a verdict's first line", () => {
+      for (const prefix of ["<!-- pr-review-verdict -->", "<!-- pr-review", "<!--"]) {
+        const cmds: string[] = [];
+        postOnce(
+          "157",
+          realVerdict,
+          (cmd) => {
+            cmds.push(cmd);
+            return cmd.includes("--jq") ? ok("42") : ok("created");
+          },
+          prefix,
+        );
+        expect(cmds.some((c) => c.includes("-X PATCH"))).toBe(false);
+      }
+    });
+
+    it("append-only also holds when the body itself carries a canonical v1 line, whatever the prefix", () => {
+      const cmds: string[] = [];
+      postOnce(
+        "157",
+        `${MARKER} sha=x result=PASS -->\n<!-- pr-review-verdict v1 head=${"a".repeat(40)} lens=correctness verdict=MERGE -->`,
+        (cmd) => {
+          cmds.push(cmd);
+          return cmd.includes("--jq") ? ok("42") : ok("created");
+        },
+        MARKER_PREFIX,
+      );
+      expect(cmds.some((c) => c.includes("-X PATCH"))).toBe(false);
+    });
+
+    it("accept twin: the verification sticky still PATCHes in place (append-only is scoped to verdicts)", () => {
+      const cmds: string[] = [];
+      postOnce(
+        "157",
+        "<!-- verification-report sha=abc result=PASS -->\nreport",
+        (cmd) => {
+          cmds.push(cmd);
+          return cmd.includes("--jq") ? ok("42") : ok("patched");
+        },
+        MARKER_PREFIX,
+      );
+      expect(cmds.some((c) => c.includes("-X PATCH") && c.includes("comments/42"))).toBe(true);
+      expect(cmds.some((c) => c.includes("-X POST"))).toBe(false);
     });
   });
 

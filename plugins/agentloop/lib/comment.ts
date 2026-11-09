@@ -111,7 +111,10 @@ export const MARKER_PREFIX = "<!-- verification-report";
  *
  * Skills must NOT look this up with unanchored `contains()` — that PATCHed a
  * comment that only *quoted* the marker in a table cell (aside#1514 / arc#6404).
- * Use `postOnce(pr, body, runner, VERDICT_MARKER_PREFIX)`.
+ *
+ * Verdicts are append-only (agent-factory#157): the host merger ignores a
+ * canonical MERGE whose comment was ever edited, so `postOnce` never PATCHes a
+ * verdict — every round is a NEW comment. Render the body with `lib/verdict.ts`.
  */
 export const VERDICT_MARKER_PREFIX = "<!-- pr-review-verdict";
 export const VERDICT_MARKER = "<!-- pr-review-verdict -->";
@@ -468,6 +471,25 @@ function isCommentFilterBudgetError(out: string): boolean {
 }
 
 /**
+ * A verdict comment must never be PATCHed (agent-factory#157: an edited comment's
+ * canonical MERGE is ignored by the host merger). Append-only when the body
+ * carries a canonical v1 line, or when `markerPrefix` could select a verdict
+ * comment's first line (`<!-- pr-review-verdict -->`).
+ */
+function isAppendOnly(body: string, markerPrefix: string): boolean {
+  return (
+    decodeHtmlEntities(body).includes(`${VERDICT_MARKER_PREFIX} v1 `) ||
+    VERDICT_MARKER.startsWith(markerPrefix) ||
+    markerPrefix.startsWith(VERDICT_MARKER_PREFIX)
+  );
+}
+
+const toResult = (res: { code: number; out: string }): PostCommentResult => ({
+  ok: res.code === 0,
+  out: res.out,
+});
+
+/**
  * Upsert `body` onto issue/PR number `pr` as a marker-keyed sticky comment (works
  * for either — GitHub's REST API treats issue and PR comments identically). Matches
  * on `markerPrefix` (not the full dynamic marker) so a comment written with a prior
@@ -493,6 +515,15 @@ export function postOnce(
 ): PostCommentResult {
   const payload = JSON.stringify({ body });
   const ghRepoEnv = resolveGhRepoEnv(runner);
+  if (isAppendOnly(body, markerPrefix)) {
+    return toResult(
+      runner(
+        `gh api -X POST "repos/{owner}/{repo}/issues/${pr}/comments" --input -`,
+        ghRepoEnv,
+        payload,
+      ),
+    );
+  }
   // Decode HTML entities on the extracted first line before testing — an MCP-posted
   // sticky comment (marker escaped to `&lt;!-- ...`) must still be found, or the next
   // `gh`-posted run can't PATCH it and spams a duplicate instead (#4283).
