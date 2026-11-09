@@ -796,10 +796,10 @@ describe("r2Category (the `R2: <category>` line)", () => {
   it("ACCEPT: the first line after the identity line names a category", () => {
     expect(r2Category(`${ID}\nR2: permission — 给工厂建独立 PAT\n\n选项…`)).toBe("permission");
     expect(r2Category(`${ID}\n\nR2: spend\n…`)).toBe("spend");
-    expect(r2Category(`${ID}\nR2: r2-list — 往 R2 清单加一类`)).toBe("r2-list");
+    expect(r2Category(`${ID}\nR2: permission — 放宽一条 deny`)).toBe("permission");
   });
   it("ACCEPT: a human comment (no identity line) — the first non-empty line", () => {
-    expect(r2Category("\nR2: release — 这周发不发 stable?")).toBe("release");
+    expect(r2Category("\nR2: spend — 这周买不买 GPU?")).toBe("spend");
   });
   it("REJECT: no line, a line further down, or a category outside the vocabulary", () => {
     expect(r2Category(`${ID}\nneeds-human-confirm: 需要 A-vs-B 决策。`)).toBeUndefined();

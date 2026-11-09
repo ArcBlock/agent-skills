@@ -9,17 +9,18 @@
 /** The rule file, relative to the plugin root. */
 export const R2_RULE_FILE = "reference/r2-admission.md";
 
+/**
+ * agent-factory#24 — six categories: what agents must not decide on their own.
+ * `release`, `deploy-prod`, `r2-list` and `merge-criteria` left the list: they
+ * go through review and the jury (the R2 boundary lane), announced afterwards.
+ */
 export const R2_CATEGORIES = Object.freeze([
   "breaking",
-  "release",
   "external-commitment",
   "market",
   "permission",
   "spend",
-  "deploy-prod",
   "data-delete",
-  "r2-list",
-  "merge-criteria",
 ] as const);
 export type R2Category = (typeof R2_CATEGORIES)[number];
 

@@ -206,11 +206,27 @@ describe("R2 admission: the rule file (#5500, nhc audit R-7/R-11, C-2)", () => {
     expect(rule).toMatch(/「维持 `needs-human-confirm`」不是合法结论/);
   });
 
-  test("ACCEPT: process legislation is decided by the jury; the R2 list and the merge-blocking classes stay R2", () => {
+  test("ACCEPT: process legislation is decided by the jury; the R2 list and the merge-blocking classes go through the boundary lane", () => {
     expect(rule).toMatch(/流程立法/);
     expect(rule).toMatch(/`r2-list`/);
     expect(rule).toMatch(/`merge-criteria`/);
+    expect(rule).toMatch(/boundary lane/);
     expect(rule).toMatch(/build-break \/ data-loss \/ security/);
+  });
+
+  test("ACCEPT (agent-factory#24): the hard floor is in the rule file, refused outright, never a person's", () => {
+    expect(rule).toMatch(/<!-- r2-hard-floor:begin -->[\s\S]*<!-- r2-hard-floor:end -->/);
+    for (const c of [
+      "oversight-substrate",
+      "jury-bypass",
+      "deploy-outside-channel",
+      "floor-list",
+    ]) {
+      expect(rule).toContain(`\`${c}\``);
+    }
+    expect(rule).toMatch(/不交给人/);
+    expect(rule).toMatch(/PR #N · git revert <sha>/);
+    expect(rule).toMatch(/release-check\.sh/);
   });
 
   test("ACCEPT: closing an issue or deleting a file is reversible (evidence + reopen condition)", () => {

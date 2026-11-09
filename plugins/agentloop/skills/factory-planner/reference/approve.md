@@ -27,8 +27,11 @@
 
 **流程立法不是 R2，由评判团决定（C-2，Robert 2026-10-25）。** 改 AGENTS.md、`.claude/` 下的 skill
 和 routine、`docs/guides/` 里的规则，和工厂核心一样照常派工；合并前要 correctness + security panel
-加跨引擎评判团（review jury，#9147 的机制）在同一个 head 上 approve。只有两类仍是 R2：改 R2 清单本身
-（[r2-admission.md](../../../reference/r2-admission.md) 和本表），改挡合并的三类判据。
+加跨引擎评判团（review jury，#9147 的机制）在同一个 head 上 approve。改 R2 清单本身
+（[r2-admission.md](../../../reference/r2-admission.md) 和本表）、改挡合并的三类判据，合并时也不再等人
+（agent-factory#24）：落在 R2 边界里的 PR 走 boundary lane，由宿主 merger 合并；硬底线（r2-admission.md 1.2）直接拒绝，
+不交给人。本表和下面 R5 的**决定**下限（`work-decide.ts`：部署、发布和命中 R2 边界的目标仍是 R2）这次没有改，
+planner 照旧把它们交给人决定。
 
 **级别的下限由代码算，不由 agent 填（R5）。** R5 根据提议里的操作类型和目标资源算出最低级别：
 - 操作属于部署、发布、删数据、授予凭据或权限、放宽安全策略、付费；

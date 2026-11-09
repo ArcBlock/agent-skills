@@ -18,6 +18,7 @@ engine's own reference: what it contains, how a change reaches the fleet, and ho
 SETUP.md                       # first-install path (start here to RUN it)
 lib/report.ts                  # CheckResult contract + deterministic run/render helpers (repo scripts import it)
 lib/comment.ts                 # sticky PR-comment upsert (marker-keyed, gh REST)
+lib/verdict.ts                 # pr-review verdict comment with the merger's canonical v1 line (append-only)
 lib/*.ts                       # pid liveness, strict file lock, agent-retry ledger
 lib/*.test.ts                  # unit tests
 fleet/driver.ts                # the multi-repo loop driver (checkout → setup → skill → reap)

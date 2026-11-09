@@ -48,6 +48,7 @@ Decide one verdict:
   block           — the change must not land as is (a P1 defect, or it does not do what the work asks — cite it as a P1 finding)
 Severity: P1 = must fix before merge; P2 = a concrete defect this diff introduces, fixed in this change; P3 = minor.
 Judge only this change's own diff ({{base}}...{{head}}): a finding about code outside this diff is not a finding on this change.
+Runtime parity: if the diff changes runtime behaviour (request, response, stored row, side effect) the repository runs on more than one runtime (ArcBlock/arc: Node and Cloudflare under packages/, providers/, runtimes/, see https://github.com/ArcBlock/arc/blob/main/docs/architecture/runtime-parity-discipline.md), it is a P2 finding when the PR has no runtime-parity evidence per runtime (command, pass/fail line, a test that executes the change; a Node run does not count for Cloudflare), the evidence does not exercise the change, or a one-sided capability has no `Runtime: <side>-only` line naming the missing primitive (class other).
 With only P3 findings the verdict is approve: put the P3s in the summary. A request-changes or block whose
 findings are all P3 is recorded as approve (reason "p3-only").
 Class each finding: build-break | data-loss | security | other. Only build-break, data-loss and security block
